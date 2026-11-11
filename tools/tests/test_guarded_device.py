@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tools import guarded_device as gd
@@ -40,14 +41,14 @@ if cmd[:2] == ["devices", "-l"]:
     if mode == "multi": print("List of devices attached\n" + target_serial + " device product:x\nother device product:y")
     elif mode == "wrong_serial": print("List of devices attached\nother device product:x")
     else: print("List of devices attached\n" + target_serial + " device product:x")
-elif cmd[:3] == ["shell", "getprop", "ro.product.device"]: print("d708" if mode == "phone" else ("emu64a" if mode != "bad_device" else "phone"))
-elif cmd[:3] == ["shell", "getprop", "ro.product.model"]: print("Xiaomi 17 Pro" if mode == "phone" else "sdk_gphone64_arm64")
+elif cmd[:3] == ["shell", "getprop", "ro.product.device"]: print("d708" if mode.startswith("phone") else ("emu64a" if mode != "bad_device" else "phone"))
+elif cmd[:3] == ["shell", "getprop", "ro.product.model"]: print("Xiaomi 17 Pro" if mode.startswith("phone") else "sdk_gphone64_arm64")
 elif cmd[:3] == ["shell", "getprop", "ro.serialno"]: print("d708dac7")
 elif cmd[:3] == ["shell", "getprop", "ro.kernel.qemu"]: print("1")
 elif cmd[:3] == ["emu", "avd", "name"]: print("remrss-root-rc3-isolated\nOK")
 elif cmd[:3] == ["shell", "pm", "path"]:
     package = cmd[3]
-    if mode == "query_error":
+    if mode.endswith("query_error"):
         print("Permission denied", file=sys.stderr); sys.exit(1)
     if package in state["installed"]: print("package:/data/app/" + package)
     else: sys.exit(1)  # adb preserves pm's not-found exit status and empty output
@@ -101,7 +102,7 @@ elif cmd[:3] == ["shell", "am", "instrument"]:
         state["runner_active"] = False; save()
 elif cmd[0] == "uninstall":
     package = cmd[1]
-    if mode == "fail_uninstall":
+    if mode.endswith("fail_uninstall"):
         print("Failure [DELETE_FAILED_INTERNAL_ERROR]")
     else:
         state["installed"] = [item for item in state["installed"] if item != package]
@@ -175,9 +176,13 @@ class GuardedDeviceTests(unittest.TestCase):
     def commands(self):
         return [row[4:] if row[4:5] == ["devices"] else row[6:] for row in self.invocations()]
 
-    def run_instrument(self, selector="top.zainzh.rearscreen.DeviceIsolationSmokeTest#runsOnlyOnRootDedicatedEmulatorAndDebugVariant", timeout=5, runner="androidx.test.runner.AndroidJUnitRunner"):
+    def run_instrument(self, selector="top.zainzh.rearscreen.DeviceIsolationSmokeTest#runsOnlyOnRootDedicatedEmulatorAndDebugVariant", timeout=5, runner="androidx.test.runner.AndroidJUnitRunner", allow_phone_debug_tests=False):
         return gd.run_instrument(str(self.fake), self.session, self.app, self.test,
-                                 runner, selector, str(self.aapt), timeout)
+                                 runner, selector, str(self.aapt), timeout,
+                                 allow_phone_debug_tests=allow_phone_debug_tests)
+
+    def phone_session(self):
+        return {"schema_version": 1, "server": {"host": "127.0.0.1", "port": 5039}, "serial": "d708dac7", "target": {"kind": "phone", "expected_device": "d708", "expected_model": "Xiaomi 17 Pro", "expected_serial": "d708dac7"}}
 
     def test_pm_path_absent_exit_one_is_only_absence_case(self):
         self.assertFalse(gd.package_installed(str(self.fake), self.session, "top.zainzh.rearscreen.debug"))
@@ -281,19 +286,196 @@ class GuardedDeviceTests(unittest.TestCase):
 
     def test_phone_verify_is_read_only_and_checks_fixed_serial(self):
         os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
-        session = {"schema_version": 1, "server": {"host": "127.0.0.1", "port": 5039}, "serial": "d708dac7", "target": {"kind": "phone", "expected_device": "d708", "expected_model": "Xiaomi 17 Pro", "expected_serial": "d708dac7"}}
+        session = self.phone_session()
         gd.validate_identity(str(self.fake), session)
         self.assertIn(["shell", "getprop", "ro.serialno"], self.commands())
         self.assertFalse(any(c and c[0] in {"install", "uninstall"} or c[:3] == ["shell", "am", "instrument"] for c in self.commands()))
 
     def test_verify_cli_consumes_session_and_remains_read_only(self):
         os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
-        session = {"schema_version": 1, "server": {"host": "127.0.0.1", "port": 5039}, "serial": "d708dac7", "target": {"kind": "phone", "expected_device": "d708", "expected_model": "Xiaomi 17 Pro", "expected_serial": "d708dac7"}}
+        session = self.phone_session()
         path = self.root / "phone-session.json"; path.write_text(json.dumps(session))
         with contextlib.redirect_stdout(io.StringIO()) as output:
             result = gd.main(["verify", "--session", str(path), "--adb", str(self.fake)])
         self.assertEqual(0, result); self.assertIn("phone / d708dac7", output.getvalue())
         self.assertFalse(any(c and c[0] in {"install", "uninstall"} or c[:3] == ["shell", "am", "instrument"] for c in self.commands()))
+
+    def test_phone_instrument_defaults_to_read_only_rejection(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        with self.assertRaisesRegex(gd.GuardError, "默认关闭"):
+            self.run_instrument()
+        self.assertEqual([], self.invocations())
+
+    def test_explicit_phone_opt_in_installs_runs_and_cleans_only_new_debug_packages(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        self.run_instrument(allow_phone_debug_tests=True)
+        business = [c for c in self.commands() if c and c[0] in {"install", "uninstall"} or c[:3] == ["shell", "am", "instrument"]]
+        self.assertEqual(["install", "install", "instrument", "uninstall", "uninstall"], [c[0] if c[:3] != ["shell", "am", "instrument"] else "instrument" for c in business])
+        self.assertEqual([], self.state()["installed"])
+        self.assertFalse(self.state()["runner_active"])
+        self.assertEqual("d708dac7", self.session["serial"])
+
+    def test_phone_opt_in_still_refuses_preexisting_app_or_test_baseline(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        for package in ("top.zainzh.rearscreen.debug", "top.zainzh.rearscreen.debug.test"):
+            state = self.state(); state["installed"] = [package]; self.state_path.write_text(json.dumps(state))
+            self.log.unlink(missing_ok=True)
+            with self.assertRaisesRegex(gd.GuardError, "baseline"):
+                self.run_instrument(allow_phone_debug_tests=True)
+            self.assertFalse(any(c and c[0] in {"install", "uninstall"} or c[:3] == ["shell", "am", "instrument"] for c in self.commands()))
+            state["installed"] = []; self.state_path.write_text(json.dumps(state))
+
+    def test_phone_api_revalidates_session_before_any_adb_call(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        valid = self.phone_session()
+        invalid_sessions = []
+        for host in ("0.0.0.0", "example.com"):
+            session = json.loads(json.dumps(valid)); session["server"]["host"] = host; invalid_sessions.append(session)
+        for port in (5037, 15001):
+            session = json.loads(json.dumps(valid)); session["server"]["port"] = port; invalid_sessions.append(session)
+        session = json.loads(json.dumps(valid)); session["schema_version"] = 2; invalid_sessions.append(session)
+        session = json.loads(json.dumps(valid)); session["target"].pop("expected_serial"); invalid_sessions.append(session)
+        session = json.loads(json.dumps(valid)); session["target"]["expected_serial"] = "other"; invalid_sessions.append(session)
+        session = json.loads(json.dumps(valid)); session["target"]["kind"] = "other"; invalid_sessions.append(session)
+        for session in invalid_sessions:
+            with self.subTest(session=session), self.assertRaises(gd.GuardError):
+                gd.run_instrument(str(self.fake), session, self.app, self.test,
+                                  "androidx.test.runner.AndroidJUnitRunner",
+                                  "top.zainzh.rearscreen.DeviceIsolationSmokeTest#runsOnlyOnRootDedicatedEmulatorAndDebugVariant",
+                                  str(self.aapt), 5, allow_phone_debug_tests=True)
+            self.assertEqual([], self.invocations())
+
+    def test_keyboard_interrupt_after_install_cleans_new_packages_and_propagates(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        real_adb_call = gd.adb_call
+
+        def interrupt_at_runner(adb, session, args, timeout=15.0):
+            if args[:3] == ["shell", "am", "instrument"]:
+                raise KeyboardInterrupt()
+            return real_adb_call(adb, session, args, timeout)
+
+        with mock.patch.object(gd, "adb_call", side_effect=interrupt_at_runner):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_instrument(allow_phone_debug_tests=True)
+        self.assertEqual([], self.state()["installed"])
+        self.assertEqual(["top.zainzh.rearscreen.debug.test", "top.zainzh.rearscreen.debug"],
+                         [c[1] for c in self.commands() if c[:1] == ["uninstall"]])
+
+    def test_keyboard_interrupt_during_each_install_confirms_and_cleans_that_package(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        real_adb_call = gd.adb_call
+        for apk in (self.app, self.test):
+            with self.subTest(apk=apk.name):
+                self.log.unlink(missing_ok=True)
+                self.state_path.write_text(json.dumps({"installed": [], "runner_active": False}), encoding="utf-8")
+                interrupted = False
+
+                def interrupt_after_install(adb, session, args, timeout=15.0):
+                    nonlocal interrupted
+                    result = real_adb_call(adb, session, args, timeout)
+                    if args[:1] == ["install"] and args[1] == str(apk) and not interrupted:
+                        interrupted = True
+                        raise KeyboardInterrupt()
+                    return result
+
+                with mock.patch.object(gd, "adb_call", side_effect=interrupt_after_install):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.run_instrument(allow_phone_debug_tests=True)
+                self.assertTrue(interrupted)
+                self.assertEqual([], self.state()["installed"])
+                expected_cleanup = {"top.zainzh.rearscreen.debug"}
+                if apk == self.test:
+                    expected_cleanup.add("top.zainzh.rearscreen.debug.test")
+                self.assertEqual(expected_cleanup,
+                                 {c[1] for c in self.commands() if c[:1] == ["uninstall"]})
+
+    def test_keyboard_interrupt_with_unknown_install_state_reports_owner_and_preserves_interrupt(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        real_adb_call = gd.adb_call
+        package_queries = 0
+
+        def interrupt_after_app_install(adb, session, args, timeout=15.0):
+            result = real_adb_call(adb, session, args, timeout)
+            if args[:1] == ["install"]:
+                raise KeyboardInterrupt()
+            return result
+
+        def fail_confirmation(adb, session, package):
+            nonlocal package_queries
+            package_queries += 1
+            if package_queries <= 2:  # Initial baseline checks: both packages are absent.
+                return False
+            raise gd.GuardError("fake pm path failure")
+
+        stderr = io.StringIO()
+        with mock.patch.object(gd, "adb_call", side_effect=interrupt_after_app_install), \
+                mock.patch.object(gd, "package_installed", side_effect=fail_confirmation):
+            with contextlib.redirect_stderr(stderr), self.assertRaises(KeyboardInterrupt):
+                self.run_instrument(allow_phone_debug_tests=True)
+        self.assertIn("debug状态未知", stderr.getvalue())
+        self.assertIn("设备操作负责人核对设备并恢复", stderr.getvalue())
+        self.assertTrue(self.state()["installed"])  # Unknown is not treated as absent or safe to remove.
+        self.assertFalse(any(c[:1] == ["uninstall"] for c in self.commands()))
+
+    def test_keyboard_interrupt_with_cleanup_failure_remains_interrupt_and_reports_packages(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        real_adb_call = gd.adb_call
+
+        def interrupt_at_runner(adb, session, args, timeout=15.0):
+            if args[:3] == ["shell", "am", "instrument"]:
+                raise KeyboardInterrupt()
+            return real_adb_call(adb, session, args, timeout)
+
+        os.environ["FAKE_MODE"] = "phone_fail_uninstall"
+        with mock.patch.object(gd, "adb_call", side_effect=interrupt_at_runner):
+            with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(KeyboardInterrupt):
+                self.run_instrument(allow_phone_debug_tests=True)
+        self.assertIn("本轮新增包清理也失败", stderr.getvalue())
+        self.assertTrue(self.state()["installed"])
+        self.assertEqual(2, len([c for c in self.commands() if c[:1] == ["uninstall"]]))
+
+    def test_baseline_packages_are_never_uninstalled_and_formal_package_is_preserved(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        for package in ("top.zainzh.rearscreen.debug", "top.zainzh.rearscreen.debug.test"):
+            state = self.state(); state["installed"] = [package]; self.state_path.write_text(json.dumps(state))
+            with self.assertRaises(gd.GuardError): self.run_instrument(allow_phone_debug_tests=True)
+            self.assertFalse(any(c[:1] == ["uninstall"] for c in self.commands()))
+            self.log.unlink(missing_ok=True)
+            state["installed"] = []; self.state_path.write_text(json.dumps(state))
+        state["installed"] = ["top.zainzh.rearscreen"]; self.state_path.write_text(json.dumps(state))
+        self.run_instrument(allow_phone_debug_tests=True)
+        self.assertEqual(["top.zainzh.rearscreen"], self.state()["installed"])
+        self.assertNotIn("top.zainzh.rearscreen", [c[1] for c in self.commands() if c[:1] == ["uninstall"]])
+
+    def test_phone_opt_in_rejects_formal_apk_package_before_device_calls(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        self.session = self.phone_session()
+        os.environ["FAKE_APP_PACKAGE"] = "top.zainzh.rearscreen"
+        with self.assertRaisesRegex(gd.GuardError, "调试APK包名"):
+            self.run_instrument(allow_phone_debug_tests=True)
+        self.assertEqual([], self.invocations())
+
+    def test_phone_cli_opt_in_flag_is_required_and_passed_through(self):
+        os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
+        path = self.root / "phone-session.json"; path.write_text(json.dumps(self.phone_session()))
+        base = ["instrument", "--session", str(path), "--adb", str(self.fake), "--aapt", str(self.aapt),
+                "--app-apk", str(self.app), "--test-apk", str(self.test), "--runner", "androidx.test.runner.AndroidJUnitRunner",
+                "--class", "top.zainzh.rearscreen.DeviceIsolationSmokeTest#runsOnlyOnRootDedicatedEmulatorAndDebugVariant"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, gd.main(base))
+        self.assertEqual([], self.invocations())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, gd.main(base + ["--allow-phone-debug-tests"]))
+        self.assertEqual([], self.state()["installed"])
+        self.assertTrue(any(c[:3] == ["shell", "am", "instrument"] for c in self.commands()))
 
     def test_preexisting_baseline_package_is_never_overwritten_or_removed(self):
         state = self.state(); state["installed"] = ["top.zainzh.rearscreen.debug"]; self.state_path.write_text(json.dumps(state))
