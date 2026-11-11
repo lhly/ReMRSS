@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Mirror the published stable ReMRSS release through the official Quark Skill."""
+"""Mirror published ReMRSS releases through the official Quark Skill."""
 
 import argparse
 import contextlib
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -15,18 +16,21 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from ci_release import LEGACY_REPOSITORY, REPOSITORY
 from update_version_manifest import validate_manifest
+from ci_release import LEGACY_REPOSITORY, REPOSITORY, SEMVER
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / '.local/quark-release-sync/config.json'
+REPOSITORY_ID = 1414137580
 REPOSITORY_NAMES = {REPOSITORY, LEGACY_REPOSITORY}
 FEED_URL = f'https://raw.githubusercontent.com/{REPOSITORY}/main/updates/remrss/version.json'
 MAX_APK = 256 * 1024 * 1024
+PRERELEASE_FOLDER = '预览版（不稳定）'
 
 
 class SyncError(Exception):
@@ -58,7 +62,8 @@ class SafeRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urlparse(newurl)
         host = parsed.hostname or ''
-        if parsed.scheme != 'https' or not (host == 'github.com' or host.endswith('.githubusercontent.com')):
+        if parsed.scheme != 'https' or not (host == 'github.com' or host.endswith('.githubusercontent.com')
+                or host == 'api.github.com' and urlparse(req.full_url).hostname == 'api.github.com'):
             raise SyncError('发行文件跳转到了非 GitHub 地址。')
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -68,7 +73,7 @@ class Http:
         self.opener = build_opener(SafeRedirect())
 
     def download(self, url, path, limit):
-        request = Request(url, headers={'User-Agent': 'ReMRSS-Quark-release-sync'})
+        request = Request(url, headers={'User-Agent': 'ReMRSS-Quark-release-sync', 'Accept-Language': 'en'})
         try:
             with self.opener.open(request, timeout=45) as response, path.open('wb') as output:
                 size = 0
@@ -78,6 +83,8 @@ class Http:
                         raise SyncError('发行文件超出预期大小，已停止。')
                     output.write(chunk)
         except HTTPError as error:
+            if error.code == 403 and error.headers.get('X-RateLimit-Remaining') == '0':
+                raise SyncError('GitHub 发布检查暂时限流，将在后续定时检查重试。') from None
             raise SyncError(f'获取发行文件失败：HTTP {error.code}。') from None
         except (URLError, TimeoutError) as error:
             raise SyncError('获取发行文件时网络不可用，请稍后重试。') from error
@@ -86,6 +93,54 @@ class Http:
         path = directory / 'stable-manifest.json'
         self.download(FEED_URL, path, 32768)
         return json.loads(path.read_text())
+
+    def asset_size(self, url):
+        request = Request(url, method='HEAD', headers={'User-Agent': 'ReMRSS-Quark-release-sync'})
+        try:
+            with self.opener.open(request, timeout=45) as response:
+                size = response.headers.get('Content-Length', '')
+                if not size.isdigit() or not 0 < int(size) <= MAX_APK:
+                    raise SyncError('GitHub 附件未返回有效大小，未上传。')
+                return int(size)
+        except HTTPError as error:
+            raise SyncError(f'获取发行附件大小失败：HTTP {error.code}。') from None
+        except (URLError, TimeoutError) as error:
+            raise SyncError('获取发行附件大小时网络不可用，请稍后重试。') from error
+
+    def releases(self, directory, known=None):
+        """Read the public release pages, without depending on anonymous API quota."""
+        releases = []
+        url = f'https://github.com/{REPOSITORY}/releases'
+        visited = set()
+        while url:
+            if url in visited:
+                raise SyncError('GitHub 发布列表分页循环，未同步预览版。')
+            visited.add(url)
+            path = directory / f'releases-{len(visited)}.html'
+            self.download(url, path, 16 * 1024 * 1024)
+            page = PublicReleasePage()
+            page.feed(path.read_text())
+            items, url = page.results()
+            for item in items:
+                if not item['prerelease'] or item['draft']:
+                    continue
+                asset_path = directory / f'assets-{item["id"]}.html'
+                self.download(item.pop('assets_url'), asset_path, 4 * 1024 * 1024)
+                parser = PublicAssets()
+                parser.feed(asset_path.read_text())
+                item['assets'] = parser.assets
+                previous = (known or {}).get(item['tag_name'], {}).get('assets', {})
+                for asset in item['assets']:
+                    old = previous.get(asset['name'], {})
+                    if old.get('sha256') == asset['digest'].removeprefix('sha256:') and type(old.get('size')) is int:
+                        asset['size'] = old['size']
+                    else:
+                        # Validate origin before issuing even a HEAD request.
+                        if not project_url(asset['browser_download_url'], f'/releases/download/{item["tag_name"]}/{asset["name"]}'):
+                            raise SyncError('GitHub 附件来源无效，未上传。')
+                        asset['size'] = self.asset_size(asset['browser_download_url'])
+                releases.append(item)
+        return releases
 
 
 def project_url(url, suffix):
@@ -100,6 +155,117 @@ def normalized_identity(value):
     if isinstance(value, str) and value.startswith(legacy):
         return f'https://github.com/{REPOSITORY}/' + value[len(legacy):]
     return value
+
+
+class PublicReleasePage(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.script = None
+        self.parts = []
+        self.route = None
+        self.items = []
+        self.current = None
+        self.sections = 0
+        self.release_depth = 0
+        self.spans = 0
+        self.labels = []
+        self.next_url = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'script' and attrs.get('data-target') == 'react-app.embeddedData':
+            self.script = True
+            self.parts = []
+        if tag == 'section':
+            self.sections += 1
+            anchor = attrs.get('data-release-anchor', '')
+            if anchor.startswith('release-'):
+                self.release_depth = self.sections
+                self.current = {'tag_name': anchor.removeprefix('release-'), 'draft': False,
+                                'prerelease': False, 'published_at': None}
+        if tag == 'span':
+            self.spans += 1
+            if 'Label' in attrs.get('class', '').split():
+                self.labels.append(self.spans)
+        if self.current:
+            if tag == 'relative-time' and not self.current['published_at']:
+                self.current['published_at'] = attrs.get('datetime')
+            if tag == 'a' and project_url(urljoin('https://github.com', attrs.get('href', '')),
+                                         '/releases/tag/' + self.current['tag_name']):
+                self.current['html_url'] = urljoin('https://github.com', attrs['href'])
+            if tag == 'include-fragment' and project_url(urljoin('https://github.com', attrs.get('src', '')),
+                                                       '/releases/expanded_assets/' + self.current['tag_name']):
+                self.current['assets_url'] = urljoin('https://github.com', attrs['src'])
+        if tag == 'a' and 'next' in attrs.get('rel', '').split():
+            url = urljoin('https://github.com', attrs.get('href', ''))
+            parsed = urlparse(url)
+            if parsed.scheme != 'https' or parsed.netloc != 'github.com' or parsed.path != f'/{REPOSITORY}/releases':
+                raise SyncError('GitHub 发布列表分页来源无效。')
+            if self.next_url and self.next_url != url:
+                raise SyncError('GitHub 发布列表分页不明确。')
+            self.next_url = url
+
+    def handle_data(self, data):
+        if self.script:
+            self.parts.append(data)
+        if self.current and self.labels:
+            if data.strip() == 'Pre-release':
+                self.current['prerelease'] = True
+            if data.strip() == 'Draft':
+                self.current['draft'] = True
+
+    def handle_endtag(self, tag):
+        if tag == 'script' and self.script:
+            self.route = json.loads(''.join(self.parts)).get('payload', {}).get('releasesIndexRoute')
+            self.script = None
+        if tag == 'span':
+            if self.labels and self.labels[-1] == self.spans:
+                self.labels.pop()
+            self.spans -= 1
+        if tag == 'section':
+            if self.current and self.sections == self.release_depth:
+                self.items.append(self.current)
+                self.current = None
+            self.sections -= 1
+
+    def results(self):
+        if not self.route or self.route.get('repository') != {
+                'id': REPOSITORY_ID, 'name': 'ReMRSS', 'ownerLogin': 'lhly'}:
+            raise SyncError('GitHub 公开发布页身份或结构发生变化，未同步预览版。')
+        toc = {item['anchorId'].removeprefix('release-'): int(item['id']) for item in self.route['toc']}
+        if len(toc) != len(self.items) or set(toc) != {item['tag_name'] for item in self.items}:
+            raise SyncError('GitHub 公开发布页未取得完整版本列表。')
+        for item in self.items:
+            item['id'] = toc[item['tag_name']]
+            if not item.get('published_at') or not item.get('html_url') or not item.get('assets_url'):
+                raise SyncError('GitHub 公开发布页缺少完整发行信息。')
+        return self.items, self.next_url
+
+
+class PublicAssets(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.assets = []
+        self.current = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'li':
+            self.current = {}
+        if self.current is not None:
+            if tag == 'a' and '/releases/download/' in attrs.get('href', ''):
+                url = urljoin('https://github.com', attrs['href'])
+                self.current.update(name=urlparse(url).path.rsplit('/', 1)[-1], browser_download_url=url, state='uploaded')
+            if tag == 'clipboard-copy' and attrs.get('value', '').startswith('sha256:'):
+                self.current['digest'] = attrs['value']
+
+    def handle_endtag(self, tag):
+        if tag == 'li' and self.current is not None:
+            if self.current.get('name'):
+                if not re.fullmatch(r'sha256:[0-9a-f]{64}', self.current.get('digest', '')):
+                    raise SyncError('GitHub 公开附件缺少有效 SHA256，未上传。')
+                self.assets.append(self.current)
+            self.current = None
 
 
 def manifest_identity(manifest):
@@ -135,40 +301,42 @@ def checksums(path, names):
 def prepare(manifest, work, publish_dir, http):
     manifest_identity(manifest)
     tag = manifest['tag']
-    names = expected_files(manifest)
+    base = normalized_identity(manifest['apk']['url']).rsplit('/', 1)[0] + '/'
+    assets = {name: {'url': base + name} for name in expected_files(manifest)}
+    assets[expected_files(manifest)[0]].update(size=manifest['apk']['size'], sha256=manifest['apk']['sha256'])
+    return prepare_files(tag, assets, work, publish_dir, http)
+
+
+def prepare_files(tag, assets, work, publish_dir, http):
+    names = list(assets)
     destination = publish_dir / tag
+    if destination.exists() and (destination.is_symlink()
+            or any(not p.is_file() or p.is_symlink() for p in destination.iterdir())
+            or {p.name for p in destination.iterdir()} != set(names)):
+        raise SyncError('本地发行缓存包含异常条目或非发行文件。')
     stage = Path(tempfile.mkdtemp(prefix=tag + '-', dir=work))
     try:
-        base = f'https://github.com/{REPOSITORY}/releases/download/{tag}/'
-        for name in names:
-            limit = manifest['apk']['size'] if name.endswith('.apk') else 1024 * 1024
+        for name, asset in assets.items():
+            limit = asset.get('size', 1024 * 1024)
             cached = destination / name
             if cached.is_file() and not cached.is_symlink():
                 shutil.copyfile(cached, stage / name)
             else:
-                http.download(base + name, stage / name, min(limit, MAX_APK))
+                http.download(asset['url'], stage / name, min(limit, MAX_APK))
         sums = checksums(stage / 'SHA256SUMS', names)
-        apk_name = names[0]
-        if sums[apk_name] != manifest['apk']['sha256']:
-            raise SyncError('APK 校验文件与已公开稳定清单不一致。')
-        if (stage / apk_name).stat().st_size != manifest['apk']['size']:
-            raise SyncError('APK 大小与稳定版清单不一致。')
-        for name, digest in sums.items():
-            if sha256(stage / name) != digest:
+        files = {}
+        for name, asset in assets.items():
+            info = {'size': (stage / name).stat().st_size, 'sha256': sha256(stage / name)}
+            if 'size' in asset and info['size'] != asset['size']:
+                raise SyncError(f'{name} 大小与公开发行信息不一致。')
+            if ('sha256' in asset and info['sha256'] != asset['sha256']
+                    or name in sums and info['sha256'] != sums[name]):
                 raise SyncError(f'{name} 校验失败，禁止上传。')
-        if destination.exists():
-            if destination.is_symlink() or any(not p.is_file() or p.is_symlink() for p in destination.iterdir()):
-                raise SyncError('本地发行缓存包含异常条目。')
-            if {p.name for p in destination.iterdir()} != set(names):
-                raise SyncError('本地发行缓存包含非发行文件。')
-            for name in names:
-                if sha256(destination / name) != sha256(stage / name):
-                    raise SyncError('相同版本的本地发行文件发生变化，已停止。')
-        else:
+            files[name] = info
+        if not destination.exists():
             publish_dir.mkdir(parents=True, exist_ok=True)
             stage.rename(destination)
-        return destination, {name: {'size': (destination / name).stat().st_size,
-                                   'sha256': sha256(destination / name)} for name in names}
+        return destination, files
     finally:
         if stage.exists():
             shutil.rmtree(stage)
@@ -182,9 +350,12 @@ class Quark:
         self.session_input = session_input
         self.session_id = session_id or f'{int(datetime.now().timestamp())}-{secrets.token_hex(3)}'
         self.updated = False
+        self.install_checked = False
         self.notices = []
 
     def install_check(self):
+        if self.install_checked:
+            return
         env = dict(os.environ)
         env['PATH'] = str(Path(self.node).parent) + os.pathsep + env.get('PATH', '/usr/bin:/bin')
         result = subprocess.run(['bash', str(self.skill / 'scripts/install.sh')],
@@ -194,6 +365,7 @@ class Quark:
         if result.returncode or record.get('success') is not True:
             raise SyncError('夸克 Skill 安装检查未通过，未进行上传。')
         self.updated = record.get('updated') is True
+        self.install_checked = True
 
     def call(self, *args):
         cmd = [self.node, str(self.skill / 'scripts/quark-drive.cjs'), *map(str, args),
@@ -275,6 +447,17 @@ def parse_lines(output):
     return result
 
 
+def browse_until_visible(quark, parent, name):
+    # Creation/upload receipts can arrive before Quark's listing is updated.
+    entries = quark.browse(parent)
+    for delay in (1, 2, 4):
+        if any(entry['filename'] == name for entry in entries):
+            break
+        time.sleep(delay)
+        entries = quark.browse(parent)
+    return entries
+
+
 def sync_files(quark, folder, local, files, record, save):
     entries = quark.browse(folder)
     full_path = ''
@@ -294,7 +477,7 @@ def sync_files(quark, folder, local, files, record, save):
             _, full_path = quark.upload(local / name, folder)
             # Upload receipts and Browse may use unrelated ID representations.
             # Resolve the uploaded name from the full listing before readback.
-            entries = quark.browse(folder)
+            entries = browse_until_visible(quark, folder, name)
             uploaded = [e for e in entries if e['filename'] == name]
             if len(uploaded) != 1 or uploaded[0].get('file_type') != '1' or uploaded[0].get('size') != expected['size']:
                 raise SyncError('上传后未能唯一定位发行文件，未将版本标记为完成。')
@@ -369,6 +552,136 @@ def run(config, state_path, work, http, quark_factory=Quark, session_input=None,
         raise
 
 
+def prerelease_identity(release):
+    tag = release.get('tag_name', '')
+    match = SEMVER.fullmatch(tag[1:]) if isinstance(tag, str) and tag.startswith('v') else None
+    if (not match or not match[4] or any(p.isdigit() and len(p) > 1 and p.startswith('0')
+            for p in match[4].split('.')) or release.get('draft') is not False
+            or release.get('prerelease') is not True or not release.get('published_at')
+            or type(release.get('id')) is not int
+            or not project_url(release.get('html_url'), f'/releases/tag/{tag}')):
+        raise SyncError('GitHub 预览版身份或发布状态无效。')
+    assets = {}
+    for asset in release.get('assets', []):
+        name = asset.get('name', '')
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,150}', name)
+                or name in assets or asset.get('state') != 'uploaded'
+                or type(asset.get('size')) is not int or not 0 < asset['size'] <= MAX_APK
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', asset.get('digest') or '')
+                or not project_url(asset.get('browser_download_url'), f'/releases/download/{tag}/{name}')):
+            raise SyncError(f'{tag} 附件信息不完整或来源无效，未上传。')
+        assets[name] = {'url': normalized_identity(asset['browser_download_url']), 'size': asset['size'],
+                        'sha256': asset['digest'].removeprefix('sha256:')}
+    if not {f'ReMRSS-{tag}.apk', 'SHA256SUMS', 'LICENSE', 'NOTICE'} <= assets.keys():
+        raise SyncError(f'{tag} 缺少必要发行附件，未上传。')
+    return {'tag': tag, 'release_id': release['id'], 'assets': assets}
+
+
+def ensure_folder(quark, parent, name):
+    def locate(wait=False):
+        entries = browse_until_visible(quark, parent, name) if wait else quark.browse(parent)
+        matches = [entry for entry in entries if entry['filename'] == name]
+        if len(matches) > 1 or any(entry.get('file_type') != '0' for entry in matches):
+            raise SyncError('网盘存在同名内容或目录歧义，未覆盖。')
+        return matches
+    matches = locate()
+    if not matches:
+        quark.folder(parent, name)
+        matches = locate(wait=True)
+        if len(matches) != 1:
+            raise SyncError('新建网盘目录核对失败，未继续上传。')
+    return matches[0]['fid']
+
+
+def run_prereleases(config, state_path, work, http, quark_factory=Quark, session_input=None, session_id=None):
+    state = json.loads(state_path.read_text()) if state_path.exists() else {
+        'schema_version': 1, 'target_fid': config['quark_target_fid'],
+        'folder_name': PRERELEASE_FOLDER, 'releases': {}}
+    if (state.get('schema_version') != 1 or not isinstance(state.get('releases'), dict)
+            or state.get('target_fid') != config['quark_target_fid']
+            or state.get('folder_name') != PRERELEASE_FOLDER):
+        raise SyncError('预览版同步状态或目标目录发生变化，请检查独立状态文件。')
+    with tempfile.TemporaryDirectory(prefix='preview-list-', dir=work) as temporary:
+        releases = http.releases(Path(temporary), state['releases'])
+    identities = {}
+    for release in releases:
+        if release.get('draft') is False and release.get('prerelease') is True and release.get('published_at'):
+            identity = prerelease_identity(release)
+            tag = identity['tag']
+            if tag in identities:
+                raise SyncError('GitHub 发布列表包含重复预览版，未上传。')
+            identities[tag] = identity
+            record = state['releases'].get(tag)
+            if record and any(normalized_identity(record.get(key)) != normalized_identity(value) for key, value in identity.items()):
+                raise SyncError(f'{tag} 已记录的预览版内容发生变化，未覆盖。')
+    pending = [identity for tag, identity in identities.items()
+               if state['releases'].get(tag, {}).get('status') != 'complete']
+    if not pending and state.get('folder_fid'):
+        return {'status': 'unchanged', 'release_count': len(identities), 'uploaded': []}
+    quark = quark_factory(config, work, session_input, session_id)
+    quark.install_check()
+    try:
+        folder = ensure_folder(quark, config['quark_target_fid'], PRERELEASE_FOLDER)
+        if state.get('folder_fid') and not same_fid(state['folder_fid'], folder):
+            raise SyncError('预览版父目录发生变化，未继续上传。')
+        state['folder_fid'] = folder
+        save = lambda: write_json(state_path, state)
+        save()
+        uploaded = []
+        # The API is newest-first. Backfill all published previews, oldest first;
+        # neither the stable baseline nor versionCode rollback rules apply here.
+        for identity in reversed(pending):
+            tag = identity['tag']
+            local, files = prepare_files(tag, identity['assets'], work,
+                                         Path(config['publish_dir']) / PRERELEASE_FOLDER, http)
+            version_folder = ensure_folder(quark, folder, tag)
+            record = state['releases'].get(tag)
+            if record and not same_fid(record.get('folder_fid'), version_folder):
+                raise SyncError(f'{tag} 预览版目录发生变化，未继续上传。')
+            record = record or dict(identity, folder_fid=version_folder, files={}, status='pending')
+            state['releases'][tag] = record
+            save()
+            full_path = sync_files(quark, version_folder, local, files, record, save)
+            record.update(status='complete', completed_at=now())
+            if full_path:
+                record['full_path'] = full_path
+            save()
+            uploaded.append({'tag': tag, 'file_count': len(files), 'full_path': full_path or record.get('full_path', '')})
+        return {'status': 'uploaded' if uploaded else 'unchanged', 'release_count': len(identities),
+                'uploaded': uploaded, 'notices': quark.notices}
+    except SyncError as error:
+        error.notices = quark.notices
+        raise
+
+
+def failure(error):
+    return {'status': 'failed', 'message': str(error) if isinstance(error, SyncError)
+            else f'本地同步检查失败（{type(error).__name__}）。', 'notices': getattr(error, 'notices', [])}
+
+
+def run_channels(config, root, work, http, quark_factory=Quark, session_input=None, session_id=None):
+    if not config.get('sync_prereleases', False):
+        return run(config, root / 'state.json', work, http, quark_factory, session_input, session_id)
+    quark = None
+    def shared_quark(*args):
+        nonlocal quark
+        if quark is None:
+            quark = quark_factory(*args)
+        return quark
+    results = {}
+    for channel, runner, filename in [('stable', run, 'state.json'),
+                                      ('prereleases', run_prereleases, 'prereleases-state.json')]:
+        try:
+            results[channel] = runner(config, root / filename, work, http, shared_quark, session_input, session_id)
+        except (SyncError, ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
+            # Each channel keeps its own state; API failures cannot stop stable mirroring.
+            results[channel] = failure(error)
+    statuses = [result['status'] for result in results.values()]
+    status = 'failed' if 'failed' in statuses else 'uploaded' if 'uploaded' in statuses else 'unchanged'
+    notices = list(dict.fromkeys(notice for result in results.values() for notice in result.get('notices', [])))
+    return dict(results, status=status, notices=notices)
+
+
 @contextlib.contextmanager
 def locked(path):
     with path.open('a') as lock:
@@ -387,6 +700,8 @@ def load_config(path):
         raise SyncError('最低同步版本配置无效。')
     if not config.get('quark_target_fid') or config['quark_target_fid'] == '0':
         raise SyncError('必须明确配置已确认的目标目录，不允许默认上传根目录。')
+    if type(config.get('sync_prereleases', False)) is not bool:
+        raise SyncError('预览版同步开关配置无效。')
     return config
 
 
@@ -401,7 +716,6 @@ def main():
     result = {}
     try:
         config = load_config(args.config)
-        state_path = root / 'state.json'
         if args.command == 'status':
             print(json.dumps(json.loads((root / 'last-result.json').read_text()) if (root / 'last-result.json').exists()
                              else {'status': 'not_run'}, ensure_ascii=False))
@@ -410,13 +724,14 @@ def main():
         work.mkdir(exist_ok=True)
         session = json.loads(args.session_input_file.read_text()) if args.session_input_file else {}
         with locked(root / 'sync.lock'):
-            result = run(config, state_path, work, Http(), session_input=session.get('request'), session_id=session.get('id'))
+            result = run_channels(config, root, work, Http(), session_input=session.get('request'), session_id=session.get('id'))
         result['checked_at'] = now()
         write_json(root / 'last-result.json', result)
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=False), file=sys.stderr if result['status'] == 'failed' else sys.stdout)
+        if result['status'] == 'failed':
+            sys.exit(1)
     except (SyncError, ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
-        result = {'status': 'failed', 'checked_at': now(), 'message': str(error) if isinstance(error, SyncError)
-                  else f'本地同步检查失败（{type(error).__name__}）。', 'notices': getattr(error, 'notices', [])}
+        result = dict(failure(error), checked_at=now())
         write_json(root / 'last-result.json', result)
         print(json.dumps(result, ensure_ascii=False), file=sys.stderr)
         sys.exit(1)
