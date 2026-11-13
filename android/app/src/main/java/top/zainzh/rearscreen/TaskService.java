@@ -26,6 +26,8 @@ import java.io.InputStreamReader;
  */
 public class TaskService extends ITaskService.Stub {
     private static final String TAG = "TaskService";
+    private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
+            BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
     static final int USER_SERVICE_CONTRACT_VERSION = 61;
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {
@@ -1086,6 +1088,7 @@ public class TaskService extends ITaskService.Stub {
     
     @Override
     public boolean executeShellCommand(String cmd) throws RemoteException {
+        boolean notificationLaunch = cmd != null && NOTIFICATION_LAUNCH.matcher(cmd).lookingAt();
         try {
             ProcessBuilder pb = new ProcessBuilder("sh", "-c", cmd);
             Process process = pb.start();
@@ -1115,18 +1118,26 @@ public class TaskService extends ITaskService.Stub {
             
             if (exitCode != 0 && cmd.startsWith("input -d ") && cmd.endsWith(" keyevent KEYCODE_WAKEUP"))
                 CompatibilityDiagnostics.record("wake_failed", "exit=" + exitCode + " response=" + errorOutput);
-            // 记录详细输出
-            if (output.length() > 0) {
-                Log.d(TAG, "Command stdout: " + output.toString().trim());
-            }
-            if (errorOutput.length() > 0) {
-                Log.w(TAG, "Command stderr: " + errorOutput.toString().trim());
+            if (notificationLaunch) {
+                // Intent extras carry notification content; even shell output can echo it.
+                if (exitCode != 0) Log.w(TAG, "notification_launch_command_failed exit=" + exitCode);
+            } else {
+                if (output.length() > 0) {
+                    Log.d(TAG, "Command stdout: " + output.toString().trim());
+                }
+                if (errorOutput.length() > 0) {
+                    Log.w(TAG, "Command stderr: " + errorOutput.toString().trim());
+                }
             }
             
             return (exitCode == 0);
             
         } catch (Exception e) {
-            Log.e(TAG, "执行命令失败: " + cmd, e);
+            if (notificationLaunch) {
+                Log.e(TAG, "notification_launch_command_error type=" + e.getClass().getSimpleName());
+            } else {
+                Log.e(TAG, "执行命令失败: " + cmd, e);
+            }
             return false;
         }
     }

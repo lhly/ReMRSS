@@ -600,9 +600,6 @@ public class NotificationService extends NotificationListenerService {
             String text = notification.extras.getString(Notification.EXTRA_TEXT, "");
             long when = notification.when;
             
-            Log.d(TAG, "📝 通知标题: " + title);
-            Log.d(TAG, "📝 通知内容: " + text);
-            
             // V3.2: 隐私模式处理（区分标题和内容）
             if (privacyHideTitle) {
                 Log.d(TAG, "🔒 隐藏通知标题");

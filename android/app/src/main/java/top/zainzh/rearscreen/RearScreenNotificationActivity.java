@@ -229,10 +229,6 @@ public class RearScreenNotificationActivity extends Activity {
                     notificationContent.getPaddingBottom()
                 );
             }
-            
-            Log.d(TAG, String.format("[%tT.%tL] 📱 通知: %s - %s: %s", 
-                onCreateStartTime, onCreateStartTime, appName, title, text));
-            
         } catch (Exception e) {
             Log.e(TAG, "Failed to load app info", e);
             appNameText.setText(packageName);
@@ -552,10 +548,6 @@ public class RearScreenNotificationActivity extends Activity {
                             notificationContent.getPaddingBottom()
                         );
                     }
-                    
-                    Log.d(TAG, String.format("[%tT.%tL] 📱 通知: %s - %s: %s", 
-                        resumeTime, resumeTime, appName, title, text));
-                    
                 } catch (Exception e) {
                     Log.e(TAG, "Failed to load app info in onResume", e);
                     appNameText.setText(packageName);
