@@ -1,5 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
+        <receiver
+            android:name=".DebugCastAdmissionDiagnosticReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="top.zainzh.rearscreen.debug.action.READ_CAST_ADMISSION" />
+            </intent-filter>
+        </receiver>
         <activity
             android:name=".NativeModuleRendererTestHostActivity"
             android:exported="false"

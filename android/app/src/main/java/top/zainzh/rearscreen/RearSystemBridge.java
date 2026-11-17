@@ -26,6 +26,86 @@ final class RearSystemBridge {
         TaskLocation(int rootTask, int displayId) { this.rootTask = rootTask; this.displayId = displayId; }
     }
 
+    /** True only when the target is the sole well-formed task member of one exact root on display 0. */
+    static boolean isSoleTaskRoot(String stacks, int task, int expectedDisplay) {
+        if (stacks == null || stacks.trim().isEmpty() || task < 0 || expectedDisplay < 0) return false;
+        Pattern headerPattern = Pattern.compile("^\\s*(?:RootTask|Stack)\\s+id=(\\d+)\\b.*$");
+        Pattern displayPattern = Pattern.compile("\\bdisplayId=(\\d+)\\b");
+        Pattern taskPattern = Pattern.compile("\\btaskId=(\\d+):");
+        Pattern taskMarker = Pattern.compile("\\btaskId=");
+        int root = -1, display = -1, members = 0, targetMembers = 0;
+        boolean malformed = false;
+        int matchingRoots = 0;
+        boolean sole = false;
+        for (String line : stacks.split("\\n")) {
+            Matcher header = headerPattern.matcher(line);
+            if (header.find()) {
+                if (root >= 0 && display == expectedDisplay && targetMembers > 0) {
+                    matchingRoots++;
+                    sole = !malformed && members == 1 && targetMembers == 1;
+                }
+                root = Integer.parseInt(header.group(1));
+                Matcher displayMatch = displayPattern.matcher(line);
+                display = displayMatch.find() ? Integer.parseInt(displayMatch.group(1)) : -1;
+                members = 0; targetMembers = 0; malformed = false;
+                continue;
+            }
+            if (root < 0 || !taskMarker.matcher(line).find()) continue;
+            Matcher taskMatch = taskPattern.matcher(line);
+            int parsed = 0;
+            while (taskMatch.find()) {
+                parsed++;
+                members++;
+                if (Integer.parseInt(taskMatch.group(1)) == task) targetMembers++;
+            }
+            if (parsed == 0) malformed = true;
+        }
+        if (root >= 0 && display == expectedDisplay && targetMembers > 0) {
+            matchingRoots++;
+            sole = !malformed && members == 1 && targetMembers == 1;
+        }
+        return matchingRoots == 1 && sole;
+    }
+
+    /** Exact typed task base joined to the one task line in its sole root, without Android parsing helpers. */
+    static boolean isExactSoleTaskRoot(String stacks, int task, String expectedBaseComponent,
+            int expectedDisplay) {
+        if (expectedBaseComponent == null || !isSoleTaskRoot(stacks, task, expectedDisplay)) return false;
+        Pattern header = Pattern.compile("^\\s*(?:RootTask|Stack)\\s+id=(\\d+)\\b.*$");
+        Pattern display = Pattern.compile("\\bdisplayId=(\\d+)\\b");
+        Pattern row = Pattern.compile("\\btaskId=(\\d+):\\s*([^\\s]+)");
+        int currentDisplay = -1, matches = 0;
+        String actual = null;
+        for (String line : stacks.split("\\n")) {
+            Matcher root = header.matcher(line);
+            if (root.find()) {
+                Matcher displayMatch = display.matcher(line);
+                currentDisplay = displayMatch.find() ? Integer.parseInt(displayMatch.group(1)) : -1;
+                continue;
+            }
+            Matcher taskRow = row.matcher(line);
+            while (taskRow.find()) {
+                if (Integer.parseInt(taskRow.group(1)) == task && currentDisplay == expectedDisplay) {
+                    matches++;
+                    actual = taskRow.group(2);
+                }
+            }
+        }
+        return matches == 1 && canonicalComponent(actual).equals(canonicalComponent(expectedBaseComponent));
+    }
+
+    private static String canonicalComponent(String value) {
+        if (value == null) return "";
+        String component = value.trim();
+        int slash = component.indexOf('/');
+        if (slash <= 0 || slash == component.length() - 1) return "";
+        String pkg = component.substring(0, slash);
+        String cls = component.substring(slash + 1);
+        if (cls.startsWith(".")) cls = pkg + cls;
+        else if (!cls.contains(".")) cls = pkg + "." + cls;
+        return pkg + "/" + cls;
+    }
+
     /**
      * Uses ActivityTaskManager's existing task snapshot rather than starting `am` for every
      * final-window READY. The returned records contain only task id, stable base component,
@@ -66,7 +146,7 @@ final class RearSystemBridge {
         if (!(raw instanceof List)) throw new IllegalStateException("task_snapshot_not_list");
         List<SceneTaskIdentity.Record> result = new ArrayList<>();
         for (Object info : (List<?>) raw) {
-            if (info == null) continue;
+            if (info == null) throw new IllegalStateException("task_snapshot_null_row");
             int task = ((Number) info.getClass().getField("taskId").get(info)).intValue();
             int display = ((Number) info.getClass().getField("displayId").get(info)).intValue();
             Object base = info.getClass().getField("baseActivity").get(info);
@@ -132,6 +212,183 @@ final class RearSystemBridge {
             return ok;
         }
     }
+    enum SoleRootMoveDispatch { REJECTED_BEFORE_SEND, SENT, MAY_HAVE_BEEN_SENT }
+    static final class SoleRootMoveDiagnostic {
+        final SoleRootMoveDispatch dispatch;
+        final String reason;
+        SoleRootMoveDiagnostic(SoleRootMoveDispatch dispatch, String reason) {
+            this.dispatch = dispatch; this.reason = reason;
+        }
+    }
+
+    /** Move only one verified root; distinguish a pre-send rejection from a lost Binder reply. */
+    static SoleRootMoveDispatch moveSoleTaskRoot(int task, String expectedBaseComponent,
+            int sourceDisplay, int targetDisplay) throws Exception {
+        return moveSoleTaskRoot(task, expectedBaseComponent, sourceDisplay, targetDisplay, null);
+    }
+
+    static SoleRootMoveDispatch moveSoleTaskRoot(int task, String expectedBaseComponent,
+            int sourceDisplay, int targetDisplay, java.util.function.BooleanSupplier dispatchGate) throws Exception {
+        if (task <= 0 || expectedBaseComponent == null || sourceDisplay < 0
+                || targetDisplay < 0 || sourceDisplay == targetDisplay)
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        DisplayRotationController.Result stacks = DisplayRotationController.runCommand("am", "stack", "list");
+        if (stacks.exitCode != 0 || !isSoleTaskRoot(stacks.output, task, sourceDisplay))
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        SceneTaskIdentity.Result identity = SceneTaskIdentity.verifyOwner(
+                SceneTaskIdentity.parseStackList(stacks.output), task, expectedBaseComponent,
+                sourceDisplay, "am_stack_list");
+        if (!identity.verified()) return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        TaskLocation location = taskLocation(stacks.output, task);
+        if (location == null || location.displayId != sourceDisplay)
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        final Object manager;
+        final Method move;
+        try {
+            manager = service("activity_task", "android.app.IActivityTaskManager$Stub");
+            move = manager.getClass().getMethod("moveRootTaskToDisplay", int.class, int.class);
+        } catch (Exception unavailableBeforeInvoke) {
+            CompatibilityDiagnostics.record("controlled_physical_move", "dispatch=rejected_before_send");
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        }
+        SoleRootMoveDispatch dispatch = dispatchRootMoveAfterGate(dispatchGate,
+                () -> move.invoke(manager, location.rootTask, targetDisplay));
+        if (dispatch == SoleRootMoveDispatch.MAY_HAVE_BEEN_SENT) {
+            // The remote may have applied the move before the Binder reply failed. The caller
+            // must read the exact task back; it must not resend this side effect.
+            CompatibilityDiagnostics.record("controlled_physical_move", "dispatch=maybe_sent");
+        } else if (dispatch == SoleRootMoveDispatch.REJECTED_BEFORE_SEND) {
+            // Method resolution/access failed before the remote method was invoked.
+            CompatibilityDiagnostics.record("controlled_physical_move", "dispatch=rejected_before_send");
+        }
+        return dispatch;
+    }
+
+    /** One exact Debug experiment move: put the verified root at the bottom of the selected display. */
+    static boolean supportsPhysicalReplacementBottomFocus() {
+        try {
+            Object manager = service("activity_task", "android.app.IActivityTaskManager$Stub");
+            manager.getClass().getMethod("moveRootTaskToDisplayOnTopOrBottom",
+                    int.class, int.class, boolean.class);
+            manager.getClass().getMethod("setFocusedTask", int.class);
+            return true;
+        } catch (Exception | LinkageError unavailable) { return false; }
+    }
+
+    /** One exact Debug experiment move: put the verified root at the bottom of the selected display. */
+    static SoleRootMoveDispatch moveSoleTaskRootToDisplayBottom(int task, String expectedBaseComponent,
+            int sourceDisplay, int targetDisplay, java.util.function.BooleanSupplier dispatchGate) throws Exception {
+        return moveSoleTaskRootToDisplayBottomDiagnosed(task, expectedBaseComponent, sourceDisplay,
+                targetDisplay, dispatchGate).dispatch;
+    }
+
+    /** Debug probe variant of the same dispatch sequence; returns fixed reason codes only. */
+    static SoleRootMoveDiagnostic moveSoleTaskRootToDisplayBottomDiagnosed(int task,
+            String expectedBaseComponent, int sourceDisplay, int targetDisplay,
+            java.util.function.BooleanSupplier dispatchGate) throws Exception {
+        if (task <= 0 || expectedBaseComponent == null || sourceDisplay < 0
+                || targetDisplay <= 0 || sourceDisplay == targetDisplay)
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "invalid_arguments");
+        DisplayRotationController.Result stacks = DisplayRotationController.runCommand("am", "stack", "list");
+        if (stacks.exitCode != 0)
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "root_snapshot_unavailable");
+        if (!isExactSoleTaskRoot(stacks.output, task, expectedBaseComponent, sourceDisplay))
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "exact_root_mismatch");
+        TaskLocation location = taskLocation(stacks.output, task);
+        if (location == null || location.displayId != sourceDisplay)
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "source_location_mismatch");
+        final Object manager;
+        final Method move;
+        try {
+            manager = service("activity_task", "android.app.IActivityTaskManager$Stub");
+        } catch (Exception unavailable) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "atms_unavailable");
+        }
+        try {
+            move = manager.getClass().getMethod("moveRootTaskToDisplayOnTopOrBottom",
+                    int.class, int.class, boolean.class);
+        } catch (NoSuchMethodException unavailable) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "move_method_unavailable");
+        } catch (SecurityException denied) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "reflection_access_denied");
+        } catch (Exception unavailable) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "move_method_unavailable");
+        }
+        return dispatchRootMoveAfterGateDiagnosed(dispatchGate,
+                () -> move.invoke(manager, location.rootTask, targetDisplay, false));
+    }
+
+    static SoleRootMoveDiagnostic dispatchRootMoveAfterGateDiagnosed(
+            java.util.function.BooleanSupplier dispatchGate, RootTaskMoveInvoker invoker) {
+        try {
+            if (invoker == null || (dispatchGate != null && !dispatchGate.getAsBoolean()))
+                return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "final_gate_rejected");
+        } catch (RuntimeException gateFailure) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "final_gate_rejected");
+        }
+        try {
+            invoker.invoke();
+            return diagnosed(SoleRootMoveDispatch.SENT, "invoked");
+        } catch (java.lang.reflect.InvocationTargetException replyUnknown) {
+            return diagnosed(SoleRootMoveDispatch.MAY_HAVE_BEEN_SENT, "invoke_reply_unknown");
+        } catch (IllegalAccessException accessDenied) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "reflection_access_denied");
+        } catch (ReflectiveOperationException rejected) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "reflection_invoke_rejected");
+        } catch (RuntimeException uncertain) {
+            return diagnosed(SoleRootMoveDispatch.MAY_HAVE_BEEN_SENT, "invoke_reply_unknown");
+        } catch (Exception rejected) {
+            return diagnosed(SoleRootMoveDispatch.REJECTED_BEFORE_SEND, "reflection_invoke_rejected");
+        }
+    }
+
+    private static SoleRootMoveDiagnostic diagnosed(SoleRootMoveDispatch dispatch, String reason) {
+        return new SoleRootMoveDiagnostic(dispatch, reason);
+    }
+
+    /** Request focus for one exact root already on its display; caller must use readback as outcome evidence. */
+    static SoleRootMoveDispatch focusSoleTaskOnDisplay(int task, String expectedBaseComponent,
+            int expectedDisplay, java.util.function.BooleanSupplier dispatchGate) throws Exception {
+        if (task <= 0 || expectedBaseComponent == null || expectedDisplay <= 0)
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        DisplayRotationController.Result stacks = DisplayRotationController.runCommand("am", "stack", "list");
+        if (stacks.exitCode != 0 || !isExactSoleTaskRoot(stacks.output, task, expectedBaseComponent, expectedDisplay))
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        final Object manager;
+        final Method focus;
+        try {
+            manager = service("activity_task", "android.app.IActivityTaskManager$Stub");
+            focus = manager.getClass().getMethod("setFocusedTask", int.class);
+        } catch (Exception unavailableBeforeInvoke) {
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        }
+        return dispatchRootMoveAfterGate(dispatchGate, () -> focus.invoke(manager, task));
+    }
+
+    @FunctionalInterface interface RootTaskMoveInvoker { void invoke() throws Exception; }
+
+    /** A failing authorization callback is pre-send; only exceptions from the actual invoke are ambiguous. */
+    static SoleRootMoveDispatch dispatchRootMoveAfterGate(java.util.function.BooleanSupplier dispatchGate,
+            RootTaskMoveInvoker invoker) {
+        try {
+            if (invoker == null || (dispatchGate != null && !dispatchGate.getAsBoolean()))
+                return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        } catch (RuntimeException gateFailure) {
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        }
+        try {
+            invoker.invoke();
+            return SoleRootMoveDispatch.SENT;
+        } catch (java.lang.reflect.InvocationTargetException replyUnknown) {
+            return SoleRootMoveDispatch.MAY_HAVE_BEEN_SENT;
+        } catch (ReflectiveOperationException notDispatched) {
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        } catch (RuntimeException uncertain) {
+            return SoleRootMoveDispatch.MAY_HAVE_BEEN_SENT;
+        } catch (Exception unavailable) {
+            return SoleRootMoveDispatch.REJECTED_BEFORE_SEND;
+        }
+    }
     static boolean commandSucceeded(DisplayRotationController.Result result) {
         return result.exitCode == 0 && !Pattern.compile("(?im)\\b(?:Error:|Exception|Permission Denial|does not exist|not found)").matcher(result.output).find();
     }
@@ -172,6 +429,35 @@ final class RearSystemBridge {
         // Keep the established entrance first when the ROM still exposes it.
         result.sort((a, b) -> Boolean.compare(!a.endsWith(".SubScreenLauncher"), !b.endsWith(".SubScreenLauncher")));
         return result;
+    }
+    /** Validate the exact launcher task against PackageManager and the system user's task identity. */
+    public static boolean isValidatedRearLauncher(String flattenedComponent, int userId) {
+        if (flattenedComponent == null || flattenedComponent.isBlank() || userId < 0) return false;
+        String packageName = flattenedComponent.contains("/")
+                ? flattenedComponent.substring(0, flattenedComponent.indexOf('/')) : "";
+        if (!packageName.equals("com.xiaomi.subscreencenter") && !packageName.equals("com.xiaomi.mirror"))
+            return false;
+        try {
+            Context context = systemContext();
+            // Android's multi-user UID range is 100000; this system context is the
+            // authoritative user for launcher tasks, unlike the client process user.
+            int systemUser = context.getApplicationInfo().uid / 100000;
+            if (userId != systemUser) return false;
+            android.content.ComponentName expected = android.content.ComponentName.unflattenFromString(flattenedComponent);
+            if (expected == null) return false;
+            if (!launcherCandidates().contains(expected.flattenToString())) return false;
+            ActivityInfo info = context.getPackageManager().getActivityInfo(expected, 0);
+            return info.enabled && info.exported && expected.getPackageName().equals(info.packageName)
+                    && expected.getClassName().equals(info.name)
+                    && info.applicationInfo != null
+                    && ((info.applicationInfo.flags & android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                        || (info.applicationInfo.flags & android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0)
+                    && (expected.getPackageName().equals("com.xiaomi.subscreencenter")
+                        || expected.getPackageName().equals("com.xiaomi.mirror"));
+        } catch (Exception unavailable) {
+            CompatibilityDiagnostics.record("launcher_identity", "component=" + flattenedComponent + " unavailable=" + unavailable.getClass().getSimpleName());
+            return false;
+        }
     }
     static boolean restoreLauncher() throws Exception {
         int display = RearDisplay.requireId();

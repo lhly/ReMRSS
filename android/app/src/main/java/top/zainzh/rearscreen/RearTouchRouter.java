@@ -14,7 +14,7 @@ public final class RearTouchRouter {
     }
     private final RearTouchState touch;
     private final Back back;
-    private final Feedback feedback;
+    private Feedback feedback;
     private Menu menu;
     private boolean menuOpen, menuTouching, menuBlocked, menuArmed;
     private long holdSince = -1, menuDown;
@@ -102,6 +102,7 @@ public final class RearTouchRouter {
     }
 
     public void setMenu(Menu menu) { this.menu = menu; }
+    public void setFeedback(Feedback feedback) { this.feedback = feedback; }
     public boolean isMenuOpen() { return menuOpen; }
     public boolean isMenuArmed() { return menuArmed; }
     public void dismissMenu(long time) throws Exception {

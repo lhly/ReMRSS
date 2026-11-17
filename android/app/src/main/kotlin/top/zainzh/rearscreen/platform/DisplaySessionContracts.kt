@@ -64,8 +64,17 @@ data class SceneRequest(
     val component: ComponentName,
     val region: RearRegion = RearRegion.CAMERA_SAFE,
     val keepVisible: Boolean = true,
-    val requiredCapabilities: Set<CapabilityRequirement> = emptySet()
-)
+    val requiredCapabilities: Set<CapabilityRequirement> = emptySet(),
+    /** Explicit content orientation; independent of physical display rotation. */
+    val contentRotation: Int = 0,
+    /** False only for old wire requests which predate explicit content orientation. */
+    val hasExplicitContentRotation: Boolean = true
+) {
+    init {
+        require(contentRotation in 0..3) { "contentRotation must be a quarter-turn in 0..3" }
+        require(hasExplicitContentRotation || contentRotation == 0) { "legacy Scene requests cannot carry an explicit content rotation" }
+    }
+}
 
 data class CapabilityRequirement(val name: String, val minimumVersion: Int)
 
@@ -176,7 +185,10 @@ data class RearViewportSnapshot(
     val displayRotation: Int,
     val contentRotation: Int,
     /** Maps window-local input pixels into the content coordinate space. */
-    val inputTransform: CoordinateTransform
+    val inputTransform: CoordinateTransform,
+    val region: dev.remrss.scene.geometry.SceneRegion = dev.remrss.scene.geometry.SceneRegion.SAFE,
+    val cutoutKnowledge: dev.remrss.scene.geometry.CutoutKnowledge = dev.remrss.scene.geometry.CutoutKnowledge.UNKNOWN,
+    val cutoutBoundsPx: List<dev.remrss.scene.geometry.PixelRect> = emptyList(),
 )
 
 data class CoordinateTransform(

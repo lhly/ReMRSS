@@ -39,7 +39,7 @@ public final class InputProxyProbeInstrumentation extends Instrumentation {
         };
         TaskServiceManager.acquire(getTargetContext(), connection);
         if (!connected.await(8, java.util.concurrent.TimeUnit.SECONDS)) throw new IllegalStateException("Authorize debug app in Shizuku first");
-        String path = getTargetContext().getApplicationInfo().nativeLibraryDir + "/libremrss_input_proxy.so";
+        String path = getTargetContext().getApplicationInfo().nativeLibraryDir + "/" + RearInputProxy.READER_LIBRARY;
         JSONObject result = new JSONObject();
         String start;
         if (mode.equals("relay-keeper")) {

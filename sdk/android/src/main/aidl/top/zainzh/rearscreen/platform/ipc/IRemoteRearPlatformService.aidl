@@ -37,4 +37,12 @@ interface IRemoteRearPlatformService {
     PendingIntent requestNotificationAuthorization(String callerPackageName, IRemoteRearPlatformCallback callback);
     String publishNotification(String callerPackageName, String requestJson, IRemoteRearPlatformCallback callback);
     String cancelNotification(String callerPackageName, String notificationId, IRemoteRearPlatformCallback callback);
+    /** Controlled Cast: prepares a user-visible confirmation for the caller's exact Activity task. */
+    PendingIntent requestCastActivation(String callerPackageName, String requestId, String requestJson,
+            IRemoteRearPlatformCallback callback);
+    /** Opaque owner-scoped Cast handle operations; no task IDs or service URIs cross this interface. */
+    String queryCastSession(String callerPackageName, String sessionId, long generation,
+            IRemoteRearPlatformCallback callback);
+    String closeCastSession(String callerPackageName, String sessionId, long generation,
+            IRemoteRearPlatformCallback callback);
 }

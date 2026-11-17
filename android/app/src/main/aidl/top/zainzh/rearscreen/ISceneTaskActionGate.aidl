@@ -1,6 +1,8 @@
 package top.zainzh.rearscreen;
 
-/** Synchronous, one-shot authorization check immediately before an owned task focus command. */
+/** Synchronous authorization checks for an owned task operation. */
 interface ISceneTaskActionGate {
     boolean isCurrent();
+    /** Explicit controlled Cast admission immediately before moving its selected task from main. */
+    boolean isCurrentBeforeTargetMove();
 }

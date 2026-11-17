@@ -8,6 +8,13 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class ScoreboardStateTest {
+    @Test fun fullViewportPaddingDoesNotReapplyCameraCutoutInsets() {
+        val actualCutout = intArrayOf(296, 0, 0, 0)
+        assertEquals(SampleScenePadding(20, 20, 20, 20), sampleSceneContentPadding(true, 20, actualCutout))
+        assertEquals("SAFE and legacy scene padding still avoids the cutout",
+            SampleScenePadding(316, 20, 20, 20), sampleSceneContentPadding(false, 20, actualCutout))
+    }
+
     @Test fun acceptedEventBeforeFirstReadyReplyCannotSubmitTicketTwice() {
         val gate = TicketReadyGate()
         assertTrue(gate.begin("one-use-ticket")) // Activity submits first READY RPC.

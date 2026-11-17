@@ -122,6 +122,11 @@ final class DisplayRotationController {
 
     /** Drain both streams together, with bounded time/output, even if wm stalls or emits an error. */
     static Result runCommand(String... command) throws Exception {
+        return runCommand(4000L, command);
+    }
+
+    static Result runCommand(long timeoutMs, String... command) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
         InputStream stream = process.getInputStream();
         FutureTask<String> output = new FutureTask<>(() -> {
@@ -129,22 +134,21 @@ final class DisplayRotationController {
             byte[] buffer = new byte[8192];
             int size;
             while ((size = stream.read(buffer)) != -1) {
-                if (bytes.size() + size > 1024 * 1024) throw new IOException("Rotation command output too large");
+                if (bytes.size() + size > 1024 * 1024) throw new IOException("Display command output too large");
                 bytes.write(buffer, 0, size);
             }
             return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
         });
-        Thread reader = new Thread(output, "display-rotation-output");
+        Thread reader = new Thread(output, "display-command-output");
         reader.setDaemon(true);
         reader.start();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
         try {
             while (true) {
                 try {
                     int exit = process.exitValue();
                     return new Result(exit, output.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS));
                 } catch (IllegalThreadStateException running) {
-                    if (System.nanoTime() >= deadline) throw new IOException("Rotation command timed out");
+                    if (System.nanoTime() >= deadline) throw new IOException("Display command timed out");
                     Thread.sleep(10);
                 }
             }

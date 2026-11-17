@@ -8,10 +8,13 @@ import java.util.concurrent.*;
 final class RearAppFreezeGuard implements AutoCloseable {
     private final java.lang.Process watchdog;
     private final OutputStream lease;
+    private final BlockingQueue<String> acknowledgements = new LinkedBlockingQueue<>();
+    private String[] packages;
     private boolean closed;
     final String mode;
-    private RearAppFreezeGuard(java.lang.Process process, String mode) {
-        watchdog = process; lease = process == null ? null : process.getOutputStream(); this.mode = mode;
+    private RearAppFreezeGuard(java.lang.Process process, String mode, String[] packages) {
+        watchdog = process; lease = process == null ? null : process.getOutputStream();
+        this.mode = mode; this.packages = packages.clone();
     }
     static boolean required() throws Exception {
         if (android.os.Build.VERSION.SDK_INT < 33) return false;
@@ -35,17 +38,18 @@ final class RearAppFreezeGuard implements AutoCloseable {
     static RearAppFreezeGuard startAll(String[] packages) throws Exception {
         if (packages.length < 1 || packages.length > 2) throw new IllegalArgumentException("Invalid freeze package count");
         for (String pkg : packages) RearFreezeState.validatePackage(pkg);
-        if (!required()) return new RearAppFreezeGuard(null, "not_needed");
+        if (!required()) return new RearAppFreezeGuard(null, "not_needed", packages);
         RearFreezeDirectory.prepareShellOwner(RearFreezeGuardProcess.DIRECTORY);
         ProcessBuilder builder = shellProcess(String.join(",", packages));
         java.lang.Process process = builder.start();
-        RearAppFreezeGuard guard = new RearAppFreezeGuard(process, "temporary_whitelist");
+        RearAppFreezeGuard guard = new RearAppFreezeGuard(process, "temporary_whitelist", packages);
         CompletableFuture<Boolean> ready = new CompletableFuture<>();
         Thread reader = new Thread(() -> {
             try (BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = in.readLine()) != null) {
                     if ("READY".equals(line)) ready.complete(true);
+                    else if (line.startsWith("UPDATED:") || line.startsWith("REJECTED:")) guard.acknowledgements.offer(line);
                     else if (!"RESTORED".equals(line)) Log.w("RearAppFreezeGuard", line);
                 }
             } catch (IOException e) { ready.completeExceptionally(e); }
@@ -81,6 +85,29 @@ final class RearAppFreezeGuard implements AutoCloseable {
         if (android.os.Build.VERSION.SDK_INT < 33) throw new IOException("Virtual casting requires Android 13");
         if (!watchdog.isAlive()) throw new IOException("Freeze protection process exited");
         lease.write('\n'); lease.flush();
+    }
+    /** Add the next exact cast package to the same watchdog before its task enters the VD. */
+    synchronized void includePackage(String pkg) throws Exception {
+        RearFreezeState.validatePackage(pkg);
+        if (closed) throw new IOException("Freeze protection ended");
+        for (String current : packages) if (current.equals(pkg)) return;
+        if (packages.length >= 2) throw new IOException("Freeze guard already protects two exact packages");
+        String[] next = new String[]{packages[0], pkg};
+        setPackages(next);
+    }
+    synchronized void setPackages(String[] next) throws Exception {
+        if (closed) throw new IOException("Freeze protection ended");
+        if (next == null || next.length < 1 || next.length > 2) throw new IllegalArgumentException("Invalid package owner set");
+        for (String pkg : next) RearFreezeState.validatePackage(pkg);
+        if (java.util.Arrays.equals(packages, next)) return;
+        if (watchdog == null) { packages = next; return; }
+        if (!watchdog.isAlive()) throw new IOException("Freeze protection process exited");
+        acknowledgements.clear();
+        lease.write(("PACKAGES:" + String.join(",", next) + "\n").getBytes("UTF-8")); lease.flush();
+        String response = acknowledgements.poll(4, TimeUnit.SECONDS);
+        if (!("UPDATED:" + String.join(",", next)).equals(response))
+            throw new IOException("Freeze guard owner transfer was not acknowledged: " + response);
+        packages = next.clone();
     }
     @Override public synchronized void close() {
         if (closed) return;

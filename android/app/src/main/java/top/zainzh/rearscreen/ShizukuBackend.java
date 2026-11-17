@@ -10,7 +10,7 @@ final class ShizukuBackend implements PrivilegeBackend {
     ShizukuBackend(String packageName) {
         args = new Shizuku.UserServiceArgs(new ComponentName(packageName, TaskService.class.getName()))
                 .daemon(false).processNameSuffix("task_service").debuggable(false)
-                .version(TaskService.USER_SERVICE_CONTRACT_VERSION);
+                .version(TaskService.RUNTIME_USER_SERVICE_VERSION);
     }
     public State availability() {
         try {

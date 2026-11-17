@@ -12,10 +12,13 @@ final class SceneDisplayWakeup {
         final boolean awake;
         final String status;
         final int commandExit;
-        Result(boolean awake, String status, int commandExit) {
+        final boolean wakeIssued;
+        Result(boolean awake, String status, int commandExit) { this(awake, status, commandExit, false); }
+        Result(boolean awake, String status, int commandExit, boolean wakeIssued) {
             this.awake = awake;
             this.status = status;
             this.commandExit = commandExit;
+            this.wakeIssued = wakeIssued;
         }
     }
 
@@ -33,6 +36,8 @@ final class SceneDisplayWakeup {
 
         SceneTaskShellRunner.Result command = wakeCommand.wake(displayId);
         if (command == null) return new Result(false, "wake_result_unavailable", -1);
+        // Controlled-cast's action gate may discover that the panel reached ON before dispatch.
+        if ("already_on".equals(command.failureCode)) return new Result(true, "already_on", 0, false);
         if (command.failureCode != null) return new Result(false, "wake_runner_" + command.failureCode, command.exitCode);
         if (command.timedOut) return new Result(false, "wake_timeout", command.exitCode);
         if (command.truncated || command.exitCode != 0) return new Result(false, "wake_exit_" + command.exitCode, command.exitCode);
@@ -41,7 +46,7 @@ final class SceneDisplayWakeup {
         do {
             try {
                 if (displayState.state(displayId) == Display.STATE_ON)
-                    return new Result(true, "woken", command.exitCode);
+                    return new Result(true, "woken", command.exitCode, true);
             } catch (Exception e) {
                 return new Result(false, "display_state_unavailable_" + e.getClass().getSimpleName(), command.exitCode);
             }

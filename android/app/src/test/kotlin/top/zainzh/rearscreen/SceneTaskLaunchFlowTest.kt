@@ -30,6 +30,31 @@ class SceneTaskLaunchFlowTest {
         assertFalse("diagnostics never include the launch ticket", result.diagnostic().contains("ticket-12345678901234567890"))
     }
 
+    @Test fun ticketBoundPlacementExtrasPreserveFullExplicitZeroAndNinetyButLegacyHasNone() {
+        fun launchPlacement(full: Boolean, rotation: Int, explicit: Boolean): String {
+            val before = listOf(record(51, 0, component))
+            val after = before + record(72, 2, component)
+            val runner = FakeRunner(successResult())
+            val result = SceneTaskLaunchFlow.launchWithPlacement(component, 2, "ticket-12345678901234567890",
+                full, rotation, explicit, QueueSnapshots(listOf(snapshot(before), snapshot(after))),
+                runner::run, noOpCleanup, FakeTime())
+            assertEquals(72, result.taskId)
+            return requireNotNull(runner.command)
+        }
+        val fullExplicitZero = launchPlacement(full = true, rotation = 0, explicit = true)
+        assertTrue(fullExplicitZero.contains("--es remrss_scene_region FULL"))
+        assertTrue(fullExplicitZero.contains("--ez remrss_scene_explicit_rotation true"))
+        assertTrue(fullExplicitZero.contains("--ei remrss_scene_content_rotation 0"))
+        val safeNinety = launchPlacement(full = false, rotation = 1, explicit = true)
+        assertTrue(safeNinety.contains("--es remrss_scene_region CAMERA_SAFE"))
+        assertTrue(safeNinety.contains("--ez remrss_scene_explicit_rotation true"))
+        assertTrue(safeNinety.contains("--ei remrss_scene_content_rotation 1"))
+        val oldPath = FakeRunner(successResult())
+        launch(listOf(snapshot(listOf(record(51, 0, component))), snapshot(listOf(record(51, 0, component), record(72, 2, component)))), oldPath)
+        assertFalse(requireNotNull(oldPath.command).contains("remrss_scene_region"))
+        assertFalse(requireNotNull(oldPath.command).contains("remrss_scene_explicit_rotation"))
+    }
+
     @Test fun statusOkWithoutUniqueTargetTaskIsNotAccepted() {
         val sameTasks = listOf(record(51, 0, component))
         val runner = FakeRunner(SceneTaskShellRunner.Result("Status: ok\n", 0, false, false, null))

@@ -44,4 +44,13 @@ public class PhysicalKeeperStopPolicyTest {
         assertTrue(PhysicalKeeperStopPolicy.mayRestoreOnNaturalExit(false, false, false,
                 RearDisplayCastOccupancy.OwnerDisposition.SYSTEM_LAUNCHER));
     }
+
+    @Test public void naturallyDestroyedExactKeeperCanBeReconciledOnlyAfterNoAckAndNoLiveKeeper() {
+        assertTrue(PhysicalKeeperStopPolicy.mayReconcileNaturallyStoppedKeeper(false, false));
+        assertFalse("a successful explicit stop follows the normal acknowledgement path",
+                PhysicalKeeperStopPolicy.mayReconcileNaturallyStoppedKeeper(true, false));
+        assertFalse("a timeout with a still-live or different Keeper is not proof of stop",
+                PhysicalKeeperStopPolicy.mayReconcileNaturallyStoppedKeeper(false, true));
+    }
+
 }

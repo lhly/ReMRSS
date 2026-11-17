@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the RC4 Android SDK as a narrowly allowlisted, standalone bundle."""
+"""Export the RC5 Android SDK as a narrowly allowlisted, standalone bundle."""
 
 from __future__ import annotations
 
@@ -19,13 +19,28 @@ from pathlib import Path
 SDK_VERSION_FILE = Path("sdk/android/version.properties")
 HOST_VERSION_FILE = Path("version.properties")
 HOST_SERVICE_SOURCE = Path("android/app/src/main/java/top/zainzh/rearscreen/TaskService.java")
+DEFAULT_DELIVERY_ROOT = Path(".planning/2026-11-11-rc5-implementation/sdk-delivery")
 SDK_BUILD_FILE = Path("sdk/android/build.gradle.kts")
 BUILD_SDK_AAR = "platform-sdk-release.aar"
 SDK_AAR_PREFIX = "platform-sdk-"
+ALLOWED_GEOMETRY_CLASSES = {
+    "dev/remrss/scene/geometry/CutoutKnowledge.class",
+    "dev/remrss/scene/geometry/PixelInsets.class",
+    "dev/remrss/scene/geometry/PixelInsets$Companion.class",
+    "dev/remrss/scene/geometry/PixelRect.class",
+    "dev/remrss/scene/geometry/QuarterTurnSceneContainer.class",
+    "dev/remrss/scene/geometry/SceneRegion.class",
+    "dev/remrss/scene/geometry/SceneViewportGeometry.class",
+    "dev/remrss/scene/geometry/SceneViewportGeometry$Companion.class",
+}
 CONTRACT = "remrss.platform/1"
 CAPABILITIES = [
     {"name": "rear.scene", "version": 1},
     {"name": "rear.scene.keep_visible", "version": 1},
+    {"name": "rear.region", "version": 1},
+    {"name": "rear.scene.orientation", "version": 1},
+    {"name": "rear.cast.virtual", "version": 1},
+    {"name": "rear.cast.direct_physical", "version": 1},
     {"name": "data.battery", "version": 1},
     {"name": "data.systemMetrics", "version": 1},
     {"name": "action.invoke", "version": 1},
@@ -33,7 +48,9 @@ CAPABILITIES = [
 ]
 FEATURES = ["rear-info", "scene-lifecycle", "keep-visible", "consent-gated-battery-and-system-metrics",
             "publisher-scoped-registered-actions", "per-invocation-host-confirmation",
-            "publisher-owned-rear-notifications", "notification-authorization", "notification-result-events"]
+            "publisher-owned-rear-notifications", "notification-authorization", "notification-result-events",
+            "safe-full-scene-regions", "explicit-quarter-turn-scene-layout", "controlled-virtual-cast-session",
+            "system-managed-direct-physical-cast-request"]
 RUNTIME_DEPENDENCIES = ["Android framework (minSdk 24)", "org.json (Android platform)", "Kotlin standard library"]
 ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
 TEMPLATE_FILES = (
@@ -67,6 +84,25 @@ def parse_properties(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         result[key.strip()] = value.strip()
     return result
+
+
+def reference_host_metadata(repo: Path) -> tuple[str, int, int]:
+    """Read the tested Host identity from its canonical properties and TaskService source."""
+    props = parse_properties(repo / HOST_VERSION_FILE)
+    host_name = props.get("versionName", "")
+    host_code_text = props.get("versionCode", "")
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", host_name):
+        raise PackageError("Host versionName is missing or invalid in version.properties")
+    if not re.fullmatch(r"[1-9]\d*", host_code_text):
+        raise PackageError("Host versionCode is missing or invalid in version.properties")
+    host_code = int(host_code_text)
+
+    service_path = repo / HOST_SERVICE_SOURCE
+    service_text = service_path.read_text(encoding="utf-8")
+    matches = re.findall(r"\bUSER_SERVICE_CONTRACT_VERSION\s*=\s*(\d+)\s*;", service_text)
+    if len(matches) != 1 or int(matches[0]) <= 0:
+        raise PackageError("TaskService source must declare exactly one positive USER_SERVICE_CONTRACT_VERSION")
+    return host_name, host_code, int(matches[0])
 
 
 def require_regular_file(path: Path, label: str) -> None:
@@ -171,9 +207,10 @@ def validate_aar(path: Path) -> int:
     except zipfile.BadZipFile as exc:
         raise PackageError("AAR classes.jar is invalid") from exc
     allowed_prefixes = ("dev/remrss/platform/sdk/", "top/zainzh/rearscreen/platform/ipc/")
-    unexpected = [name for name in class_names if not name.startswith(allowed_prefixes)]
+    unexpected = [name for name in class_names
+                  if not name.startswith(allowed_prefixes) and name not in ALLOWED_GEOMETRY_CLASSES]
     if unexpected:
-        raise PackageError(f"AAR contains classes outside the SDK client/IPC allowlist: {', '.join(unexpected[:5])}")
+        raise PackageError(f"AAR contains classes outside the SDK client/IPC/scene-geometry allowlist: {', '.join(unexpected[:5])}")
     return min_compile_sdk
 
 
@@ -244,12 +281,10 @@ def _prepare_destination(destination: Path, repo: Path) -> None:
     # The default location is ignored planning state. Custom destinations are
     # accepted only outside the repository or under this ignored delivery root.
     ignored_roots = (
-        repo / ".planning/2026-11-05-platform-implementation/rc4-owned-notifications/delivery",
-        repo / ".planning/2026-11-05-platform-implementation/rc4-owned-notifications/host-sdk/delivery",
-        repo / ".planning/2026-11-05-platform-implementation/rc4-owned-notifications/sdk-delivery/output",
+        repo / DEFAULT_DELIVERY_ROOT,
     )
     if _resolved_inside(destination, repo) and not any(_resolved_inside(destination, root) for root in ignored_roots):
-        raise PackageError("output inside the repository must stay under an ignored RC4 delivery directory")
+        raise PackageError("output inside the repository must stay under an ignored SDK delivery directory")
     if destination.is_symlink():
         raise PackageError(f"output path may not be a symbolic link: {destination}")
     if destination.exists():
@@ -308,7 +343,7 @@ def load_interop_receipt(
 
 def package(
     repo: Path, aar: Path, sample_apk: Path, output: Path,
-    host_service: int = 61, host_compiled: bool = False, host_debug_compiled: bool = False,
+    host_service: int | None = None, host_compiled: bool = False, host_debug_compiled: bool = False,
     host_release_compiled: bool = False, host_apk_produced: bool = False, aapt_path: Path | None = None,
     host_sdk_interop_receipt: Path | None = None,
 ) -> tuple[Path, Path, dict]:
@@ -342,19 +377,14 @@ def package(
         if expected_dependency not in section or "platform-sdk-release.aar" in section:
             raise PackageError(f"SDK docs installation section must reference delivered {aar_name}")
         installation_sections.append(section)
-    host_props = parse_properties(repo / HOST_VERSION_FILE)
-    host_name = host_props.get("versionName", "")
-    host_code = host_props.get("versionCode", "")
-    if host_name != "4.0.0-rc.4" or host_code != "2025":
-        raise PackageError(f"expected RC4 Host 4.0.0-rc.4/2025, got {host_name}/{host_code}")
-    if host_service != 61:
-        raise PackageError("RC4 SDK reference metadata must match internal service contract 61")
+    host_name, host_code, source_host_service = reference_host_metadata(repo)
+    if host_service is not None and host_service != source_host_service:
+        raise PackageError(
+            f"explicit --host-service {host_service} does not match TaskService source contract {source_host_service}"
+        )
+    host_service = source_host_service
     if host_apk_produced and not (host_compiled or host_debug_compiled or host_release_compiled):
         raise PackageError("recording a Host APK requires verified Host compilation")
-    service_text = (repo / HOST_SERVICE_SOURCE).read_text(encoding="utf-8")
-    match = re.search(r"USER_SERVICE_CONTRACT_VERSION\s*=\s*(\d+)\s*;", service_text)
-    if not match or int(match.group(1)) != host_service:
-        raise PackageError(f"Host TaskService service contract does not match internal service {host_service}")
     interop_metadata = load_interop_receipt(
         host_sdk_interop_receipt, sdk_version, host_name, int(host_code), host_service,
     )
@@ -454,9 +484,10 @@ def package(
                     "testedToolchain": {"androidGradlePlugin": "9.4.1", "gradle": "9.7.1",
                                         "kotlinGradlePlugin": "2.4.20", "compileSdk": 37,
                                         "sampleTargetSdk": 36, "jvmTarget": 11}},
-            "referenceHost": {"versionName": host_name, "versionCode": int(host_code),
+            "referenceHost": {"versionName": host_name, "versionCode": host_code,
                               "internalServiceContract": host_service,
-                              "versionSource": str(HOST_VERSION_FILE)},
+                              "versionSource": str(HOST_VERSION_FILE),
+                              "serviceContractSource": str(HOST_SERVICE_SOURCE)},
             "hostBuild": {
                 "debugCompilation": "passed" if host_compiled or host_debug_compiled else "not-recorded",
                 "releaseCompilation": "passed" if host_compiled or host_release_compiled else "not-recorded",
@@ -518,8 +549,9 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--aar", type=Path, required=True, help="built platform-sdk-release.aar from the Gradle output directory")
     parser.add_argument("--sample-apk", type=Path, required=True, help="independently built sample debug APK")
-    parser.add_argument("--output", type=Path, help="bundle directory; defaults to ignored RC4 planning delivery path")
-    parser.add_argument("--host-service", type=int, default=61)
+    parser.add_argument("--output", type=Path, help="bundle directory; defaults to ignored RC5 planning delivery path")
+    parser.add_argument("--host-service", type=int,
+                        help="optional expected service contract; if supplied it must match TaskService.java")
     parser.add_argument("--host-sdk-interop-receipt", type=Path,
                         help="scoped Host-SDK interoperability evidence JSON; only validated scope fields enter metadata")
     parser.add_argument("--host-compile-verified", action="store_true",
@@ -534,7 +566,7 @@ def main() -> int:
     try:
         repo = args.repo.resolve()
         sdk_version = parse_properties(repo / SDK_VERSION_FILE).get("sdkVersion", "unknown")
-        output = args.output or repo / ".planning/2026-11-05-platform-implementation/rc4-owned-notifications/delivery" / f"remrss-platform-sdk-{sdk_version}"
+        output = args.output or repo / DEFAULT_DELIVERY_ROOT / f"remrss-platform-sdk-{sdk_version}"
         bundle, archive, meta = package(
             repo, args.aar, args.sample_apk, output, args.host_service,
             host_compiled=args.host_compile_verified,

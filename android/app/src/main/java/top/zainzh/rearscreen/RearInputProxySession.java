@@ -24,7 +24,7 @@ public final class RearInputProxySession implements AutoCloseable {
     private String id;
     public RearInputProxySession(Context context, ITaskService service, int task) {
         this.service = service;
-        String path = new File(context.getApplicationInfo().nativeLibraryDir, "libremrss_input_proxy.so").getPath();
+        String path = new File(context.getApplicationInfo().nativeLibraryDir, RearInputProxy.READER_LIBRARY).getPath();
         worker.execute(() -> {
             try {
                 if (closed) return;

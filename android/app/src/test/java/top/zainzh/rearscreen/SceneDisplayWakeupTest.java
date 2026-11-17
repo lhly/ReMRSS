@@ -31,6 +31,17 @@ public class SceneDisplayWakeupTest {
         assertTrue(result.awake);
         assertEquals("woken", result.status);
         assertEquals("wake command is not retried while checking the power state", 1, commands[0]);
+        assertTrue(result.wakeIssued);
+    }
+
+    @Test public void freshOnRaceAtPrivilegedGateIsNotReportedAsDispatchedWake() {
+        int[] commands = {0};
+        SceneDisplayWakeup.Result result = SceneDisplayWakeup.wakeIfNeeded(7, id -> Display.STATE_OFF,
+                id -> { commands[0]++; return new SceneTaskShellRunner.Result("", 0, false, false, "already_on"); }, time());
+        assertTrue(result.awake);
+        assertEquals("already_on", result.status);
+        assertFalse(result.wakeIssued);
+        assertEquals(1, commands[0]); // gate read happened; no shell wake was issued.
     }
 
     @Test public void commandSuccessAloneDoesNotClaimDisplayVisible() {

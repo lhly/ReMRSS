@@ -10,6 +10,9 @@ final class VirtualCastRecoveryActionGate extends ISceneTaskActionGate.Stub {
     @Override public boolean isCurrent() throws RemoteException {
         return guard.isCurrent();
     }
+    @Override public boolean isCurrentBeforeTargetMove() throws RemoteException {
+        return isCurrent();
+    }
 }
 
 /** Plain production guard so the exact gate decision can be exercised in local JVM tests. */

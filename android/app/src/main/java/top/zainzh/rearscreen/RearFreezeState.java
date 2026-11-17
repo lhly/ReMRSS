@@ -63,32 +63,45 @@ final class RearFreezeState implements AutoCloseable {
     }
     void ensureAll(String[] packages) throws Exception {
         if (packages.length < 1 || packages.length > 2) throw new IllegalArgumentException("Invalid freeze package count");
-        for (String pkg : packages) validatePackage(pkg);
-        String group = String.join(",", packages);
-        if (saved != null && !group.equals(String.join(",", members(saved,"packages"))))
-            throw new IOException("Stale freeze record must be restored first");
+        LinkedHashSet<String> desired = new LinkedHashSet<>();
+        for (String pkg : packages) { validatePackage(pkg); desired.add(pkg); }
+        List<String> previousAdded = saved == null ? List.of() : members(saved, "added");
+        LinkedHashSet<String> allowed = new LinkedHashSet<>(desired);
+        if (allowed.size() > 2) throw new IOException("Freeze guard package transfer exceeds two exact owners");
+
         String current = store.read();
-        boolean all = true;
-        for (String pkg : packages) if (!contains(current,pkg)) all = false;
-        if (all) return;
-        String original = current;
-        Set<String> added = new LinkedHashSet<>();
-        if (saved != null) {
-            for (String pkg : members(saved,"added")) { added.add(pkg); if (contains(original,pkg)) original = without(original,pkg); }
-            if (Objects.equals(current,saved.getProperty("applied"))) original=saved.getProperty("original");
+        boolean journalApplied = saved != null && Objects.equals(current, saved.getProperty("applied"));
+        String original = journalApplied ? saved.getProperty("original") : current;
+        if (!journalApplied) for (String pkg : previousAdded) original = without(original, pkg);
+
+        String applied = original;
+        LinkedHashSet<String> added = new LinkedHashSet<>();
+        for (String pkg : desired) {
+            boolean wasOriginal = contains(original, pkg);
+            if (!wasOriginal) {
+                added.add(pkg);
+                if (!contains(applied, pkg)) applied = applied == null || applied.isEmpty() ? pkg : applied + ", " + pkg;
+            }
         }
-        String applied = current;
-        for (String pkg : packages) if (!contains(applied,pkg)) {
-            added.add(pkg); applied = applied == null || applied.isEmpty() ? pkg : applied + ", " + pkg;
+        boolean desiredAlreadyApplied = desired.stream().allMatch(pkg -> contains(current, pkg));
+        boolean noOwnedExtras = previousAdded.stream().allMatch(pkg -> desired.contains(pkg) || !contains(current, pkg));
+        if (desiredAlreadyApplied && noOwnedExtras && saved != null
+                && desired.equals(new LinkedHashSet<>(members(saved, "packages")))) return;
+        if (saved == null && desiredAlreadyApplied) return;
+
+        Properties next = new Properties(); next.setProperty("package", packages[0]);
+        next.setProperty("packages", String.join(",", desired));
+        next.setProperty("allowed", String.join(",", allowed));
+        next.setProperty("added", String.join(",", added));
+        if (original != null) next.setProperty("original", original);
+        next.setProperty("applied", applied);
+        File temporary = new File(journal.getParentFile(), "pending.tmp");
+        try (FileOutputStream out = new FileOutputStream(temporary)) {
+            next.store(out, "ReMRSS temporary cast freeze protection"); out.getFD().sync();
         }
-        Properties next = new Properties(); next.setProperty("package",packages[0]); next.setProperty("packages",group);
-        next.setProperty("added",String.join(",",added));
-        if (original != null) next.setProperty("original",original);
-        next.setProperty("applied",applied);
-        File temporary = new File(journal.getParentFile(),"pending.tmp");
-        try (FileOutputStream out = new FileOutputStream(temporary)) { next.store(out,"ReMRSS temporary cast freeze protection"); out.getFD().sync(); }
         if (!temporary.renameTo(journal)) throw new IOException("Freeze recovery journal unavailable");
-        saved=next; writeVerified(applied);
+        saved = next;
+        writeVerified(applied);
     }
     void restore() throws Exception {
         if (saved == null) return;

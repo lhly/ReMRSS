@@ -17,6 +17,8 @@ public class PhysicalCastRequestFlowTest {
         final String[] foregroundByAttempt;
         boolean moveResult = true;
         boolean moveThrows;
+        boolean rejectBeforeSend;
+        PhysicalCastRequestFlow.MoveDisposition reconciledMove = PhysicalCastRequestFlow.MoveDisposition.VERIFIED_NOT_REAR;
         boolean launchThrows;
         boolean keeperThrows;
         boolean keeperAccepted = true;
@@ -34,10 +36,16 @@ public class PhysicalCastRequestFlowTest {
             if (launchThrows) throw new IllegalStateException("target launch failed");
             return attempt < foregroundByAttempt.length ? foregroundByAttempt[attempt] : null;
         }
-        @Override public boolean moveToRear(int taskId) throws Exception {
+        @Override public PhysicalCastRequestFlow.MoveAttempt moveToRear(int taskId) throws Exception {
             events.add("move:" + taskId);
+            if (rejectBeforeSend) return PhysicalCastRequestFlow.MoveAttempt.REJECTED_BEFORE_SEND;
             if (moveThrows) throw new Exception("move failed");
-            return moveResult;
+            return moveResult ? PhysicalCastRequestFlow.MoveAttempt.VERIFIED
+                    : PhysicalCastRequestFlow.MoveAttempt.SENT_UNVERIFIED;
+        }
+        @Override public PhysicalCastRequestFlow.MoveDisposition reconcileMove(PhysicalCastRequestFlow.Target target) {
+            events.add("reconcile_move:" + target.taskId);
+            return reconciledMove;
         }
         @Override public void projectionCommitted(int taskId, String packageName) {
             events.add("projection:" + packageName + ":" + taskId);
@@ -156,6 +164,45 @@ public class PhysicalCastRequestFlowTest {
             assertEquals(1, port.rollbacks);
             assertTrue(port.publisherAlive);
         }
+    }
+
+    @Test public void lateMoveReplyIsCommittedOnlyWhenExactTargetReadbackConfirmsRear() {
+        FakePort port = new FakePort(PUBLISHER + ":76");
+        port.moveResult = false;
+        port.reconciledMove = PhysicalCastRequestFlow.MoveDisposition.VERIFIED_REAR;
+        PhysicalCastRequestFlow.Result result = PhysicalCastRequestFlow.launchAndHandoff(PUBLISHER, 1, port);
+        assertTrue(result.committed);
+        assertEquals(1, port.projectionCommits);
+        assertEquals(0, port.rollbacks);
+        assertTrue(port.events.contains("reconcile_move:76"));
+    }
+
+    @Test public void preflightRejectionNeverUsesExistingRearReadbackAsProofOfLateMove() {
+        FakePort port = new FakePort(PUBLISHER + ":78");
+        port.rejectBeforeSend = true;
+        port.reconciledMove = PhysicalCastRequestFlow.MoveDisposition.VERIFIED_REAR;
+        PhysicalCastRequestFlow.Result result = PhysicalCastRequestFlow.launchAndHandoff(PUBLISHER, 1, port);
+        assertFalse(result.committed);
+        assertEquals("move_rejected_before_send", result.failure);
+        assertFalse(port.events.contains("reconcile_move:78"));
+        assertEquals(0, port.projectionCommits);
+        assertEquals(1, port.rollbacks);
+    }
+
+    @Test public void uncertainMoveIsReportedAndDoesNotRollbackPossiblyActiveDisplayConfig() {
+        FakePort port = new FakePort(PUBLISHER + ":77");
+        port.moveResult = false;
+        port.reconciledMove = PhysicalCastRequestFlow.MoveDisposition.UNKNOWN;
+        PhysicalCastRequestFlow.Result result = PhysicalCastRequestFlow.launchAndHandoff(PUBLISHER, 1, port);
+        assertFalse(result.committed);
+        assertTrue(result.indeterminate);
+        assertEquals("move_unverified", result.failure);
+        assertEquals(77, result.target.taskId);
+        assertEquals(0, port.rollbacks);
+        assertEquals(0, port.projectionCommits);
+        assertEquals(0, port.keeperStarts);
+        assertEquals(0, port.launcherDisables);
+        assertTrue(port.publisherAlive);
     }
 
     @Test public void mismatchedThirdPartyForegroundIsNeverStoppedAndOnlyRequestedTargetIsRetried() {

@@ -20,6 +20,10 @@ import dev.remrss.platform.sdk.RearSceneWindowPolicy
 import dev.remrss.platform.sdk.RearScenePresentationRequestEpoch
 import dev.remrss.platform.sdk.RearViewportReporter
 import dev.remrss.platform.sdk.RearWindowReport
+import dev.remrss.platform.sdk.RearRegion
+import dev.remrss.platform.sdk.RearSceneLaunchMetadata
+import dev.remrss.platform.sdk.RearSceneLaunchPlacement
+import dev.remrss.scene.geometry.QuarterTurnSceneContainer
 import java.io.Closeable
 
 /** A minimal client-owned Activity. Its lease/revision state lives in Application across recreation. */
@@ -28,7 +32,11 @@ class RearSceneActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var blackCover: View
     private lateinit var sceneLayout: LinearLayout
+    private lateinit var quarterTurnContainer: QuarterTurnSceneContainer
     private val sample get() = application as SampleApplication
+    private var launchPlacement: RearSceneLaunchPlacement? = null
+    private val explicitRotation get() = launchPlacement?.contentRotation
+    private val selectedRegion get() = launchPlacement?.region ?: RearRegion.CAMERA_SAFE
     private val ticket get() = intent.getStringExtra(RearClient.EXTRA_LAUNCH_TICKET).orEmpty()
     private var scoreSubscription: Closeable? = null
     private var visibilitySubscription: Closeable? = null
@@ -51,6 +59,9 @@ class RearSceneActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (ticket.isBlank()) { finishAndRemoveTask(); return }
+        launchPlacement = runCatching { RearSceneLaunchMetadata.read(intent) }.getOrElse {
+            failAndFinish("Scene 启动方向无效：${it.message}"); return
+        }
         RearSceneWindowPolicy.applySceneLease(this, requested = false, leaseActive = false, windowActuallyVisible = false)
         scoreView = TextView(this).apply { textSize = 44f; gravity = Gravity.CENTER }
         statusView = TextView(this).apply { textSize = 14f; gravity = Gravity.CENTER }
@@ -69,6 +80,10 @@ class RearSceneActivity : Activity() {
             isClickable = true
             isFocusable = true
         }
+        quarterTurnContainer = QuarterTurnSceneContainer(this).apply {
+            contentRotation = launchPlacement?.contentRotation ?: 0
+            addView(sceneLayout)
+        }
         val sceneRoot = object : FrameLayout(this) {
             override fun onWindowVisibilityChanged(visibility: Int) {
                 super.onWindowVisibilityChanged(visibility)
@@ -80,7 +95,7 @@ class RearSceneActivity : Activity() {
                 post { refreshActualWindowVisibility() }
             }
         }.apply {
-            addView(sceneLayout, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(quarterTurnContainer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             addView(blackCover, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
         setContentView(sceneRoot)
@@ -219,7 +234,7 @@ class RearSceneActivity : Activity() {
             readyRetrySubscription = sample.readyGate.whenRetryable(ticket, waiter)
             return
         }
-        sample.client.reportWindowReady(this, ticket, callback = { result ->
+        val readyCallback: (Result<dev.remrss.platform.sdk.RearOperationResult>) -> Unit = readyCallback@{ result ->
             val operation = result.getOrNull()
             if (operation?.success == true) {
                 sample.readyGate.complete(ticket, TicketReadyGate.Completion.SUCCEEDED)
@@ -227,13 +242,13 @@ class RearSceneActivity : Activity() {
                 sample.publishStatus("Rear window ready")
                 window.decorView.post { refreshActualWindowVisibility() }
                 if (!isFinishing && !isDestroyed) statusView.text = "背屏窗口已就绪"
-                return@reportWindowReady
+                return@readyCallback
             }
             val error = operation?.error ?: result.exceptionOrNull()?.message ?: "E_UNKNOWN"
             val retryable = operation?.retryable == true || error == "E_NOT_CONNECTED" || error == "E_WINDOW_NOT_READY"
             if (retryable && attempt < 20) {
                 sample.readyGate.complete(ticket, TicketReadyGate.Completion.RETRYABLE_FAILURE)
-                if (isFinishing || isDestroyed) return@reportWindowReady
+                if (isFinishing || isDestroyed) return@readyCallback
                 statusView.text = "等待窗口就绪（${attempt + 1}/20）"
                 val retryGeneration = activeLease?.generation ?: expectedGeneration
                 window.decorView.postDelayed({
@@ -243,10 +258,12 @@ class RearSceneActivity : Activity() {
                 }, 150)
             } else {
                 sample.readyGate.complete(ticket, TicketReadyGate.Completion.TERMINAL_FAILURE)
-                if (isFinishing || isDestroyed) return@reportWindowReady
+                if (isFinishing || isDestroyed) return@readyCallback
                 failAndFinish("背屏启动失败：$error")
             }
-        })
+        }
+        if (launchPlacement == null) sample.client.reportWindowReady(this, ticket, callback = readyCallback)
+        else sample.client.reportWindowReady(this, ticket, selectedRegion, quarterTurnContainer, callback = readyCallback)
     }
 
     private fun attachAndReportViewport(lease: SampleLease) {
@@ -266,7 +283,12 @@ class RearSceneActivity : Activity() {
     private fun reportCurrentViewport(lease: SampleLease, attempt: Int = 0) {
         if (isFinishing || isDestroyed || !lease.isReady) return
         if (viewportReportInFlight) { viewportRefreshPending = true; return }
-        val measured = runCatching { RearViewportReporter.capture(this, 1L) }.getOrElse {
+        val measured = runCatching {
+            if (launchPlacement == null) RearViewportReporter.capture(this, 1L)
+            else RearViewportReporter.capture(this, 1L,
+                if (selectedRegion == RearRegion.FULL) dev.remrss.scene.geometry.SceneRegion.FULL else dev.remrss.scene.geometry.SceneRegion.SAFE,
+                quarterTurnContainer)
+        }.getOrElse {
             failAndFinish("背屏视口测量失败：${it.message}"); return
         }
         val key = ViewportSignature.from(measured).toString()
@@ -403,7 +425,8 @@ class RearSceneActivity : Activity() {
         if (!::sceneLayout.isInitialized || isDestroyed) return
         val insets = runCatching { RearViewportReporter.cameraSafeInsets(this) }.getOrNull() ?: return
         val base = (20 * resources.displayMetrics.density).toInt()
-        sceneLayout.setPadding(base + insets[0], base + insets[1], base + insets[2], base + insets[3])
+        val padding = sampleSceneContentPadding(selectedRegion == RearRegion.FULL, base, insets)
+        sceneLayout.setPadding(padding.left, padding.top, padding.right, padding.bottom)
     }
 
     private fun renderScore(value: Int) {
@@ -414,4 +437,14 @@ class RearSceneActivity : Activity() {
         window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
 
     private companion object { const val TAG_VISIBILITY = "RearSceneVisibility" }
+}
+
+internal data class SampleScenePadding(val left: Int, val top: Int, val right: Int, val bottom: Int)
+
+/** FULL already lays out the native content over the full measured viewport; do not reapply cutout insets. */
+internal fun sampleSceneContentPadding(full: Boolean, base: Int, cameraSafeInsets: IntArray): SampleScenePadding {
+    require(cameraSafeInsets.size >= 4)
+    return if (full) SampleScenePadding(base, base, base, base)
+    else SampleScenePadding(base + cameraSafeInsets[0], base + cameraSafeInsets[1],
+        base + cameraSafeInsets[2], base + cameraSafeInsets[3])
 }

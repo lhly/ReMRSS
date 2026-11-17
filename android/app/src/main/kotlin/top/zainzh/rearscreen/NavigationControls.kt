@@ -87,15 +87,20 @@ private object SolidNavigationMaterial : NavigationMaterial {
 }
 
 /** Observes presses without consuming the click, drag, or accessibility action. */
-internal class NavigationPress {
+internal class NavigationPress(private val canBegin: () -> Boolean = { true }) {
     var down by mutableStateOf(false)
+        private set
+
+    fun begin() { down = canBegin() }
+    fun cancel() { down = false }
+
     val modifier = Modifier.pointerInput(this) {
         awaitEachGesture {
             awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-            down = true
+            begin()
             try {
                 while (awaitPointerEvent(PointerEventPass.Initial).changes.any { it.pressed }) { }
-            } finally { down = false }
+            } finally { cancel() }
         }
     }
 }

@@ -1,14 +1,14 @@
 # Android SDK 接入指南
 
-这份指南覆盖 SDK `0.4.0` 的接口：查询背屏信息与能力、用户确认后打开一个独立 rear Activity、读取用户授权的平台数据，以及登记和逐次确认调用快捷操作、独立授权后发布自己的背屏通知。它不代表 cast、clock 或 FULL/region 能力已开放。
+这份指南覆盖 SDK `0.5.0` 的接口：查询背屏信息与能力、用户确认后打开一个独立 rear Activity、读取用户授权的平台数据、登记和逐次确认调用快捷操作、独立授权后发布自己的背屏通知，以及显式 Scene 方向与受控 Cast session。Cast 与 FULL/方向仍需运行时 capability 支持。
 
 ## 1. 引用本地 AAR
 
-把交付包中的 `platform-sdk-0.4.0.aar` 放入 Android app module 的 `libs/`，然后声明文件依赖：
+把交付包中的 `platform-sdk-0.5.0.aar` 放入 Android app module 的 `libs/`，然后声明文件依赖：
 
 ```kotlin
 dependencies {
-    implementation(files("libs/platform-sdk-0.4.0.aar"))
+    implementation(files("libs/platform-sdk-0.5.0.aar"))
 }
 ```
 
@@ -238,7 +238,7 @@ override fun onStop() {
 
 用户主动关闭 Scene 时调用 `closeScene(sessionId)`；Host 的 `closed` event 用于清理对应 lease。Activity 因旋转/配置改变而重建不是用户关闭：保留 Application 中的 `sessionId`/`generation`/revision，在新窗口 attach observer、重新测量并报告 viewport；不要重复激活。
 
-在应用真正释放平台连接时才调用 `RearClient.close()`。它释放该 client epoch 的 sessions 与数据订阅；不要因为单个 Activity `onStop` 就关闭应用级 client。SDK callback/event 代表当前连接一代，断开或 client 关闭后应停止采用迟到结果。
+在应用真正释放平台连接时才调用 `RearClient.close()`；不要因为单个 Activity `onStop` 就关闭应用级 client。关闭会释放该 client 的独立 Scene、数据订阅、自有通知和待确认的 Cast 请求，但不会结束已经提交的 Cast session。若要结束本应用正在进行的投放，先用创建该 session 时返回的同一 `RearCastSessionHandle` 调用 `closeCastSession(handle)`；只有收到匹配该 handle 的 `castClosed`，或 `queryCastSession(handle)` 返回 `CLOSED` 后，才释放 client。`closeCastSession` 的同步 `Accepted` 结果只表示关闭已受理，不表示投放已结束。断连或关闭后，忽略旧连接一代迟到的 callback/event。
 
 ## 8. 使用用户登记的快捷操作
 
@@ -277,7 +277,9 @@ rear.requestRegisteredActionInvocation(actionRef) { result ->
 
 ## 本版可用范围
 
-0.4.0 提供：rear info/能力查询；前台用户确认的独立 Scene；Ready、viewport、可见性、当前 presentation 与受约束的 keep-visible；battery 与 system metrics 的授权、查询和可见订阅；用户登记、publisher 隔离并逐次确认的快捷操作；以及每个发布者独立授权、仅作用于自身命名空间的自有背屏通知。通知受有限 TTL、配额和宿主显示策略约束。它不提供 cast session、clock、FULL/region，也不嵌入 Root/Shizuku/QuickJS/Miuix/ROM 实现。请按运行时 capability 与返回状态处理目标设备，不把未开放能力包装成可用接口。
+0.5.0 提供：rear info/能力查询；前台用户确认的独立 Scene；Ready、viewport、可见性、当前 presentation 与受约束的 keep-visible；SAFE/FULL 区域和显式 0/90/180/270° Scene 内容方向；用户确认的 virtual Cast 与 system-managed direct-physical Cast 请求 API；battery/system metrics、登记快捷操作、自有通知。通知受有限 TTL、配额和宿主显示策略约束。Cast 只以发起调用的前台 Activity 所属任务为 SDK 目标；Mod 目标由宿主选择器提供 opaque choice。确认后 Ready 才产生 opaque handle，handle 可 query/close，不暴露 task ID 或 service URI。显式方向需由 `QuarterTurnSceneContainer` 执行布局变换，并用对应 overload 在实测窗口与内容布局后报告。旧 Scene 调用不发送方向字段，仍保持原有默认方向语义。区域、方向和 Cast mode 必须以运行时 capability 为准。`DIRECT_PHYSICAL` 的能力状态反映当前受支持 backend 与已知背屏状态，`granted` 始终不因查询而变为 true；backend 连接/授权问题分别报告连接中、需授权或 backend 不可用，已知无背屏时报告 `DISPLAY_UNAVAILABLE`。
+
+`DIRECT_PHYSICAL` 由系统管理第三方窗口如何布局；API 不支持指定 SAFE/FULL 区域、内容转角或密度，也不会从 `VIRTUAL` 自动降级。查询时显示可用不预留投放。背屏已有投放时，只有宿主能核实当前受控会话与所请求的交接方式，才会请用户确认替换；非受控占用、状态不明或不支持的交接会拒绝。请按实际请求结果处理，交付包中的 `delivery.json` 单独列出已验证的互通范围。SDK 不嵌入 Root/Shizuku/QuickJS/Miuix/ROM 实现，也不提供 clock API。
 
 
 ## 9. 发布自己的背屏通知
@@ -326,3 +328,68 @@ RearClient(this) { event ->
 ```
 
 `cancelNotification(id)` 只取消同一 client epoch 名下的 ID；未知 ID 返回 `REJECTED/NOT_FOUND`。关闭 client、Binder callback 死亡、连接代际替换或撤销授权，会清理该连接自己的通知，不影响其他发布者、系统通知、充电提示或场景。宿主全局通知开关、系统勿扰和隐私设置始终优先。SDK 不读取镜像系统通知，不请求通知监听权限，不支持任意图像、URI、PendingIntent、跳转动作或后台轮询/常亮。
+
+## 10. 请求显式 Scene 方向或受控 Cast
+
+旧 `requestSceneActivation(activity, request)` 不发送方向字段，继续使用既有默认方向。只有当你的 rear Activity 确实把内容放进 `QuarterTurnSceneContainer` 并完成测量后，才请求显式方向，并用对应 report overload 将同一容器的测量结果发回 Host：
+
+```kotlin
+// 方向取值是 quarter turns：0、1、2、3 分别对应 0°、90°、180°、270°。
+rear.requestSceneActivation(activity, request, contentRotation = 1) { result ->
+    result.onFailure(::showError)
+}
+// Scene Activity 在 matching container layout 后：
+rear.reportWindowReady(activity, launchTicket, RearRegion.FULL, quarterTurnContainer) { result ->
+    result.onFailure(::showError)
+}
+```
+
+不从 `Display.rotation` 推断内容方向；旧入口和旧 viewport report 仍按旧约定工作。SAFE/FULL 与显式方向必须由 Host capability 支持，否则请求会以明确错误拒绝。
+
+### 用同一个句柄启动、查询和结束投放
+
+从有输入焦点的前台 Activity 按钮发起，只能投放该 Activity 所在的任务。宿主显示目标与替换方式，用户确认后才开始。等待完成回调：Virtual Cast 的画面、输入和 viewport 都就绪后，才会拿到可查询的句柄。不要在后台或 Service 中发起投放。
+
+```kotlin
+private var castHandle: RearCastSessionHandle? = null
+private var castStarting = false
+
+fun startCast(activity: Activity) {
+    if (castStarting || castHandle != null) return
+    castStarting = true
+    rear.openCastSession(activity, RearCastRequest(
+        mode = RearCastMode.VIRTUAL,
+        region = RearRegion.FULL,
+        contentRotation = 1,
+    )) { result ->
+        castStarting = false
+        result.onSuccess { castHandle = it }.onFailure(::showError)
+    }
+}
+
+fun queryMyCast() {
+    val handle = castHandle ?: return
+    rear.queryCastSession(handle) { result ->
+        if (castHandle != handle) return@queryCastSession
+        result.onSuccess { snapshot ->
+            showStatus(snapshot.state)
+            if (snapshot.state == "CLOSED" || snapshot.state == "FAILED") castHandle = null
+        }.onFailure(::showError)
+    }
+}
+
+fun finishMyCast() {
+    val handle = castHandle ?: return
+    rear.closeCastSession(handle) { result ->
+        if (castHandle != handle) return@closeCastSession
+        result.onSuccess { operation ->
+            if (operation.success) showStatus("关闭请求已接受，可查询结果")
+            else showStatus(operation.error ?: "关闭请求被拒绝")
+        }.onFailure(::showError)
+    }
+}
+```
+
+关闭成功回执可以是“已接受”，不保证已归还屏幕或释放资源。这个例子一次只跟踪一笔投放：保留原句柄查询最终状态，再开始下一笔。`CLOSING` 时不要丢掉它，也不需要后台轮询。重连后只查询或关闭同一应用仍持有的有效句柄，不按 task ID 寻找投放。
+
+不提供 `region` 或 `contentRotation` 会沿用目标 app 已保存的偏好；显式 `0` 与省略不同。`DIRECT_PHYSICAL` 仅在 capability 明确 `AVAILABLE` 时可选，且该模式不能指定 region、content rotation 或 density。能力查询不预留背屏；不支持的交接、非受控占用或状态无法确认时，请求会失败，不会自动改用 `VIRTUAL`。用户同意受控替换不等于把旧句柄转交给新应用：只能查询或关闭本应用持有、且当前代次匹配的句柄。SDK client 断连不会关闭已提交的 session；需显式 `closeCastSession(handle)` 结束本应用的投放。

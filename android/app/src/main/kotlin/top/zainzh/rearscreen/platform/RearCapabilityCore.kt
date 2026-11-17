@@ -68,6 +68,13 @@ internal fun sceneRecoveryResultForPresentationStatus(
     else SceneRecoveryResult(SceneError.DISPLAY_UNAVAILABLE)
 }
 
+/** Production handoff seam: both callers take over Scene presentation, only legacy callers rewrite owner state. */
+internal fun dispatchProjectionCommitEffects(controlledOwner: Boolean, writeLegacyOwner: () -> Unit,
+                                             takeOverPresentation: () -> Unit) {
+    if (!controlledOwner) writeLegacyOwner()
+    takeOverPresentation()
+}
+
 /** Stable host composition root. This is the only scene coordinator instance in the app process. */
 class RearCapabilityCore private constructor(context: Context) {
     private val appContext = context.applicationContext
@@ -197,6 +204,10 @@ class RearCapabilityCore private constructor(context: Context) {
     internal fun resolveSceneLaunchForHostActivity(ticket: String, component: ComponentName): SceneLaunchContext? =
         (displaySessions as? RearSceneCoordinator)?.resolveLaunchTicketForHostActivity(ticket, component)
 
+    /** Mod host-only viewport mutation stays outside the SDK DisplaySessionCoordinator contract. */
+    internal val sceneViewportTransitions: SceneViewportTransitionPort?
+        get() = displaySessions as? SceneViewportTransitionPort
+
     internal fun ownsActiveSceneSession(owner: SessionOwner, sessionId: String): Boolean =
         (displaySessions as? RearSceneCoordinator)?.ownsActiveSession(owner, sessionId) == true
 
@@ -253,9 +264,20 @@ class RearCapabilityCore private constructor(context: Context) {
 
         /** Existing URI/Tile cast commits its ownership only after the task move succeeds. */
         @JvmStatic fun onLegacyProjectionStarted(context: Context, taskId: Int, packageName: String?) {
-            if (taskId > 0 && !packageName.isNullOrBlank()) {
-                runCatching { LegacyDisplayOccupancy.recordPhysicalProjection(context, taskId, packageName, RearDisplay.requireId()) }
-            } else LegacyDisplayOccupancy.noteProjectionStarted()
+            onProjectionStarted(context, taskId, packageName, controlledOwner = false)
+        }
+
+        /** Controlled physical owner is already persisted with exact base/identity/generation. */
+        @JvmStatic fun onControlledProjectionStarted(context: Context, taskId: Int, packageName: String) {
+            onProjectionStarted(context, taskId, packageName, controlledOwner = true)
+        }
+
+        private fun onProjectionStarted(context: Context, taskId: Int, packageName: String?, controlledOwner: Boolean) {
+            dispatchProjectionCommitEffects(controlledOwner, {
+                if (taskId > 0 && !packageName.isNullOrBlank()) {
+                    runCatching { LegacyDisplayOccupancy.recordPhysicalProjection(context, taskId, packageName, RearDisplay.requireId()) }
+                } else LegacyDisplayOccupancy.noteProjectionStarted()
+            }, {
             val mode = if (taskId > 0 && !packageName.isNullOrBlank()) "physical" else "virtual"
             val target = if (mode == "physical") "moved_task" else "virtual_host_running"
             android.util.Log.i("RearSceneCast", "cast_commit mode=$mode target=$target result=committed")
@@ -263,6 +285,7 @@ class RearCapabilityCore private constructor(context: Context) {
                 core.ownedNotifications.closeAll(NotificationEndReason.SCENE_TAKEOVER)
                 preemptActiveScenesForLegacyCast(core.displaySessions)
             }
+            })
         }
 
         /** Keeps the existing Root/Shizuku source from switching while a Scene task is live or closing. */
@@ -324,8 +347,10 @@ private class PrivilegedRearSceneGateway(private val context: Context) : RearSce
                 CapabilityState("rear.scene.keep_visible", 1, sceneAvailability,
                     granted = false,
                     reasonCode = if (sceneAvailability == CapabilityAvailability.AVAILABLE) null else sceneAvailability.name.lowercase()),
-                CapabilityState("rear.region", 1, CapabilityAvailability.UNSUPPORTED, granted = false,
-                    reasonCode = "full_region_not_supported")
+                CapabilityState("rear.region", 1, sceneAvailability, granted = false,
+                    reasonCode = if (sceneAvailability == CapabilityAvailability.AVAILABLE) null else sceneAvailability.name.lowercase()),
+                CapabilityState("rear.scene.orientation", 1, sceneAvailability, granted = false,
+                    reasonCode = if (sceneAvailability == CapabilityAvailability.AVAILABLE) null else sceneAvailability.name.lowercase())
             )
         )
     }
@@ -446,6 +471,7 @@ private class PrivilegedRearSceneGateway(private val context: Context) : RearSce
         val recoveryStillCurrent = isCurrent
         val actionGate = object : top.zainzh.rearscreen.ISceneTaskActionGate.Stub() {
             override fun isCurrent(): Boolean = recoveryStillCurrent()
+            override fun isCurrentBeforeTargetMove(): Boolean = recoveryStillCurrent()
         }
         val presentation = runCatching {
             JSONObject(remote.presentSceneActivityTask(task.taskId, task.component.flattenToString(), task.displayId, actionGate))
@@ -479,7 +505,17 @@ private class PrivilegedRearSceneGateway(private val context: Context) : RearSce
     override fun launchNewTask(owner: SessionOwner, request: SceneRequest, launchTicket: String, expiresAtElapsedRealtimeMs: Long): LaunchedScene? {
         val remote = awaitService() ?: return null
         val displayId = runCatching { RearDisplay.requireId() }.getOrNull() ?: return null
-        val taskId = remote.launchSceneActivity(request.component.flattenToString(), displayId, launchTicket)
+        val component = request.component.flattenToString()
+        val taskId = if (request.region == RearRegion.FULL || request.hasExplicitContentRotation) {
+            remote.launchSceneActivityWithPlacement(
+                component, displayId, launchTicket,
+                request.region == RearRegion.FULL,
+                request.contentRotation,
+                request.hasExplicitContentRotation,
+            )
+        } else {
+            remote.launchSceneActivity(component, displayId, launchTicket)
+        }
         if (taskId < 0) return null
         return LaunchedScene(request.component, taskId, displayId)
     }

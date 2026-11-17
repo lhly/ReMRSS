@@ -77,6 +77,25 @@ public final class TaskServiceManager {
     }
 
     public static boolean isRoot(Context context) { return PrivilegeMode.read(context) == PrivilegeMode.ROOT; }
+
+    /** Debug DUMP-protected peek only: never initializes, binds, reconnects, or changes privilege state. */
+    static ITaskService peekConnectedServiceForDebug() {
+        if (!BuildConfig.DEBUG) return null;
+        IBinder connected = INSTANCE.binder;
+        return connected != null && connected.isBinderAlive() ? ITaskService.Stub.asInterface(connected) : null;
+    }
+
+    /** Read-only identity check used by controlled host handoffs to reject replaced service binders. */
+    static boolean isConnectedServiceCurrent(ITaskService candidate) {
+        if (candidate == null) return false;
+        IBinder candidateBinder;
+        try { candidateBinder = candidate.asBinder(); }
+        catch (RuntimeException unavailable) { return false; }
+        IBinder connected = INSTANCE.binder;
+        return candidateBinder != null && candidateBinder == connected
+                && candidateBinder.isBinderAlive() && INSTANCE.state == PrivilegeBackend.State.READY;
+    }
+
     static PrivilegeBackend.State state(Context context) {
         INSTANCE.initialize(context);
         if (INSTANCE.state == PrivilegeBackend.State.SWITCHING) return INSTANCE.state;

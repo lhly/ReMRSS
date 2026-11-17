@@ -27,6 +27,8 @@ internal class OwnedNotificationQueue(
         var suspended = false
         var deferred = false
         var rendering = false
+        /** Coalesces a genuine availability callback that arrives during this render attempt. */
+        var availabilityDuringRender = false
         var expiry: ScheduledFuture<*>? = null
     }
     private class RateWindow {
@@ -235,7 +237,11 @@ internal class OwnedNotificationQueue(
             val current = currentKey?.let(entries::get)
             if (current != null) {
                 val key = currentKey ?: return
-                if (current.deferred && !current.rendering) key to current else null
+                when {
+                    current.rendering -> { current.availabilityDuringRender = true; null }
+                    current.deferred -> key to current
+                    else -> null
+                }
             } else {
                 entries.entries
                     .filter { (_, entry) -> entry.suspended && !entry.ended && now() < entry.item.expiresAtElapsedMs }
@@ -259,6 +265,7 @@ internal class OwnedNotificationQueue(
                 return
             }
             entry.rendering = true
+            entry.availabilityDuringRender = false
             entry.suspended = false
             entry.handle
         }
@@ -295,6 +302,7 @@ internal class OwnedNotificationQueue(
             presentation.resume(resumeHandle, renderItem, { reportDisplayed(key, entry) }, { reportEnded(key, entry, it) })
         }
         var cancelHandle: Any? = null
+        var retryDeferredAfterMissedAvailability = false
         synchronized(lock) {
             if (entries[key] !== entry || currentKey != key || entry.ended || closed) {
                 if (started is PresentationResult.Started) cancelHandle = started.handle
@@ -307,8 +315,11 @@ internal class OwnedNotificationQueue(
                         entry.suspended = false
                     }
                     PresentationResult.Deferred -> {
-                        entry.deferred = true
+                        val retryMissedSignal = entry.availabilityDuringRender
+                        entry.availabilityDuringRender = false
+                        entry.deferred = !retryMissedSignal
                         entry.suspended = false
+                        if (retryMissedSignal) retryDeferredAfterMissedAvailability = true
                     }
                     is PresentationResult.Suppressed -> finishLocked(key, entry, started.endedBy, started.reason)
                     is PresentationResult.Failed -> finishLocked(key, entry, NotificationEndReason.RENDER_FAILED, started.reason)
@@ -316,6 +327,7 @@ internal class OwnedNotificationQueue(
             }
         }
         cancelHandle?.let { presentation.cancel(it, NotificationEndReason.REPLACED) }
+        if (retryDeferredAfterMissedAvailability) enqueuePresentation { present(key, entry) }
     }
 
     private fun expire(key: Key, entry: Entry) {

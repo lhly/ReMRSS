@@ -11,12 +11,150 @@ import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import top.zainzh.rearscreen.platform.mods.ModSceneWindowLifecycleGate
 import top.zainzh.rearscreen.platform.mods.ModSceneWindowPolicy
+import top.zainzh.rearscreen.platform.mods.sceneRequestForModEffect
 
 class SceneTransientOverlayReturnTest {
     private val owner = SessionOwner(10001, "dev.remrss.test", "cert", SessionPrincipal.SignedMod("author", "scene-mod", "logical"))
     private val component = ComponentName("dev.remrss.test", "dev.remrss.test.RearSceneActivity")
+
+    private fun fullRotationRequest() = SceneRequest(
+        component = component,
+        region = RearRegion.FULL,
+        keepVisible = true,
+        requiredCapabilities = setOf(
+            CapabilityRequirement("rear.scene", 1),
+            CapabilityRequirement("rear.scene.keep_visible", 1),
+            CapabilityRequirement("rear.region", 1),
+            CapabilityRequirement("rear.scene.orientation", 1),
+        ),
+        contentRotation = 1,
+        hasExplicitContentRotation = true,
+    )
+
+    @Test fun omittedModRotationInheritsExplicitQuarterTurnAndExplicitZeroRemainsExplicit() {
+        val full90 = fullRotationRequest()
+        val inherited = sceneRequestForModEffect(full90, RearRegion.CAMERA_SAFE, null)
+        assertEquals(1, inherited.contentRotation)
+        assertTrue(inherited.hasExplicitContentRotation)
+        assertTrue(inherited.requiredCapabilities.contains(CapabilityRequirement("rear.scene.orientation", 1)))
+        assertTrue(inherited.keepVisible)
+
+        val explicitZero = sceneRequestForModEffect(full90, RearRegion.CAMERA_SAFE, 0)
+        assertEquals(0, explicitZero.contentRotation)
+        assertTrue(explicitZero.hasExplicitContentRotation)
+        assertTrue(explicitZero.requiredCapabilities.contains(CapabilityRequirement("rear.scene.orientation", 1)))
+    }
+
+    private fun fullRotationWindow(revision: Long = 2L) = SceneWindowReport(component, 56091,
+        RearViewportSnapshot(
+            revision = revision, displayId = 1, physicalDisplayPx = PixelSize(720, 1280),
+            contentBoundsPx = PixelRect(0, 0, 720, 1280), windowPx = PixelSize(720, 1280),
+            windowDp = DpSize(360f, 640f), densityDpi = 320, renderBufferPx = PixelSize(720, 1280),
+            displayRotation = 0, contentRotation = 1,
+            inputTransform = CoordinateTransform(0f, 1f, 0f, -1f, 0f, 720f),
+            region = dev.remrss.scene.geometry.SceneRegion.FULL,
+        ))
+
+    @Test fun confirmedViewportTransitionCommitsMeasuredFullRotationOnSameOwnedTask() {
+        val fixture = Fixture()
+        try {
+            val handle = fixture.openVisibleScene()
+            val originalLaunches = fixture.gateway.launchCalls
+            val target = fullRotationRequest()
+            val id = "fixture-transition-full90"
+            assertTrue(fixture.coordinator.beginSceneViewportTransition(owner, handle.sessionId, handle.generation,
+                id, SceneRequest(component, keepVisible = true), target, UserActivationToken("confirmed-full90"), 10_000L).success)
+
+            val report = fullRotationWindow()
+            assertEquals(PixelRect(0, 0, 720, 1280), report.viewport.contentBoundsPx)
+            assertEquals(720, report.viewport.windowPx.width)
+            assertEquals(1280, report.viewport.windowPx.height)
+            assertEquals(1, report.viewport.contentRotation)
+            assertEquals(dev.remrss.scene.geometry.SceneRegion.FULL, report.viewport.region)
+            assertEquals(0f, report.viewport.inputTransform.scaleX, 0f)
+            assertEquals(1f, report.viewport.inputTransform.skewX, 0f)
+            assertEquals(-1f, report.viewport.inputTransform.skewY, 0f)
+            assertEquals(720f, report.viewport.inputTransform.translateY, 0f)
+            assertTrue("the accepted backend task must verify the exact measured target window",
+                fixture.coordinator.reportSceneViewportTransition(owner, handle.sessionId, handle.generation, id, report).success)
+            val beforeCommit = fixture.coordinator.queryCommittedSceneWindow(owner, handle.sessionId, handle.generation)
+            assertEquals("preparing a viewport cannot commit it", 1L, beforeCommit?.viewport?.revision)
+            assertEquals(dev.remrss.scene.geometry.SceneRegion.SAFE, beforeCommit?.viewport?.region)
+            assertTrue(fixture.coordinator.commitSceneViewportTransition(owner, handle.sessionId, handle.generation, id).success)
+
+            assertEquals("transition retains the original Activity task", originalLaunches, fixture.gateway.launchCalls)
+            assertTrue("only the measured FULL + quarter-turn report is published",
+                fixture.viewportEvents.any { it.revision == report.viewport.revision && it.region == dev.remrss.scene.geometry.SceneRegion.FULL && it.contentRotation == 1 })
+            assertTrue(fixture.coordinator.queryScenePresentation(owner, handle.sessionId, handle.generation)?.visible == true)
+        } finally { fixture.close() }
+    }
+
+    @Test fun transitionRejectsForeignOrBusyOccupancyAndAbortKeepsOldViewport() {
+        val fixture = Fixture()
+        try {
+            val handle = fixture.openVisibleScene()
+            val oldRequest = SceneRequest(component, keepVisible = true)
+            val target = fullRotationRequest()
+            val foreignOwner = owner.copy(principal = SessionPrincipal.SignedMod("other-author", "other-mod", "other-logical"))
+            assertEquals(SceneError.CAPABILITY_DENIED, fixture.coordinator.beginSceneViewportTransition(
+                foreignOwner, handle.sessionId, handle.generation, "foreign", oldRequest, target,
+                UserActivationToken("foreign"), 10_000L).error)
+
+            fixture.gateway.authorizationError = SceneError.DISPLAY_BUSY
+            assertEquals(SceneError.DISPLAY_BUSY, fixture.coordinator.beginSceneViewportTransition(
+                owner, handle.sessionId, handle.generation, "busy", oldRequest, target,
+                UserActivationToken("busy"), 10_000L).error)
+            fixture.gateway.authorizationError = null
+
+            val id = "cancelled-transition"
+            assertTrue(fixture.coordinator.beginSceneViewportTransition(owner, handle.sessionId, handle.generation,
+                id, oldRequest, target, UserActivationToken("cancel"), 10_000L).success)
+            assertTrue(fixture.coordinator.abortSceneViewportTransition(owner, handle.sessionId, handle.generation, id).success)
+            assertFalse("a late report after abort cannot commit", fixture.coordinator.reportSceneViewportTransition(
+                owner, handle.sessionId, handle.generation, id, fullRotationWindow()).success)
+            val overlayTransition = "overlay-transition"
+            assertTrue(fixture.coordinator.beginSceneViewportTransition(owner, handle.sessionId, handle.generation,
+                overlayTransition, oldRequest, target, UserActivationToken("overlay"), 10_000L).success)
+            fixture.coordinator.beginTransientOverlay(71L)
+            assertFalse("a transient overlay invalidates the pending viewport handoff",
+                fixture.coordinator.reportSceneViewportTransition(owner, handle.sessionId, handle.generation,
+                    overlayTransition, fullRotationWindow()).success)
+            fixture.coordinator.endTransientOverlay(71L)
+            assertFalse(fixture.viewportEvents.any { it.region == dev.remrss.scene.geometry.SceneRegion.FULL })
+            assertTrue(fixture.coordinator.queryScenePresentation(owner, handle.sessionId, handle.generation)?.visible == true)
+        } finally { fixture.close() }
+    }
+
+    @Test fun lateVerifiedWindowCannotCommitAfterTransitionAbort() {
+        val fixture = Fixture()
+        val result = AtomicReference<SceneOperationResult?>()
+        var reporter: Thread? = null
+        try {
+            val handle = fixture.openVisibleScene()
+            val id = "late-transition"
+            assertTrue(fixture.coordinator.beginSceneViewportTransition(owner, handle.sessionId, handle.generation,
+                id, SceneRequest(component, keepVisible = true), fullRotationRequest(), UserActivationToken("late"), 10_000L).success)
+            fixture.gateway.blockNextSceneVerification = true
+            reporter = Thread {
+                result.set(fixture.coordinator.reportSceneViewportTransition(owner, handle.sessionId, handle.generation,
+                    id, fullRotationWindow()))
+            }.apply { start() }
+            assertTrue("fake gateway blocks between report validation and commit", fixture.gateway.sceneVerifyEntered.await(2, TimeUnit.SECONDS))
+            assertTrue(fixture.coordinator.abortSceneViewportTransition(owner, handle.sessionId, handle.generation, id).success)
+            fixture.gateway.releaseSceneVerification.countDown()
+            reporter.join(2_000L)
+            assertTrue(result.get() != null && !result.get()!!.success)
+            assertFalse(fixture.coordinator.commitSceneViewportTransition(owner, handle.sessionId, handle.generation, id).success)
+            assertFalse(fixture.viewportEvents.any { it.region == dev.remrss.scene.geometry.SceneRegion.FULL })
+        } finally {
+            fixture.gateway.releaseSceneVerification.countDown()
+            reporter?.join(2_000L)
+            fixture.close()
+        }
+    }
 
     @Test fun endedOverlayRestoresExactPreviouslyVisibleSceneOnCurrentRearDisplay() {
         val fixture = Fixture()
@@ -647,6 +785,7 @@ class SceneTransientOverlayReturnTest {
         val backendLostEvents = AtomicInteger(0)
         val backendLost = CountDownLatch(1)
         val sceneVisibleEvents = CountDownLatch(2)
+        val viewportEvents = mutableListOf<RearViewportSnapshot>()
         val coordinator = RearSceneCoordinator(
             gateway = gateway,
             activationVerifier = UserActivationVerifier { _, _, _ -> true },
@@ -660,6 +799,7 @@ class SceneTransientOverlayReturnTest {
         fun openVisibleScene(keepVisible: Boolean = true): SceneSessionHandle {
             val result = coordinator.openScene(owner, SceneRequest(component, keepVisible = keepVisible), UserActivationToken("user-action"), object : SceneObserver {
                 override fun onSceneEvent(sessionId: String, generation: Long, event: SceneEvent) {
+                    if (event is SceneEvent.ViewportChanged) synchronized(viewportEvents) { viewportEvents += event.viewport }
                     if (event == SceneEvent.BackendLost) {
                         backendLostEvents.incrementAndGet()
                         backendLost.countDown()
@@ -722,13 +862,27 @@ class SceneTransientOverlayReturnTest {
         val verifiedPresentationEntered = CountDownLatch(1)
         val releaseVerifiedPresentation = CountDownLatch(1)
         val verifiedPresentation = CountDownLatch(1)
+        val sceneVerifyEntered = CountDownLatch(1)
+        val releaseSceneVerification = CountDownLatch(1)
+        @Volatile var authorizationError: SceneError? = null
+        @Volatile var blockNextSceneVerification = false
+        @Volatile var launchCalls = 0
         override fun queryCapabilities(owner: SessionOwner) = CapabilitySnapshot("test", true, true, emptyList())
-        override fun authorize(owner: SessionOwner, request: SceneRequest): SceneError? = null
+        override fun authorize(owner: SessionOwner, request: SceneRequest): SceneError? = authorizationError
         override fun targetDisplayId(): Int? = null
         override fun prepareDisplay(owner: SessionOwner, request: SceneRequest): SceneError? { prepareCalls++; return null }
-        override fun launchNewTask(owner: SessionOwner, request: SceneRequest, launchTicket: String, expiresAtElapsedRealtimeMs: Long) =
-            LaunchedScene(request.component, 56091, 1)
-        override fun verifyLaunchedTask(owner: SessionOwner, expected: LaunchedScene, report: SceneWindowReport) = true
+        override fun launchNewTask(owner: SessionOwner, request: SceneRequest, launchTicket: String, expiresAtElapsedRealtimeMs: Long): LaunchedScene {
+            launchCalls++
+            return LaunchedScene(request.component, 56091, 1)
+        }
+        override fun verifyLaunchedTask(owner: SessionOwner, expected: LaunchedScene, report: SceneWindowReport): Boolean {
+            if (blockNextSceneVerification) {
+                blockNextSceneVerification = false
+                sceneVerifyEntered.countDown()
+                releaseSceneVerification.await(2, TimeUnit.SECONDS)
+            }
+            return true
+        }
         override fun finishOwnedTask(owner: SessionOwner, task: LaunchedScene) = Unit
         override fun recoverOwnedDisplay(owner: SessionOwner, request: SceneRequest, task: LaunchedScene,
                                          cachedRearOn: Boolean?, isCurrent: () -> Boolean,

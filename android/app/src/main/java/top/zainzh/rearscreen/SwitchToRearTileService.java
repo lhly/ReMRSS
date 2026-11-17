@@ -34,11 +34,19 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import rikka.shizuku.Shizuku;
+import top.zainzh.rearscreen.platform.LegacyDisplayOccupancy;
 
 /** Quick Settings tile that moves the foreground task to the rear display. */
 public class SwitchToRearTileService extends TileService {
     private static final String TAG = "SwitchToRearTile";
     private static final long READY_TIMEOUT_MS = 5000;
+    enum ClickRoute { CONTROLLED_RETURN, LEGACY_SWITCH }
+    static ClickRoute routeForControlledOwner(boolean ownerPresent) {
+        return ownerPresent ? ClickRoute.CONTROLLED_RETURN : ClickRoute.LEGACY_SWITCH;
+    }
+    static ClickRoute routeForControlledState(boolean ownerPresent, boolean replacementJournalPresent) {
+        return routeForControlledOwner(ownerPresent || replacementJournalPresent);
+    }
     private static volatile String lastMovedTask;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -62,8 +70,16 @@ public class SwitchToRearTileService extends TileService {
         final long startedAt = SystemClock.elapsedRealtime();
         volatile boolean cancelled;
         boolean executing; // Main-thread state.
+        final LegacyDisplayOccupancy.ControlledPhysicalProjectionIdentity controlledOwner;
+        final String replacementRecoveryToken;
 
-        SwitchRequest(long id) { this.id = id; }
+        SwitchRequest(long id) { this(id, null, null); }
+        SwitchRequest(long id, LegacyDisplayOccupancy.ControlledPhysicalProjectionIdentity owner) { this(id, owner, null); }
+        SwitchRequest(long id, LegacyDisplayOccupancy.ControlledPhysicalProjectionIdentity owner, String recoveryToken) {
+            this.id = id;
+            controlledOwner = owner;
+            replacementRecoveryToken = recoveryToken;
+        }
     }
 
     private final ServiceConnection taskServiceConnection = new ServiceConnection() {
@@ -140,6 +156,33 @@ public class SwitchToRearTileService extends TileService {
                 showTemporaryFeedback(getString(R.string.privilege_service_unavailable));
                 return;
             }
+            LegacyDisplayOccupancy.ControlledPhysicalProjectionIdentity controlledOwner =
+                    LegacyDisplayOccupancy.controlledPhysicalProjectionForRecovery(this, RearDisplay.requireId());
+            LegacyDisplayOccupancy.PhysicalReplacementJournal replacement =
+                    LegacyDisplayOccupancy.physicalReplacementJournal(this);
+            boolean controlledRecordExists = LegacyDisplayOccupancy.hasControlledPhysicalProjectionRecord(this);
+            if (routeForControlledState(controlledRecordExists, replacement != null) == ClickRoute.CONTROLLED_RETURN) {
+                if (controlledOwner == null) {
+                    if (replacement == null) {
+                        showTemporaryFeedback("背屏身份已变化，暂不能安全恢复");
+                        return;
+                    }
+                    pending = new SwitchRequest(++nextRequestId, null, replacement.getToken());
+                    handler.removeCallbacks(resetFeedback);
+                    updateFeedback("正在安全恢复受控投放...");
+                    handler.postDelayed(readyTimeout, READY_TIMEOUT_MS);
+                    TaskServiceManager.acquire(this, taskServiceConnection);
+                    executePending();
+                    return;
+                }
+                pending = new SwitchRequest(++nextRequestId, controlledOwner);
+                handler.removeCallbacks(resetFeedback);
+                updateFeedback("正在恢复直接投放...");
+                handler.postDelayed(readyTimeout, READY_TIMEOUT_MS);
+                TaskServiceManager.acquire(this, taskServiceConnection);
+                executePending();
+                return; // Existing system tile is the trusted retry when notifications are unavailable.
+            }
             if (BuildConfig.VIRTUAL_CAST_ENABLED) {
                 Log.i(TAG, "stage=cast_mode_route virtual=" + RearCastMode.useVirtual(this));
                 // Both casting modes share the serial command service, including its live-session guard.
@@ -190,10 +233,61 @@ public class SwitchToRearTileService extends TileService {
         request.executing = true;
         handler.removeCallbacks(readyTimeout);
         updateFeedback("切换中...");
-        Log.i(TAG, "cast_dispatch mode=physical source=qs_tile action=switch");
+        Log.i(TAG, "cast_dispatch source=qs_tile action="
+                + (request.replacementRecoveryToken != null ? "replacement_recovery"
+                    : request.controlledOwner == null ? "switch" : "controlled_return"));
         Log.i(TAG, "request=" + request.id + " stage=ready elapsed_ms="
                 + (SystemClock.elapsedRealtime() - request.startedAt));
-        worker.execute(() -> RearAnimationManager.runDisplayAction(() -> performSwitch(request, service)));
+        worker.execute(() -> {
+            if (request.replacementRecoveryToken != null) performReplacementRecovery(request, service);
+            else if (request.controlledOwner != null) performControlledReturn(request, service);
+            else RearAnimationManager.runDisplayAction(() -> performSwitch(request, service));
+        });
+    }
+
+    private void performReplacementRecovery(SwitchRequest request, ITaskService service) {
+        boolean recovered = false;
+        try {
+            LegacyDisplayOccupancy.PhysicalReplacementJournal journal =
+                    LegacyDisplayOccupancy.physicalReplacementJournal(this);
+            if (journal != null && journal.getToken().equals(request.replacementRecoveryToken))
+                recovered = ControlledPhysicalCastOperations.recoverPhysicalReplacement(this, service);
+        } catch (Exception failure) { Log.w(TAG, "replacement_recovery_indeterminate", failure); }
+        final boolean result = recovered;
+        handler.post(() -> {
+            if (!request.cancelled) showTemporaryFeedback(result ? "✓ 受控投放已安全恢复"
+                    : "状态仍不确定；请稍后再次点按磁贴重试");
+            if (pending == request) pending = null;
+            if (destroyed || !listening) releaseConnection();
+        });
+    }
+
+    private void performControlledReturn(SwitchRequest request, ITaskService service) {
+        LegacyDisplayOccupancy.ControlledPhysicalProjectionIdentity owner = request.controlledOwner;
+        ControlledPhysicalCastOperations.ReturnResult result;
+        try {
+            result = ControlledPhysicalCastOperations.stop(this, service,
+                    "physical:" + owner.getTaskId() + ":" + owner.getGeneration(), owner.getTaskId(),
+                    owner.getPackageName(), owner.getBaseComponent(), owner.getDisplayId(), owner.getIdentity(),
+                    owner.getGeneration());
+        } catch (Exception failure) {
+            Log.w(TAG, "request=" + request.id + " stage=controlled_return_failed", failure);
+            RearScreenKeeperService.notifyControlledPhysicalRecovery(this, owner.getTaskId(), owner.getGeneration());
+            result = new ControlledPhysicalCastOperations.ReturnResult("INDETERMINATE", false);
+        }
+        final boolean stopped = result.stopped;
+        final String returnResult = result.result;
+        handler.post(() -> {
+            if (!request.cancelled && stopped) showTemporaryFeedback("✓ 已安全返回主屏");
+            else if (!request.cancelled) {
+                RearScreenKeeperService.notifyControlledPhysicalRecovery(this, owner.getTaskId(), owner.getGeneration());
+                showTemporaryFeedback("仍在恢复；再次点按「切换至背屏」磁贴重试");
+            }
+            Log.i(TAG, "request=" + request.id + " stage="
+                    + (stopped ? "controlled_returned" : "controlled_return_indeterminate") + " result=" + returnResult);
+            if (pending == request) pending = null;
+            if (destroyed || !listening) releaseConnection();
+        });
     }
 
     private void performSwitch(SwitchRequest request, ITaskService service) {

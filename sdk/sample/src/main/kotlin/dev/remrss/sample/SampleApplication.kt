@@ -8,6 +8,7 @@ import dev.remrss.platform.sdk.RearPlatformEvent
 import dev.remrss.platform.sdk.RearScenePresentation
 import dev.remrss.platform.sdk.RearScenePresentationGate
 import dev.remrss.platform.sdk.RearSceneRequest
+import dev.remrss.platform.sdk.RearRegion
 import java.io.Closeable
 
 class SampleApplication : Application() {
@@ -147,14 +148,17 @@ class SampleApplication : Application() {
         publishStatus(status)
     }
 
-    fun open(activity: android.app.Activity, onStatus: (String) -> Unit, keepVisible: Boolean = keepVisibleForNextScene) {
+    fun open(activity: android.app.Activity, onStatus: (String) -> Unit, keepVisible: Boolean = keepVisibleForNextScene, contentRotation: Int? = null) {
         keepVisibleForNextScene = keepVisible
-        val request = RearSceneRequest(ComponentName(this, RearSceneActivity::class.java), keepVisible = keepVisible)
+        val region = if (contentRotation == null) RearRegion.CAMERA_SAFE else RearRegion.FULL
+        val request = RearSceneRequest(ComponentName(this, RearSceneActivity::class.java), region = region, keepVisible = keepVisible)
         val launch = {
-            client.requestSceneActivation(activity, request) { result ->
+            val callback: (Result<Unit>) -> Unit = { result ->
                 publishStatus(if (result.isSuccess) "Host confirmation opened" else "Request failed: ${result.exceptionOrNull()?.message}")
                 onStatus(lastStatus)
             }
+            if (contentRotation == null) client.requestSceneActivation(activity, request, callback)
+            else client.requestSceneActivation(activity, request, contentRotation, callback)
         }
         if (client.isConnected) launch() else connect { result ->
             if (result.isSuccess) launch() else {

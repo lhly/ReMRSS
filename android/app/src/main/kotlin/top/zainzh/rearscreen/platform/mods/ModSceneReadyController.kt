@@ -225,7 +225,12 @@ internal class ModSceneReadyController(
         private val controllers = ConcurrentHashMap<String, ModSceneReadyController>()
 
         fun forLaunch(launch: SceneLaunchContext, ticket: String, coordinator: DisplaySessionCoordinator): ModSceneReadyController? {
-            controllers[ticket]?.let { return it.takeIf { existing -> existing.launch == launch } }
+            controllers[ticket]?.let { existing ->
+                return existing.takeIf { cached ->
+                    cached.launch.owner == launch.owner && cached.launch.sessionId == launch.sessionId &&
+                        cached.launch.generation == launch.generation && cached.launch.request.component == launch.request.component
+                }
+            }
             val created = ModSceneReadyController(launch, ticket, coordinator.asReadyPort(launch))
             val selected = controllers.putIfAbsent(ticket, created) ?: created
             return selected.takeIf { it.launch == launch }

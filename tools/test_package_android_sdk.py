@@ -13,6 +13,10 @@ spec = importlib.util.spec_from_file_location("package_android_sdk", SCRIPT)
 pkg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pkg)
 
+TEST_HOST_VERSION_NAME = "4.7.2-rc.13"
+TEST_HOST_VERSION_CODE = 34567
+TEST_HOST_SERVICE = 73
+
 
 class PackageAndroidSdkTests(unittest.TestCase):
     def setUp(self):
@@ -23,10 +27,11 @@ class PackageAndroidSdkTests(unittest.TestCase):
         self.output_parent.mkdir()
         (self.root / pkg.SDK_VERSION_FILE).parent.mkdir(parents=True)
         (self.root / pkg.SDK_VERSION_FILE).write_text("sdkVersion=0.9.7\n", encoding="utf-8")
-        (self.root / pkg.HOST_VERSION_FILE).write_text("versionName=4.0.0-rc.4\nversionCode=2025\n", encoding="utf-8")
+        (self.root / pkg.HOST_VERSION_FILE).write_text(
+            f"versionName={TEST_HOST_VERSION_NAME}\nversionCode={TEST_HOST_VERSION_CODE}\n", encoding="utf-8")
         service = self.root / pkg.HOST_SERVICE_SOURCE
         service.parent.mkdir(parents=True)
-        service.write_text("private static final int USER_SERVICE_CONTRACT_VERSION = 61;\n", encoding="utf-8")
+        service.write_text(f"private static final int USER_SERVICE_CONTRACT_VERSION = {TEST_HOST_SERVICE};\n", encoding="utf-8")
         build = self.root / pkg.SDK_BUILD_FILE
         build.parent.mkdir(parents=True, exist_ok=True)
         build.write_text("defaultConfig { minSdk = 24 }\n", encoding="utf-8")
@@ -70,6 +75,8 @@ dependencies { implementation(files("libs/platform-sdk-0.9.7.aar")) }
         with zipfile.ZipFile(classes, "w") as archive:
             archive.writestr("dev/remrss/platform/sdk/RearClient.class", b"class")
             archive.writestr("top/zainzh/rearscreen/platform/ipc/IRemoteRearPlatformService.class", b"class")
+            for name in pkg.ALLOWED_GEOMETRY_CLASSES:
+                archive.writestr(name, b"class")
         with zipfile.ZipFile(self.aar, "w") as archive:
             archive.writestr("AndroidManifest.xml", '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.remrss.platform.sdk"><uses-sdk android:minSdkVersion="24" /></manifest>')
             archive.writestr("classes.jar", classes.getvalue())
@@ -100,9 +107,9 @@ print(f"package: name='{match.group(1)}' versionCode='1' versionName='1.0'")
             "result": "passed",
             "sdkVersion": "0.9.7",
             "referenceHost": {
-                "versionName": "4.0.0-rc.4",
-                "versionCode": 2025,
-                "internalServiceContract": 61,
+                "versionName": TEST_HOST_VERSION_NAME,
+                "versionCode": TEST_HOST_VERSION_CODE,
+                "internalServiceContract": TEST_HOST_SERVICE,
             },
             "verifiedScopes": ["sdk.connect", "rear.notification.publish-display-terminal"],
             "consumerKind": "independent exact-AAR fixture; bundled sample not installed",
@@ -122,9 +129,14 @@ print(f"package: name='{match.group(1)}' versionCode='1' versionName='1.0'")
         output = self.output_parent / "bundle"
         bundle, archive, metadata = pkg.package(self.root, self.aar, self.sample_apk, output)
         self.assertEqual(metadata["sdk"]["version"], "0.9.7")
-        self.assertEqual(metadata["referenceHost"]["versionName"], "4.0.0-rc.4")
-        self.assertEqual(metadata["referenceHost"]["versionCode"], 2025)
-        self.assertEqual(metadata["referenceHost"]["internalServiceContract"], 61)
+        self.assertEqual(metadata["referenceHost"]["versionName"], TEST_HOST_VERSION_NAME)
+        with zipfile.ZipFile(self.aar) as aar:
+            with zipfile.ZipFile(io.BytesIO(aar.read("classes.jar"))) as classes:
+                self.assertTrue(pkg.ALLOWED_GEOMETRY_CLASSES.issubset(set(classes.namelist())))
+        self.assertEqual(metadata["referenceHost"]["versionCode"], TEST_HOST_VERSION_CODE)
+        self.assertEqual(metadata["referenceHost"]["internalServiceContract"], TEST_HOST_SERVICE)
+        self.assertEqual(metadata["referenceHost"]["versionSource"], str(pkg.HOST_VERSION_FILE))
+        self.assertEqual(metadata["referenceHost"]["serviceContractSource"], str(pkg.HOST_SERVICE_SOURCE))
         self.assertEqual(metadata["hostBuild"]["debugCompilation"], "not-recorded")
         self.assertEqual(metadata["hostBuild"]["releaseCompilation"], "not-recorded")
         self.assertEqual(metadata["hostBuild"]["debugAndReleaseCompilation"], "not-recorded")
@@ -141,6 +153,10 @@ print(f"package: name='{match.group(1)}' versionCode='1' versionName='1.0'")
         self.assertEqual(metadata["sdk"]["capabilities"], [
             {"name": "rear.scene", "version": 1},
             {"name": "rear.scene.keep_visible", "version": 1},
+            {"name": "rear.region", "version": 1},
+            {"name": "rear.scene.orientation", "version": 1},
+            {"name": "rear.cast.virtual", "version": 1},
+            {"name": "rear.cast.direct_physical", "version": 1},
             {"name": "data.battery", "version": 1},
             {"name": "data.systemMetrics", "version": 1},
             {"name": "action.invoke", "version": 1},
@@ -186,9 +202,9 @@ print(f"package: name='{match.group(1)}' versionCode='1' versionName='1.0'")
     def test_rejects_interop_receipt_when_sdk_or_host_reference_mismatches(self):
         for field, value in (
             ("sdkVersion", "0.9.6"),
-            ("referenceHost", {"versionName": "4.0.0-rc.3", "versionCode": 2025, "internalServiceContract": 61}),
-            ("referenceHost", {"versionName": "4.0.0-rc.4", "versionCode": 2024, "internalServiceContract": 61}),
-            ("referenceHost", {"versionName": "4.0.0-rc.4", "versionCode": 2025, "internalServiceContract": 60}),
+            ("referenceHost", {"versionName": "4.7.2-rc.12", "versionCode": TEST_HOST_VERSION_CODE, "internalServiceContract": TEST_HOST_SERVICE}),
+            ("referenceHost", {"versionName": TEST_HOST_VERSION_NAME, "versionCode": TEST_HOST_VERSION_CODE - 1, "internalServiceContract": TEST_HOST_SERVICE}),
+            ("referenceHost", {"versionName": TEST_HOST_VERSION_NAME, "versionCode": TEST_HOST_VERSION_CODE, "internalServiceContract": TEST_HOST_SERVICE - 1}),
         ):
             with self.subTest(field=field, value=value):
                 receipt_path = self._write_interop_receipt(**{field: value})
@@ -243,8 +259,8 @@ print(f"package: name='{match.group(1)}' versionCode='1' versionName='1.0'")
             pkg.package(self.root, self.aar, self.sample_apk, output)
         self.assertFalse(output.exists())
 
-    def test_accepts_root_rc4_delivery_destination(self):
-        output = self.root / ".planning/2026-11-05-platform-implementation/rc4-owned-notifications/delivery/bundle"
+    def test_accepts_root_private_sdk_delivery_destination(self):
+        output = self.root / pkg.DEFAULT_DELIVERY_ROOT / "bundle"
         bundle, _, _ = pkg.package(self.root, self.aar, self.sample_apk, output)
         self.assertTrue((bundle / "delivery.json").is_file())
 
@@ -313,43 +329,44 @@ print(f"package: name='{match.group(1)}' versionCode='1' versionName='1.0'")
         _, archive, _ = pkg.package(self.root, self.aar, self.sample_apk, output)
         self.assertEqual(archive.name, "remrss-platform-sdk-0.9.7.zip")
 
-    def test_rejects_wrong_tested_host_before_writing_output(self):
-        (self.root / pkg.HOST_VERSION_FILE).write_text("versionName=4.0.0-rc.2\nversionCode=2023\n", encoding="utf-8")
+    def test_rejects_invalid_canonical_host_version_metadata_before_writing_output(self):
+        (self.root / pkg.HOST_VERSION_FILE).write_text("versionName=not-a-version\nversionCode=2023\n", encoding="utf-8")
         output = self.output_parent / "bundle"
-        with self.assertRaisesRegex(pkg.PackageError, "expected RC4 Host"):
+        with self.assertRaisesRegex(pkg.PackageError, "Host versionName is missing or invalid"):
             pkg.package(self.root, self.aar, self.sample_apk, output)
         self.assertFalse(output.exists())
 
-    def test_default_host_service_matches_real_rc4_contract_61(self):
-        self.assertEqual(pkg.package.__defaults__[0], 61)
+    def test_reference_host_metadata_is_read_from_canonical_sources(self):
+        self.assertIsNone(pkg.package.__defaults__[0])
         _, _, metadata = pkg.package(
             self.root, self.aar, self.sample_apk, self.output_parent / "default-service"
         )
-        self.assertEqual(metadata["referenceHost"]["internalServiceContract"], 61)
+        self.assertEqual(metadata["referenceHost"]["versionName"], TEST_HOST_VERSION_NAME)
+        self.assertEqual(metadata["referenceHost"]["versionCode"], TEST_HOST_VERSION_CODE)
+        self.assertEqual(metadata["referenceHost"]["internalServiceContract"], TEST_HOST_SERVICE)
 
-    def test_rejects_old_rc4_service_contracts_59_and_60_before_writing_output(self):
+    def test_service_contract_is_automatically_read_from_task_service_source(self):
         service = self.root / pkg.HOST_SERVICE_SOURCE
-        for stale_version in (59, 60):
-            with self.subTest(stale_version=stale_version):
+        for source_version in (72, 74):
+            with self.subTest(source_version=source_version):
                 service.write_text(
-                    f"private static final int USER_SERVICE_CONTRACT_VERSION = {stale_version};\n",
+                    f"private static final int USER_SERVICE_CONTRACT_VERSION = {source_version};\n",
                     encoding="utf-8",
                 )
-                output = self.output_parent / f"old-service-{stale_version}"
-                with self.assertRaisesRegex(pkg.PackageError, "Host TaskService service contract does not match internal service 61"):
-                    pkg.package(self.root, self.aar, self.sample_apk, output)
-                self.assertFalse(output.exists())
+                _, _, metadata = pkg.package(
+                    self.root, self.aar, self.sample_apk, self.output_parent / f"service-{source_version}"
+                )
+                self.assertEqual(metadata["referenceHost"]["internalServiceContract"], source_version)
 
-    def test_rejects_stale_internal_service_contract_before_writing_output(self):
+    def test_rejects_explicit_host_service_mismatch_before_writing_output(self):
         service = self.root / pkg.HOST_SERVICE_SOURCE
-        service.write_text("private static final int USER_SERVICE_CONTRACT_VERSION = 58;\n", encoding="utf-8")
-        output = self.output_parent / "stale-service"
-        with self.assertRaisesRegex(pkg.PackageError, "RC4 SDK reference metadata must match internal service contract 61"):
-            pkg.package(self.root, self.aar, self.sample_apk, output, host_service=58)
+        output = self.output_parent / "explicit-mismatch"
+        with self.assertRaisesRegex(pkg.PackageError, "explicit --host-service 61 does not match TaskService source contract 73"):
+            pkg.package(self.root, self.aar, self.sample_apk, output, host_service=61)
         self.assertFalse(output.exists())
 
     def test_rejects_repo_output_outside_ignored_delivery_tree(self):
-        with self.assertRaisesRegex(pkg.PackageError, "ignored RC4 delivery"):
+        with self.assertRaisesRegex(pkg.PackageError, "ignored SDK delivery"):
             pkg._prepare_destination(self.root / "dist/sdk", self.root)
 
     def test_refuses_unmanaged_existing_output(self):
@@ -403,8 +420,22 @@ print(f"package: name='{match.group(1)}' versionCode='1' versionName='1.0'")
             archive.writestr("AndroidManifest.xml", '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.remrss.platform.sdk"><uses-sdk android:minSdkVersion="24" /></manifest>')
             archive.writestr("classes.jar", classes.getvalue())
             archive.writestr("META-INF/com/android/build/gradle/aar-metadata.properties", "minCompileSdk=37\n")
-        with self.assertRaisesRegex(pkg.PackageError, "outside the SDK client/IPC allowlist"):
+        with self.assertRaisesRegex(pkg.PackageError, "outside the SDK client/IPC/scene-geometry allowlist"):
             pkg.package(self.root, replacement, self.sample_apk, self.output_parent / "bundle")
+
+    def test_rejects_unknown_scene_geometry_class_but_accepts_exact_shared_geometry_allowlist(self):
+        classes = io.BytesIO()
+        with zipfile.ZipFile(classes, "w") as archive:
+            for name in pkg.ALLOWED_GEOMETRY_CLASSES:
+                archive.writestr(name, b"approved class")
+            archive.writestr("dev/remrss/scene/geometry/Unexpected.class", b"not approved")
+        replacement = Path(self.temp.name) / "unexpected-geometry.aar"
+        with zipfile.ZipFile(replacement, "w") as archive:
+            archive.writestr("AndroidManifest.xml", '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.remrss.platform.sdk"><uses-sdk android:minSdkVersion="24" /></manifest>')
+            archive.writestr("classes.jar", classes.getvalue())
+            archive.writestr("META-INF/com/android/build/gradle/aar-metadata.properties", "minCompileSdk=37\n")
+        with self.assertRaisesRegex(pkg.PackageError, "dev/remrss/scene/geometry/Unexpected.class"):
+            pkg.validate_aar(replacement)
 
 
 if __name__ == "__main__":

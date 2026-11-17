@@ -22,16 +22,16 @@ class ModToolTests(unittest.TestCase):
         self.assertEqual(schema['$defs']['clock']['properties']['bootId']['type'],'null')
         self.assertEqual(schema['$defs']['clock']['properties']['elapsedRealtimeMs']['maximum'],9007199254740991)
         effects=schema['$defs']['effect']['oneOf']
-        self.assertEqual({item['properties']['type']['const'] for item in effects},
-            {'rear.open','schedule.visible.register','schedule.visible.cancel','action.invoke','rear.notification.publish','rear.notification.cancel'})
-        action=next(item for item in effects if item['properties']['type']['const']=='action.invoke')
+        self.assertEqual({name for item in effects for name in ([item['properties']['type']['const']] if 'const' in item['properties']['type'] else item['properties']['type'].get('enum', []))},
+            {'rear.open','cast.start','cast.query','cast.close','schedule.visible.register','schedule.visible.cancel','action.invoke','rear.notification.publish','rear.notification.cancel'})
+        action=next(item for item in effects if item['properties']['type'].get('const')=='action.invoke')
         self.assertEqual(action['properties']['ref']['properties']['id']['pattern'],'^[a-f0-9]{48}$')
         self.assertIn(':',schema['$defs']['effectResult']['properties']['effectId']['pattern'])
-        schedule=next(item for item in effects if item['properties']['type']['const']=='schedule.visible.register')
+        schedule=next(item for item in effects if item['properties']['type'].get('const')=='schedule.visible.register')
         self.assertEqual(schedule['anyOf'],[{'required':['intervalMs']},{'required':['deadlineElapsedRealtimeMs']}])
         self.assertEqual(schedule['properties']['intervalMs']['maximum'],9007199254740991)
         self.assertEqual(schedule['properties']['deadlineElapsedRealtimeMs']['maximum'],9007199254740991)
-        notification=next(item for item in effects if item['properties']['type']['const']=='rear.notification.publish')
+        notification=next(item for item in effects if item['properties']['type'].get('const')=='rear.notification.publish')
         self.assertEqual(notification['required'],['type','notificationId','title'])
         self.assertEqual(notification['properties']['notificationId']['pattern'],r'^[A-Za-z0-9._:-]{1,64}$')
         self.assertEqual(notification['properties']['durationMs']['maximum'],15000)
@@ -174,6 +174,26 @@ class ModToolTests(unittest.TestCase):
                     if item.filename == 'main.js': value += b'\n// changed after signing\n'
                     out.writestr(item.filename,value)
             self.assertIn('完整性校验失败',run('check',tampered,ok=False).stderr)
+
+    def test_cast_effect_requires_typed_capabilities_and_keeps_omissions_optional(self):
+        namespace=runpy.run_path(str(CLI))
+        validate=namespace['validate_effect_intent']
+        validate({'type':'cast.start','mode':'VIRTUAL','region':'FULL','contentRotation':1},
+                 {'rear.cast.virtual','rear.region','rear.scene.orientation'}, 'effect')
+        validate({'type':'cast.start','mode':'VIRTUAL'}, {'rear.cast.virtual'}, 'effect')
+        with self.assertRaises(ValueError):
+            validate({'type':'rear.open','scene':'rear','region':'CAMERA_SAFE','keepVisible':False,'contentRotation':0}, {'rear.scene'}, 'effect')
+        with self.assertRaises(ValueError):
+            validate({'type':'cast.start','mode':'VIRTUAL','region':'FULL'}, {'rear.cast.virtual'}, 'effect')
+        with self.assertRaises(ValueError):
+            validate({'type':'cast.start','mode':'DIRECT_PHYSICAL','requestedDensityDpi':440}, {'rear.cast.direct_physical'}, 'effect')
+        with self.assertRaises(ValueError):
+            validate({'type':'cast.start','mode':'VIRTUAL','contentRotation':True}, {'rear.cast.virtual','rear.scene.orientation'}, 'effect')
+        handle={'type':'cast.query','sessionId':'opaque_session_handle', 'generation':2}
+        validate(handle, {'rear.cast.virtual'}, 'effect')
+        validate({**handle, 'type':'cast.close'}, {'rear.cast.virtual'}, 'effect')
+        with self.assertRaises(ValueError):
+            validate({**handle, 'generation':True}, {'rear.cast.virtual'}, 'effect')
 
     def test_unknown_capability_version_and_path_traversal_are_rejected(self):
         with tempfile.TemporaryDirectory() as td:

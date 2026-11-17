@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import top.zainzh.rearscreen.platform.RearViewportSnapshot
 import top.zainzh.rearscreen.platform.ScenePresentationSnapshot
 
 /** Derived Mod scene presentation state; Core visibility and the measured Activity window are independent inputs. */
@@ -20,6 +21,77 @@ internal data class ModSceneWindowPolicy(
 
     val keepScreenOn: Boolean
         get() = showSceneContent && keepVisibleRequested
+}
+
+/** A measured native rectangle must match its latest requested frame before it can report READY. */
+internal data class ModSceneContainerLayout(
+    val actualWidth: Int,
+    val actualHeight: Int,
+    val actualLeft: Int,
+    val actualTop: Int,
+    val expectedWidth: Int,
+    val expectedHeight: Int,
+    val expectedLeft: Int,
+    val expectedTop: Int,
+    val contentApplied: Boolean,
+) {
+    fun matchesCurrentGeometry(): Boolean = contentApplied && expectedWidth > 0 && expectedHeight > 0 &&
+        actualWidth == expectedWidth && actualHeight == expectedHeight &&
+        actualLeft == expectedLeft && actualTop == expectedTop
+}
+
+internal enum class ModSceneStaleReportAction { RESUBMIT_LATEST, WAIT_FOR_LAYOUT }
+
+/** Reported viewport plus raw cutout facts that FULL-region bounds intentionally do not encode. */
+internal data class ModSceneWindowGeometry(
+    val viewport: RearViewportSnapshot,
+    val safeLeftPx: Int?,
+    val safeTopPx: Int?,
+    val safeRightPx: Int?,
+    val safeBottomPx: Int?,
+    val insetsKnown: Boolean,
+)
+
+/** Core revisions differ across reports; all other viewport fields and measured cutout facts are geometry. */
+internal fun modSceneViewportGeometryChanged(
+    previous: ModSceneWindowGeometry?,
+    current: ModSceneWindowGeometry,
+): Boolean = previous?.copy(viewport = previous.viewport.copy(revision = 0L)) !=
+    current.copy(viewport = current.viewport.copy(revision = 0L))
+
+/** A stale Binder completion is consumed, then either retried against current layout or left to its layout edge. */
+internal fun modSceneStaleReportAction(
+    submittedGeometryEpoch: Long,
+    currentGeometryEpoch: Long,
+    latestLayoutApplied: Boolean,
+): ModSceneStaleReportAction? = when {
+    submittedGeometryEpoch == currentGeometryEpoch -> null
+    latestLayoutApplied -> ModSceneStaleReportAction.RESUBMIT_LATEST
+    else -> ModSceneStaleReportAction.WAIT_FOR_LAYOUT
+}
+
+/** Owns one Activity's callback across stop/start; stale completions cannot clear a resumed request. */
+internal class ModSceneWindowReportRequests {
+    private var nextToken = 0L
+    private var inFlightToken: Long? = null
+
+    val isInFlight: Boolean get() = inFlightToken != null
+
+    fun begin(activityStarted: Boolean, layoutApplied: Boolean): Long? {
+        if (!activityStarted || !layoutApplied || isInFlight) return null
+        return (++nextToken).also { inFlightToken = it }
+    }
+
+    fun invalidate() {
+        nextToken++
+        inFlightToken = null
+    }
+
+    fun finish(token: Long): Boolean {
+        if (inFlightToken != token) return false
+        inFlightToken = null
+        return true
+    }
 }
 
 /** Deduplicates bounded state/attribute diagnostics for the current Activity Window policy. */
@@ -91,6 +163,12 @@ internal class ModSceneWindowLifecycleGate(
     }
 
     fun currentWindowRequestEpoch(): Long = windowRequestEpoch
+
+    /** Geometry changed locally; invalidate old Core visibility snapshots without querying the lease. */
+    fun invalidateForGeometryChange() {
+        invalidatePresentationForWindowEpoch()
+        update()
+    }
 
     /** Apply only a fresh Core read for this exact Activity window epoch. Events never carry authority. */
     fun applyPresentationSnapshot(snapshot: ScenePresentationSnapshot?, requestEpoch: Long): Boolean {

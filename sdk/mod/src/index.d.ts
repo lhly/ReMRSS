@@ -1,6 +1,6 @@
 /** Capability names that the current host actually implements. A known future
  * capability is intentionally not part of this authoring contract yet. */
-export type CapabilityName = 'rear.scene' | 'rear.scene.keep_visible' | 'rear.notification' | 'data.battery' | 'data.systemMetrics' | 'model.local' | 'ui.native' | 'ui.dialog' | 'action.invoke' | 'schedule.visible' | 'clock.snapshot';
+export type CapabilityName = 'rear.scene' | 'rear.scene.keep_visible' | 'rear.region' | 'rear.scene.orientation' | 'rear.cast.virtual' | 'rear.cast.direct_physical' | 'rear.notification' | 'data.battery' | 'data.systemMetrics' | 'model.local' | 'ui.native' | 'ui.dialog' | 'action.invoke' | 'schedule.visible' | 'clock.snapshot';
 export interface CapabilityRequirement { name: CapabilityName; minimumVersion: 1 }
 export interface CapabilityDeclaration { required: CapabilityRequirement[]; optional: CapabilityRequirement[] }
 
@@ -36,9 +36,10 @@ export type ModEffect = {
   /** Requires a fresh user activation; host.configChanged cannot mint one. */
   type: 'rear.open';
   scene: 'rear';
-  region: 'CAMERA_SAFE';
+  region: 'CAMERA_SAFE' | 'FULL';
   keepVisible: boolean;
-} | { type: 'schedule.visible.register'; id: string; intervalMs: number; deadlineElapsedRealtimeMs?: number }
+  contentRotation?: 0 | 1 | 2 | 3;
+} | { type: 'cast.start'; id?: string; mode: 'VIRTUAL' | 'DIRECT_PHYSICAL'; region?: 'SAFE' | 'FULL'; contentRotation?: 0 | 1 | 2 | 3; requestedDensityDpi?: number } | { type: 'cast.query' | 'cast.close'; id?: string; sessionId: string; generation: number } | { type: 'schedule.visible.register'; id: string; intervalMs: number; deadlineElapsedRealtimeMs?: number }
   | { type: 'schedule.visible.register'; id: string; deadlineElapsedRealtimeMs: number; intervalMs?: number }
   | { type: 'schedule.visible.cancel'; id: string }
   | { type: 'action.invoke'; ref: { id: string; version: number } }
@@ -50,7 +51,7 @@ export interface NotificationRequest { id: string; title: string; text?: string;
 export interface HostEffectResultEvent extends ModEvent {
   type: 'host.effectResult';
   /** Original declarative id or host-generated id. */
-  payload: { effectId: string; requestEventId: string; status: 'accepted' | 'suppressed' | 'rejected'; code?: string };
+  payload: { effectId: string; requestEventId: string; status: 'accepted' | 'suppressed' | 'rejected'; code?: string; result?: Record<string, unknown> };
 }
 export type NotificationEndReason = 'TIMEOUT' | 'REPLACED' | 'CANCELLED' | 'OWNER_CLOSED' | 'OWNER_DIED' | 'AUTH_REVOKED' | 'GLOBAL_DISABLED' | 'PRIVACY_POLICY' | 'DND' | 'COVERED' | 'DISPLAY_UNAVAILABLE' | 'SCENE_TAKEOVER' | 'SERVICE_STOPPED' | 'RENDER_FAILED' | 'HOST_ERROR';
 export interface HostNotificationResultEvent extends ModEvent {

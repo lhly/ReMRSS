@@ -24,6 +24,17 @@ android {
     }
 }
 
+androidComponents.onVariants { variant ->
+    variant.sources.kotlin?.addStaticSourceDirectory(file("../../scene-geometry/src/main/kotlin").absolutePath)
+}
+
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    val testHome = layout.buildDirectory.dir("unitTestHome").get().asFile
+    systemProperty("user.home", testHome.absolutePath)
+    doFirst { testHome.mkdirs() }
 }

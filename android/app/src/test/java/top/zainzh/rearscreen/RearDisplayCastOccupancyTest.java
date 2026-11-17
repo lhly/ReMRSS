@@ -109,8 +109,10 @@ public class RearDisplayCastOccupancyTest {
         RearDisplayCastOccupancy.Snapshot decoded = RearDisplayCastOccupancy.Snapshot.parse(original.toJson(), 7);
         assertNull(decoded.failure);
         assertEquals(2, decoded.tasks.size());
-        assertTrue(RearDisplayCastOccupancy.evaluate(decoded, HOST, NO_SCENE).allowed());
-        assertEquals(1, RearDisplayCastOccupancy.evaluate(decoded, HOST, NO_SCENE).hiddenTasks);
+        assertTrue(RearDisplayCastOccupancy.evaluate(decoded, HOST, NO_SCENE,
+                RearDisplayCastOccupancyTest::testLauncher).allowed());
+        assertEquals(1, RearDisplayCastOccupancy.evaluate(decoded, HOST, NO_SCENE,
+                RearDisplayCastOccupancyTest::testLauncher).hiddenTasks);
     }
 
     @Test public void unreadableWrongDisplayDuplicateAndFailedQueriesAreNotEmpty() {
@@ -143,7 +145,13 @@ public class RearDisplayCastOccupancyTest {
                 info(3, 0, APP, true, true, false), info(4, 17, APP, true, true, false),
                 info(10, 7, APP, false, false, false), info(11, 7, HOME, true, true, false)), 7, Display.STATE_ON);
         assertEquals(2, snapshot.tasks.size());
-        RearDisplayCastOccupancy.Result result = RearDisplayCastOccupancy.evaluate(snapshot, HOST, NO_SCENE);
+        String canonical = APP + "/" + APP + ".Main";
+        assertEquals(canonical, snapshot.tasks.get(0).baseComponent);
+        assertEquals(canonical, RearDisplayCastOccupancy.Snapshot.parse(snapshot.toJson(), 7).tasks.get(0).baseComponent);
+        assertEquals(canonical, snapshot.tasks.get(0).topComponent);
+        assertEquals(canonical, RearDisplayCastOccupancy.Snapshot.parse(snapshot.toJson(), 7).tasks.get(0).topComponent);
+        RearDisplayCastOccupancy.Result result = RearDisplayCastOccupancy.evaluate(snapshot, HOST, NO_SCENE,
+                RearDisplayCastOccupancyTest::testLauncher);
         assertTrue(result.allowed());
         assertEquals(HOME + ":11", result.foreground);
         assertEquals(1, result.hiddenTasks);
@@ -189,6 +197,36 @@ public class RearDisplayCastOccupancyTest {
         }
     }
 
+    @Test public void exactRollbackMayKeepOnlyAOrLauncherAndRejectsEveryOtherRow() {
+        String a = "{\"task\":41,\"base\":\"com.example.reader\",\"top\":\"com.example.reader\","
+                + "\"baseComponent\":\"com.example.reader/.Main\",\"topComponent\":\"com.example.reader/.Main\","
+                + "\"visible\":true,\"requested\":true,\"sleeping\":false}";
+        String launcher = "{\"task\":7,\"base\":\"com.xiaomi.subscreencenter\",\"top\":\"com.xiaomi.subscreencenter\","
+                + "\"baseComponent\":\"com.xiaomi.subscreencenter/.Home\",\"topComponent\":\"com.xiaomi.subscreencenter/.Home\","
+                + "\"userId\":0,\"visible\":true,\"requested\":true,\"sleeping\":false}";
+        String prefix = "{\"status\":\"ok\",\"display\":4,\"power\":2,\"tasks\":[";
+        assertTrue(RearDisplayCastOccupancy.containsOnlyExactTask(prefix + a + "]}", 4, 41,
+                "com.example.reader", "com.example.reader/.Main"));
+        assertTrue(RearDisplayCastOccupancy.safeForExactPhysicalRestore(prefix + a + "]}", 4, 41,
+                "com.example.reader", "com.example.reader/.Main"));
+        assertTrue(RearDisplayCastOccupancy.emptyOrOnlySystemLauncher(prefix + launcher + "]}", 4,
+                RearDisplayCastOccupancyTest::testLauncher));
+        String thirdParty = a + "," + launcher;
+        assertFalse(RearDisplayCastOccupancy.safeForExactPhysicalRestore(prefix + thirdParty + "]}", 4, 41,
+                "com.example.reader", "com.example.reader/.Main"));
+        assertFalse(RearDisplayCastOccupancy.safeForExactPhysicalRestore(
+                "{\"status\":\"unavailable\",\"display\":4}", 4, 41,
+                "com.example.reader", "com.example.reader/.Main"));
+    }
+
+    @Test public void launcherPackagePrefixWithoutExactSystemUserIdentityIsNotTrusted() {
+        String guessed = "{\"task\":7,\"base\":\"com.xiaomi.subscreencenter\",\"top\":\"com.xiaomi.subscreencenter\","
+                + "\"baseComponent\":\"com.xiaomi.subscreencenter/.Anything\",\"topComponent\":\"com.xiaomi.subscreencenter/.Anything\","
+                + "\"visible\":true,\"requested\":true,\"sleeping\":false}";
+        String snapshot = "{\"status\":\"ok\",\"display\":4,\"power\":2,\"tasks\":[" + guessed + "]}";
+        assertFalse(RearDisplayCastOccupancy.emptyOrOnlySystemLauncher(snapshot, 4));
+    }
+
     private interface RemoteQuery { String read(int display) throws Exception; }
     private static ITaskService remote(RemoteQuery query) {
         return (ITaskService) Proxy.newProxyInstance(ITaskService.class.getClassLoader(), new Class<?>[]{ITaskService.class},
@@ -198,13 +236,22 @@ public class RearDisplayCastOccupancyTest {
                 });
     }
     private static RearDisplayCastOccupancy.Task task(int id, String pkg, Boolean visible, Boolean requested, Boolean sleeping) {
-        return new RearDisplayCastOccupancy.Task(id, pkg, pkg, visible, requested, sleeping);
+        String component = pkg == null ? null : pkg + "/.Home";
+        return new RearDisplayCastOccupancy.Task(id, pkg, pkg, component, component,
+                HOME.equals(pkg) ? 0 : -1, visible, requested, sleeping);
     }
     private static RearDisplayCastOccupancy.Snapshot snapshot(int display, int power, RearDisplayCastOccupancy.Task... tasks) {
         return new RearDisplayCastOccupancy.Snapshot(display, power, Arrays.asList(tasks), "test", null);
     }
     private static RearDisplayCastOccupancy.Result evaluate(RearDisplayCastOccupancy.Task... tasks) {
-        return RearDisplayCastOccupancy.evaluate(snapshot(7, Display.STATE_ON, tasks), HOST, NO_SCENE);
+        return RearDisplayCastOccupancy.evaluate(snapshot(7, Display.STATE_ON, tasks), HOST, NO_SCENE,
+                RearDisplayCastOccupancyTest::testLauncher);
+    }
+    private static boolean testLauncher(RearDisplayCastOccupancy.Task task) {
+        return task != null && task.userId == 0 && HOME.equals(task.basePackage)
+                && HOME.equals(task.topPackage) && task.baseComponent.equals(task.topComponent)
+                && ((HOME + "/.Home").equals(task.baseComponent)
+                    || (HOME + "/" + HOME + ".Main").equals(task.baseComponent));
     }
     public static class Component {
         private final String pkg;
@@ -235,10 +282,11 @@ public class RearDisplayCastOccupancyTest {
         public String getTasks(int max) { return "not a task snapshot"; }
     }
     public static class OldTaskInfo {
-        public final int taskId, displayId;
+        public final int taskId, displayId, userId;
         public final Component baseActivity, topActivity;
         OldTaskInfo(int id, int display, String pkg) {
             taskId = id; displayId = display;
+            userId = 0;
             baseActivity = topActivity = new Component(pkg);
         }
     }

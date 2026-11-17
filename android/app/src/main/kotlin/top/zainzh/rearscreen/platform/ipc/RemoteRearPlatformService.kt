@@ -2,23 +2,33 @@ package top.zainzh.rearscreen.platform.ipc
 
 import android.app.PendingIntent
 import android.app.Service
+import android.app.ActivityOptions
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.os.Binder
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.RemoteException
 import android.os.SystemClock
+import android.util.Log
+import android.view.Display
+import top.zainzh.rearscreen.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import top.zainzh.rearscreen.platform.*
+import dev.remrss.scene.geometry.CutoutKnowledge
+import dev.remrss.scene.geometry.PixelRect as SharedPixelRect
+import dev.remrss.scene.geometry.SceneRegion
 import top.zainzh.rearscreen.platform.data.DataField
 import top.zainzh.rearscreen.platform.data.DataSnapshot
 import top.zainzh.rearscreen.platform.data.DataValue
 import top.zainzh.rearscreen.SceneActivationConfirmationActivity
 import top.zainzh.rearscreen.DataAccessConfirmationActivity
 import top.zainzh.rearscreen.NotificationAccessConfirmationActivity
+import top.zainzh.rearscreen.ControlledCastConfirmationActivity
 import top.zainzh.rearscreen.platform.notifications.NotificationEndReason
 import top.zainzh.rearscreen.platform.notifications.NotificationEvent
 import top.zainzh.rearscreen.platform.notifications.NotificationEventStatus
@@ -38,7 +48,32 @@ import java.security.MessageDigest
 import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicLong
+
+private const val CAST_FLOW_TAG = "ReMRSSCastFlow"
+private fun castFlowLog(stage: String, code: String? = null) {
+    if (BuildConfig.DEBUG) Log.i(CAST_FLOW_TAG, if (code == null) "stage=$stage" else "stage=$stage code=$code")
+}
+
+private class OrderedCastObserver(private val delegate: CastObserver) : CastObserver {
+    private val lock = Any()
+    private var released = false
+    private val queued = ArrayDeque<CastEvent>()
+
+    override fun onCastEvent(event: CastEvent) {
+        synchronized(lock) {
+            if (released) delegate.onCastEvent(event) else queued.addLast(event)
+        }
+    }
+
+    fun release() {
+        synchronized(lock) {
+            released = true
+            while (queued.isNotEmpty()) delegate.onCastEvent(queued.removeFirst())
+        }
+    }
+}
 
 /** The only exported rear-platform surface. All requests are scoped to the calling UID and certificate. */
 class RemoteRearPlatformService : Service() {
@@ -71,6 +106,26 @@ class RemoteRearPlatformService : Service() {
         val connection: ClientConnection,
         val expiresAt: Long,
     )
+    private data class PendingCastActivation(
+        val nonce: String,
+        val requestId: String,
+        val owner: SessionOwner,
+        val connection: ClientConnection,
+        val ticket: PreparedCastTicket,
+        val applicationLabel: String,
+        val modeLabel: String,
+        val regionLabel: String,
+        val replacingLabel: String?,
+        val expiresAt: Long,
+        val terminalGate: PendingCastActivationGate = PendingCastActivationGate(connection, expiresAt)
+    )
+    internal data class CastConfirmationDetails(
+        val applicationLabel: String,
+        val modeLabel: String,
+        val regionLabel: String,
+        val replacingLabel: String?,
+        val expiresAtElapsedRealtimeMs: Long
+    )
     private class DataSubscription(val connection: ClientConnection) {
         private val lease = DataSubscriptionLease<DataSnapshot>()
         fun deliver(snapshot: DataSnapshot, emit: (DataSnapshot) -> Unit) = lease.deliver(snapshot, emit)
@@ -89,6 +144,15 @@ class RemoteRearPlatformService : Service() {
             val owner = callerOwner(callerPackageName, Binder.getCallingUid(), epoch = 0L)
             val core = RearCapabilityCore.get(this@RemoteRearPlatformService)
             val snapshot = core.displaySessions.queryCapabilities(owner)
+            val castRuntime = ControlledCastRuntimeProvider.get(this@RemoteRearPlatformService)
+            val sceneBackendState = snapshot.capabilities.firstOrNull { it.name == "rear.scene" }
+                ?.availability ?: CapabilityAvailability.BACKEND_UNAVAILABLE
+            val castCapabilities = listOf(
+                castModeCapabilityState("rear.cast.virtual", snapshot.backendConnected, snapshot.deviceAvailable, sceneBackendState,
+                    castRuntime.modeAvailable(CastMode.VIRTUAL)),
+                castModeCapabilityState("rear.cast.direct_physical", snapshot.backendConnected, snapshot.deviceAvailable, sceneBackendState,
+                    castRuntime.modeAvailable(CastMode.DIRECT_PHYSICAL))
+            )
             val granted = core.grantedSdkDataFields(owner)
             val dataCaps = listOf(
                 CapabilityState("data.battery", 1, CapabilityAvailability.AVAILABLE,
@@ -101,7 +165,7 @@ class RemoteRearPlatformService : Service() {
                 CapabilityState("rear.notification", 1, CapabilityAvailability.AVAILABLE,
                     core.isSdkNotificationPublisherGranted(owner))
             )
-            return encodeCapabilities(snapshot.copy(capabilities = snapshot.capabilities + dataCaps)).toString()
+            return encodeCapabilities(snapshot.copy(capabilities = snapshot.capabilities + dataCaps + castCapabilities)).toString()
         }
 
         override fun queryRearInfo(callerPackageName: String): String {
@@ -171,6 +235,8 @@ class RemoteRearPlatformService : Service() {
                 sessions.entries.removeAll { (_, value) -> value === client }
                 connections.remove(client.binder, client)
             }
+            cancelPendingCastActivations(client)
+            runCatching { ControlledCastRuntimeProvider.get(this@RemoteRearPlatformService).owners.sdkConnectionClosed(client.owner) }
             core().displaySessions.closeOwnerSessions(client.owner, SceneCloseReason.CLIENT_CLOSED)
             closeOwnedNotifications(client, NotificationEndReason.OWNER_CLOSED)
             core().closePlatformData(client.owner)
@@ -370,6 +436,88 @@ class RemoteRearPlatformService : Service() {
                 .put("requestId", result.requestId ?: JSONObject.NULL).put("reason", result.reason ?: JSONObject.NULL).toString()
         }
 
+        override fun requestCastActivation(callerPackageName: String, requestId: String, requestJson: String,
+                                           callback: IRemoteRearPlatformCallback): PendingIntent {
+            castFlowLog("prepare_started")
+            require(requestId.matches(Regex("[A-Za-z0-9_-]{12,64}"))) { "E_INVALID_STATE: requestId" }
+            require(requestJson.length <= MAX_REQUEST_JSON_LENGTH) { "E_LIMIT_EXCEEDED: cast request" }
+            val client = clientConnection(callerPackageName, Binder.getCallingUid(), callback)
+            if (!isActiveClient(client)) throw SecurityException("E_CLIENT_DIED")
+            val input = JSONObject(requestJson)
+            require(input.optString("selector") == "CURRENT_FOREGROUND" && !input.has("component")) {
+                "E_INVALID_STATE: SDK Cast target selector"
+            }
+            val mode = runCatching { CastMode.valueOf(input.getString("mode")) }
+                .getOrElse { throw IllegalArgumentException("E_INVALID_STATE: Cast mode") }
+            val region = if (input.has("region")) runCatching { CastRegion.valueOf(input.getString("region")) }
+                .getOrElse { throw IllegalArgumentException("E_INVALID_STATE: Cast region") } else null
+            val rotation = if (input.has("contentRotation")) input.getInt("contentRotation") else null
+            if (rotation != null && rotation !in 0..3) throw IllegalArgumentException("E_INVALID_STATE: contentRotation")
+            val density = if (input.has("requestedDensityDpi")) input.getInt("requestedDensityDpi") else null
+            if (density != null && density !in 72..1000) throw IllegalArgumentException("E_INVALID_STATE: requestedDensityDpi")
+            if (mode == CastMode.DIRECT_PHYSICAL && (region != null || rotation != null || density != null))
+                throw IllegalArgumentException("E_UNSUPPORTED: direct physical mode does not accept region, rotation or density")
+            val coordinator = ControlledCastRuntimeProvider.get(this@RemoteRearPlatformService).coordinator
+            val targetRequest = CastTargetRequest(CastTargetSelector.CurrentForeground, mode, region, rotation, density)
+            val prepared = when (val result = coordinator.prepare(client.owner, targetRequest)) {
+                is CastPrepareResult.Accepted -> result.ticket
+                is CastPrepareResult.Rejected -> {
+                    castFlowLog("prepare_rejected", "E_CAST_${result.code.name}")
+                    throw IllegalStateException("E_CAST_${result.code.name}")
+                }
+            }
+            if (!isActiveClient(client)) {
+                coordinator.abort(client.owner, prepared.ticketId, prepared.generation)
+                throw IllegalStateException("E_CLIENT_DIED")
+            }
+            val targetComponent = ComponentName.unflattenFromString(prepared.target.requestedComponent ?: prepared.target.baseComponent)
+            val appLabel = targetComponent?.packageName?.let(::applicationLabel) ?: callerPackageName
+            val replacingLabel = prepared.observedOccupant?.let(::occupantLabel)
+            val nonce = newOpaqueId()
+            val pending = PendingCastActivation(nonce, requestId, client.owner, client, prepared, appLabel,
+                if (mode == CastMode.VIRTUAL) "虚拟投放" else "物理直投",
+                when (prepared.target.region) { CastRegion.FULL -> "FULL 全域"; CastRegion.SAFE -> "SAFE 安全区" },
+                replacingLabel, prepared.expiresAtElapsedRealtimeMs)
+            pendingCastActivations.values.filter { SystemClock.elapsedRealtime() >= it.expiresAt || it.connection.dead }
+                .forEach { expired -> if (pendingCastActivations.remove(expired.nonce, expired)) {
+                    coordinator.abort(expired.owner, expired.ticket.ticketId, expired.ticket.generation)
+                    send(expired.connection, JSONObject().put("type", "castFailed").put("requestId", expired.requestId).put("code", "E_TICKET_STALE"))
+                } }
+            if (pendingCastActivations.size >= MAX_PENDING_CAST_ACTIVATIONS) {
+                coordinator.abort(client.owner, prepared.ticketId, prepared.generation)
+                throw IllegalStateException("E_QUOTA_EXCEEDED: cast confirmation")
+            }
+            pendingCastActivations[nonce] = pending
+            scheduleCastExpiry(pending)
+            castFlowLog("prepared")
+            SdkCastPackageIdentityMonitor.track(client.owner)
+            val intent = Intent(this@RemoteRearPlatformService, ControlledCastConfirmationActivity::class.java)
+                .putExtra(EXTRA_CAST_NONCE, nonce)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+            return PendingIntent.getActivity(this@RemoteRearPlatformService,
+                nextPendingIntentRequestCode.incrementAndGet().toInt(), intent,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+                ActivityOptions.makeBasic().setLaunchDisplayId(Display.DEFAULT_DISPLAY).toBundle())
+        }
+
+        override fun queryCastSession(callerPackageName: String, sessionId: String, generation: Long,
+                                      callback: IRemoteRearPlatformCallback): String {
+            val client = clientConnection(callerPackageName, Binder.getCallingUid(), callback)
+            return when (val result = ControlledCastRuntimeProvider.get(this@RemoteRearPlatformService).coordinator
+                .query(client.owner, CastSessionHandle(sessionId, generation))) {
+                is CastQueryResult.Rejected -> errorResult("E_${result.code.name}")
+                is CastQueryResult.Snapshot -> encodeCastSnapshot(result).toString()
+            }
+        }
+
+        override fun closeCastSession(callerPackageName: String, sessionId: String, generation: Long,
+                                      callback: IRemoteRearPlatformCallback): String {
+            val client = clientConnection(callerPackageName, Binder.getCallingUid(), callback)
+            val result = ControlledCastRuntimeProvider.get(this@RemoteRearPlatformService).coordinator
+                .close(client.owner, CastSessionHandle(sessionId, generation), castObserver(client, ""))
+            return encodeCastOperation(result).toString()
+        }
+
         override fun queryData(callerPackageName: String, fieldsJson: String, callback: IRemoteRearPlatformCallback): String {
             val client = clientConnection(callerPackageName, Binder.getCallingUid(), callback)
             val fields = parseDataFields(fieldsJson)
@@ -500,6 +648,7 @@ class RemoteRearPlatformService : Service() {
     override fun onCreate() {
         super.onCreate()
         activeService = this
+        SdkCastPackageIdentityMonitor.install(applicationContext)
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -569,6 +718,122 @@ class RemoteRearPlatformService : Service() {
             signingDigest(client.owner.transportPackageName) == client.owner.transportSigningCertificateDigest
     }.getOrDefault(false)
 
+    private fun isActiveClient(client: ClientConnection): Boolean =
+        synchronized(connections) { !client.dead && connections[client.binder] === client } && isCurrentClientIdentity(client)
+
+    private fun cancelPendingCastActivations(connection: ClientConnection) {
+        val pending = pendingCastActivations.values.filter { it.connection === connection }
+        pending.forEach { item ->
+            val claim = item.terminalGate.claim(connection, SystemClock.elapsedRealtime())
+            if (claim != PendingCastActivationGate.Claim.CLAIMED && claim != PendingCastActivationGate.Claim.EXPIRED) return@forEach
+            if (!pendingCastActivations.remove(item.nonce, item)) return@forEach
+            runCatching { ControlledCastRuntimeProvider.get(this).coordinator.abort(item.owner, item.ticket.ticketId, item.ticket.generation) }
+            val code = if (claim == PendingCastActivationGate.Claim.EXPIRED) "E_TICKET_STALE" else "E_SERVICE_DISCONNECTED"
+            send(connection, JSONObject().put("type", "castFailed").put("requestId", item.requestId)
+                .put("phase", "CONNECTION").put("code", code))
+            ControlledCastConfirmationActivity.notifyPendingCastFailure(item.nonce, code)
+            castFlowLog("pending_connection_ended", code)
+        }
+    }
+
+    private fun scheduleCastExpiry(pending: PendingCastActivation) {
+        val delayMs = (pending.expiresAt - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        Handler(Looper.getMainLooper()).postDelayed({
+            when (pending.terminalGate.expire(pending.connection, SystemClock.elapsedRealtime())) {
+                PendingCastActivationGate.Claim.NOT_DUE -> {
+                    scheduleCastExpiry(pending)
+                    return@postDelayed
+                }
+                PendingCastActivationGate.Claim.STALE -> return@postDelayed
+                PendingCastActivationGate.Claim.EXPIRED -> if (!pendingCastActivations.remove(pending.nonce, pending)) return@postDelayed
+                PendingCastActivationGate.Claim.CLAIMED -> return@postDelayed
+            }
+            runCatching {
+                ControlledCastRuntimeProvider.get(this).coordinator.abort(
+                    pending.owner, pending.ticket.ticketId, pending.ticket.generation
+                )
+            }
+            send(pending.connection, JSONObject().put("type", "castFailed")
+                .put("requestId", pending.requestId).put("phase", "CONFIRMATION").put("code", "E_TICKET_STALE"))
+            castFlowLog("confirmation_expired", "E_TICKET_STALE")
+            ControlledCastConfirmationActivity.notifyPendingCastFailure(pending.nonce, "E_TICKET_STALE")
+        }, delayMs)
+    }
+
+    private fun applicationLabel(packageName: String): String = runCatching {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
+    }.getOrDefault(packageName)
+
+    private fun occupantLabel(occupant: CastOccupantIdentity): String {
+        val packageName = runCatching {
+            val component = ComponentName.unflattenFromString(occupant.baseComponent) ?: return "现有受控投放"
+            component.packageName.takeIf { it.matches(Regex("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) }
+        }.getOrNull() ?: return "现有受控投放"
+        val label = runCatching {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
+                .takeIf { it.isNotBlank() }
+        }.getOrNull() ?: return "现有受控投放"
+        return "$label（现有受控投放）"
+    }
+
+    private fun castObserver(connection: ClientConnection, requestId: String) = object : CastObserver {
+        override fun onCastEvent(event: CastEvent) {
+            val value = JSONObject().put("requestId", requestId)
+            when (event) {
+                is CastEvent.Ready -> {
+                    castFlowLog("backend_ready")
+                    value.put("type", "castReady").put("sessionId", event.handle.sessionId)
+                    .put("generation", event.handle.generation).put("state", CastSessionState.READY.name)
+                    .put("mode", event.target.mode.name).put("region", event.target.region.name)
+                    .put("contentRotation", event.target.contentRotation).put("presentationKind", event.presentationKind.name)
+                    .put("viewport", event.appliedViewport?.let(::encodeCastViewport) ?: JSONObject.NULL)
+                }
+                is CastEvent.CommitFailed -> {
+                    castFlowLog("commit_failed", "E_${event.failure.code.name}")
+                    value.put("type", "castFailed").put("phase", "COMMIT").put("code", "E_${event.failure.code.name}")
+                }
+                is CastEvent.Expired -> value.put("type", "castFailed").put("phase", "CONFIRMATION").put("code", "E_TICKET_STALE")
+                is CastEvent.Aborted -> value.put("type", "castFailed").put("phase", "CONFIRMATION").put("code", "E_USER_CANCELLED")
+                is CastEvent.Closed -> value.put("type", "castClosed").put("sessionId", event.handle.sessionId).put("generation", event.handle.generation)
+                is CastEvent.Failed -> {
+                    castFlowLog("backend_failed", "E_${event.failure.code.name}")
+                    value.put("type", "castFailed").put("phase", "BACKEND").put("code", "E_${event.failure.code.name}")
+                        .put("sessionId", event.handle.sessionId).put("generation", event.handle.generation)
+                }
+            }
+            send(connection, value)
+        }
+    }
+
+    private fun encodeCastViewport(viewport: AppliedCastViewport) = JSONObject()
+        .put("revision", viewport.revision).put("rearDisplayId", viewport.rearDisplayId)
+        .put("region", viewport.region.name).put("densityDpi", viewport.densityDpi)
+        .put("leftPx", viewport.leftPx).put("topPx", viewport.topPx)
+        .put("widthPx", viewport.widthPx).put("heightPx", viewport.heightPx)
+        .put("bufferWidthPx", viewport.bufferWidthPx).put("bufferHeightPx", viewport.bufferHeightPx)
+        .put("displayRotation", viewport.displayRotation).put("contentRotation", viewport.contentRotation)
+        .put("windowLeftPx", viewport.windowLeftPx).put("windowTopPx", viewport.windowTopPx)
+        .put("windowWidthPx", viewport.windowWidthPx).put("windowHeightPx", viewport.windowHeightPx)
+        .put("inputScaleX", viewport.inputScaleX).put("inputSkewX", viewport.inputSkewX)
+        .put("inputTranslateX", viewport.inputTranslateX).put("inputSkewY", viewport.inputSkewY)
+        .put("inputScaleY", viewport.inputScaleY).put("inputTranslateY", viewport.inputTranslateY)
+
+    private fun encodeCastSnapshot(result: CastQueryResult.Snapshot) = JSONObject().put("success", true)
+        .put("sessionId", result.handle.sessionId).put("generation", result.handle.generation)
+        .put("state", result.state.name).put("mode", result.target.mode.name).put("region", result.target.region.name)
+        .put("contentRotation", result.target.contentRotation)
+        .put("presentationKind", result.presentationKind.name)
+        .put("failureCode", result.failure?.let { "E_${it.code.name}" } ?: JSONObject.NULL)
+        .put("viewport", result.appliedViewport?.let(::encodeCastViewport) ?: JSONObject.NULL)
+
+    private fun encodeCastOperation(result: CastOperationResult) = when (result) {
+        CastOperationResult.Completed -> JSONObject().put("success", true)
+        is CastOperationResult.Accepted -> JSONObject().put("success", true).put("pending", true)
+            .put("operationId", result.operationId).put("generation", result.generation)
+        is CastOperationResult.Rejected -> JSONObject().put("success", false).put("error", "E_${result.code.name}")
+            .put("retryable", result.retryable)
+    }
+
     private fun clientConnection(packageName: String, uid: Int, callback: IRemoteRearPlatformCallback): ClientConnection {
         val digest = callerOwner(packageName, uid, 0L).transportSigningCertificateDigest
         val clientBinder = callback.asBinder()
@@ -590,6 +855,9 @@ class RemoteRearPlatformService : Service() {
                     sessions.entries.removeAll { (_, value) -> value === connection }
                     connections.remove(clientBinder, connection)
                 }
+                cancelPendingCastActivations(connection)
+                runCatching { ControlledCastRuntimeProvider.get(this@RemoteRearPlatformService)
+                    .owners.sdkConnectionClosed(owner) }
                 core().displaySessions.closeOwnerSessions(owner, SceneCloseReason.CLIENT_DIED)
                 closeOwnedNotifications(connection, NotificationEndReason.OWNER_DIED)
                 core().closePlatformData(owner)
@@ -601,6 +869,7 @@ class RemoteRearPlatformService : Service() {
             }
             connection.deathRecipient = death
             connections[clientBinder] = connection
+            ControlledCastRuntimeProvider.get(this).owners.sdkConnectionOpened(owner)
             return connection
         }
     }
@@ -621,7 +890,9 @@ class RemoteRearPlatformService : Service() {
                 if (!CAPABILITY_NAME.matches(it.name) || it.minimumVersion < 1) throw IllegalArgumentException("E_INVALID_STATE: capability")
             }
         }.toSet()
-        return SceneRequest(component, region, obj.optBoolean("keepVisible", true), requirements)
+        val contentRotation = obj.optInt("contentRotation", 0)
+        if (contentRotation !in 0..3) throw IllegalArgumentException("E_INVALID_STATE: contentRotation")
+        return SceneRequest(component, region, obj.optBoolean("keepVisible", true), requirements, contentRotation, obj.has("contentRotation"))
     }
 
     private fun parseDataFields(json: String): Set<DataField> {
@@ -672,7 +943,14 @@ class RemoteRearPlatformService : Service() {
             inputTransform = CoordinateTransform(
                 transform.getDouble("scaleX").toFloat(), transform.getDouble("skewX").toFloat(), transform.getDouble("translateX").toFloat(),
                 transform.getDouble("skewY").toFloat(), transform.getDouble("scaleY").toFloat(), transform.getDouble("translateY").toFloat()
-            )
+            ),
+            region = runCatching { SceneRegion.valueOf(value.optString("region", SceneRegion.SAFE.name)) }.getOrDefault(SceneRegion.SAFE),
+            cutoutKnowledge = runCatching { CutoutKnowledge.valueOf(value.optString("cutoutKnowledge", CutoutKnowledge.UNKNOWN.name)) }.getOrDefault(CutoutKnowledge.UNKNOWN),
+            cutoutBoundsPx = value.optJSONArray("cutoutBoundsPx")?.let { array ->
+                (0 until array.length()).mapNotNull { index -> runCatching {
+                    array.getJSONObject(index).let { SharedPixelRect(it.getInt("left"), it.getInt("top"), it.getInt("right"), it.getInt("bottom")) }
+                }.getOrNull() }
+            }.orEmpty()
         )
         return SceneWindowReport(component, root.getInt("taskId"), viewport)
     }
@@ -713,6 +991,8 @@ class RemoteRearPlatformService : Service() {
         put("windowPx", px(viewport.windowPx)).put("windowDp", JSONObject().put("width", viewport.windowDp.width).put("height", viewport.windowDp.height))
         put("densityDpi", viewport.densityDpi).put("renderBufferPx", px(viewport.renderBufferPx))
         put("displayRotation", viewport.displayRotation).put("contentRotation", viewport.contentRotation)
+        put("region", viewport.region.name).put("cutoutKnowledge", viewport.cutoutKnowledge.name)
+        put("cutoutBoundsPx", JSONArray().apply { viewport.cutoutBoundsPx.forEach { put(JSONObject().put("left", it.left).put("top", it.top).put("right", it.right).put("bottom", it.bottom)) } })
         put("inputTransform", JSONObject().put("scaleX", viewport.inputTransform.scaleX).put("skewX", viewport.inputTransform.skewX)
             .put("translateX", viewport.inputTransform.translateX).put("skewY", viewport.inputTransform.skewY)
             .put("scaleY", viewport.inputTransform.scaleY).put("translateY", viewport.inputTransform.translateY))
@@ -740,6 +1020,7 @@ class RemoteRearPlatformService : Service() {
         const val EXTRA_DATA_CONSENT_NONCE = "remrss_data_consent_nonce"
         const val EXTRA_ACTION_INVOCATION_NONCE = "remrss_registered_action_invocation_nonce"
         const val EXTRA_NOTIFICATION_CONSENT_NONCE = "remrss_notification_consent_nonce"
+        const val EXTRA_CAST_NONCE = "remrss_controlled_cast_nonce"
         const val ACTIVATION_INTENT_TTL_MS = 60_000L
         const val DATA_CONSENT_TTL_MS = 60_000L
         const val ACTION_INVOCATION_TTL_MS = 60_000L
@@ -747,6 +1028,7 @@ class RemoteRearPlatformService : Service() {
         const val MAX_PENDING_ACTION_INVOCATIONS_PER_CLIENT = 16
         private const val MAX_PENDING_NOTIFICATION_CONSENTS_PER_CLIENT = 4
         private const val MAX_PENDING_NOTIFICATION_CONSENTS = 64
+        private const val MAX_PENDING_CAST_ACTIVATIONS = 32
         private const val MAX_REQUEST_JSON_LENGTH = 4096
         private const val MAX_WINDOW_JSON_LENGTH = 8192
         private const val MAX_REQUIREMENTS = 16
@@ -757,7 +1039,22 @@ class RemoteRearPlatformService : Service() {
         private val pendingDataConsents = ConcurrentHashMap<String, PendingDataConsent>()
         private val pendingNotificationConsents = ConcurrentHashMap<String, PendingNotificationConsent>()
         private val pendingActionInvocations = ConcurrentHashMap<String, PendingActionInvocation>()
+        private val pendingCastActivations = ConcurrentHashMap<String, PendingCastActivation>()
         @Volatile private var activeService: RemoteRearPlatformService? = null
+
+        /** Remove confirmations for an identity being revoked; coordinator revokeOwner aborts their exact tickets. */
+        internal fun clearPendingCastActivationsForSdkOwner(owner: SessionOwner) {
+            val ownerKey = CastOwnerKey.from(owner)
+            pendingCastActivations.values.filter { CastOwnerKey.from(it.owner) == ownerKey }.forEach { pending ->
+                val claim = pending.terminalGate.claim(pending.connection, SystemClock.elapsedRealtime())
+                if ((claim == PendingCastActivationGate.Claim.CLAIMED || claim == PendingCastActivationGate.Claim.EXPIRED) &&
+                    pendingCastActivations.remove(pending.nonce, pending)) {
+                    activeService?.send(pending.connection, JSONObject().put("type", "castFailed")
+                        .put("requestId", pending.requestId).put("phase", "CONFIRMATION").put("code", "E_CALLER_IDENTITY"))
+                    ControlledCastConfirmationActivity.notifyPendingCastFailure(pending.nonce, "E_CALLER_IDENTITY")
+                }
+            }
+        }
 
         private fun pruneNotificationConsents() {
             val now = SystemClock.elapsedRealtime()
@@ -863,6 +1160,77 @@ class RemoteRearPlatformService : Service() {
                     is SceneOpenResult.Rejected -> service.send(pending.connection,
                         JSONObject().put("type", "error").put("code", "E_${result.code.name}")
                             .put("retryable", result.retryable).put("phase", "scene_activation"))
+                }
+            }
+        }
+
+        internal fun castActivationDetails(nonce: String): CastConfirmationDetails? = activeService?.let { service ->
+            val pending = pendingCastActivations[nonce] ?: return@let null
+            val now = SystemClock.elapsedRealtime()
+            val expired = now >= pending.expiresAt
+            if (expired || !service.isActiveClient(pending.connection) ||
+                !pending.terminalGate.isOpenFor(pending.connection, now)) {
+                val claim = if (expired) pending.terminalGate.expire(pending.connection, now)
+                    else pending.terminalGate.claim(pending.connection, now)
+                if ((claim == PendingCastActivationGate.Claim.EXPIRED || claim == PendingCastActivationGate.Claim.CLAIMED) &&
+                    pendingCastActivations.remove(nonce, pending)) {
+                    runCatching { ControlledCastRuntimeProvider.get(service).coordinator.abort(
+                        pending.owner, pending.ticket.ticketId, pending.ticket.generation
+                    ) }
+                    val code = if (claim == PendingCastActivationGate.Claim.EXPIRED) "E_TICKET_STALE" else "E_CLIENT_DIED"
+                    service.send(pending.connection, JSONObject().put("type", "castFailed")
+                        .put("requestId", pending.requestId).put("phase", "CONFIRMATION").put("code", code))
+                    castFlowLog("confirmation_unavailable", code)
+                }
+                return@let null
+            }
+            castFlowLog("confirmation_ticket_validated")
+            CastConfirmationDetails(pending.applicationLabel, pending.modeLabel, pending.regionLabel,
+                pending.replacingLabel, pending.expiresAt)
+        }
+
+        /** Called only after the host confirmation Activity's explicit positive/negative action. */
+        internal fun completeCastActivation(nonce: String, allow: Boolean): String {
+            val service = activeService ?: return "E_SERVICE_UNAVAILABLE"
+            val pending = pendingCastActivations[nonce] ?: return "E_TICKET_STALE"
+            val claim = pending.terminalGate.claim(pending.connection, SystemClock.elapsedRealtime())
+            if (claim != PendingCastActivationGate.Claim.CLAIMED && claim != PendingCastActivationGate.Claim.EXPIRED) return "E_TICKET_STALE"
+            if (!pendingCastActivations.remove(nonce, pending)) return "E_TICKET_STALE"
+            val runtime = runCatching { ControlledCastRuntimeProvider.get(service) }.getOrNull()
+            val coordinator = runtime?.coordinator
+            fun abort(code: String, phase: String): String {
+                if (coordinator != null) coordinator.abort(pending.owner, pending.ticket.ticketId, pending.ticket.generation)
+                service.send(pending.connection, JSONObject().put("type", "castFailed")
+                    .put("requestId", pending.requestId).put("phase", phase).put("code", code))
+                castFlowLog("${phase.lowercase()}_failed", code)
+                return code
+            }
+            if (claim == PendingCastActivationGate.Claim.EXPIRED) return abort("E_TICKET_STALE", "CONFIRMATION")
+            if (!allow) {
+                castFlowLog("confirmation_cancelled", "E_USER_CANCELLED")
+                return abort("E_USER_CANCELLED", "CONFIRMATION")
+            }
+            castFlowLog("confirmation_approved")
+            service.send(pending.connection, JSONObject().put("type", "castStage").put("requestId", pending.requestId).put("stage", "CONFIRMED"))
+            if (!service.isActiveClient(pending.connection) || coordinator == null) {
+                return abort("E_TICKET_STALE", "CONFIRMATION")
+            }
+            // This token is minted only after the user's explicit approval and is consumed by this exact ticket/generation.
+            val activation = runtime.activationAuthority.issueFromConfirmedHostAction(
+                pending.owner, pending.ticket.ticketId, pending.ticket.generation
+            )
+            val orderedObserver = OrderedCastObserver(service.castObserver(pending.connection, pending.requestId))
+            when (val result = coordinator.commit(pending.owner, pending.ticket.ticketId, pending.ticket.generation,
+                activation, orderedObserver)) {
+                is CastCommitResult.Accepted -> {
+                    castFlowLog("commit_accepted")
+                    service.send(pending.connection, JSONObject().put("type", "castStage").put("requestId", pending.requestId).put("stage", "COMMIT_ACCEPTED"))
+                    orderedObserver.release()
+                    return "COMMIT_ACCEPTED"
+                }
+                is CastCommitResult.Rejected -> {
+                    orderedObserver.release()
+                    return abort("E_${result.code.name}", "COMMIT")
                 }
             }
         }

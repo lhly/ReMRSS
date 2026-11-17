@@ -115,6 +115,22 @@ final class SceneTaskLaunchFlow {
 
     static Result launch(String component, int displayId, String launchTicket,
                          TaskSnapshots snapshots, ShellCommands commands, TaskCleanup cleanup, Time time) {
+        return launchInternal(component, displayId, launchTicket, null, 0, false,
+                snapshots, commands, cleanup, time);
+    }
+
+    static Result launchWithPlacement(String component, int displayId, String launchTicket,
+                                      boolean fullRegion, int contentRotation, boolean explicitRotation,
+                                      TaskSnapshots snapshots, ShellCommands commands, TaskCleanup cleanup, Time time) {
+        if (contentRotation < 0 || contentRotation > 3 || (!explicitRotation && contentRotation != 0))
+            throw new IllegalArgumentException("Invalid Scene quarter-turn placement");
+        return launchInternal(component, displayId, launchTicket, fullRegion, contentRotation, explicitRotation,
+                snapshots, commands, cleanup, time);
+    }
+
+    private static Result launchInternal(String component, int displayId, String launchTicket,
+                         Boolean fullRegion, int contentRotation, boolean explicitRotation,
+                         TaskSnapshots snapshots, ShellCommands commands, TaskCleanup cleanup, Time time) {
         TaskSnapshot before = snapshots.read();
         if (before == null || before.failure != null) {
             return new Result(-1, "before_snapshot_" + (before == null ? "null" : before.failure),
@@ -128,6 +144,11 @@ final class SceneTaskLaunchFlow {
         String command = "am start -W --display " + displayId + " --user current -f 0x18000000 -n "
                 + PrivilegedShellArguments.quote(component) + " --es remrss_scene_ticket "
                 + PrivilegedShellArguments.quote(launchTicket);
+        if (fullRegion != null) {
+            command += " --es remrss_scene_region " + (fullRegion ? "FULL" : "CAMERA_SAFE")
+                    + " --ez remrss_scene_explicit_rotation " + explicitRotation
+                    + " --ei remrss_scene_content_rotation " + contentRotation;
+        }
         SceneTaskShellRunner.Result started = commands.run(command, START_TIMEOUT_MS);
         String commandStatus = commandStatus(started);
         String commandMarker = commandMarker(started);

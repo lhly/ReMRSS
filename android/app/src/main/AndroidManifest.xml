@@ -179,6 +179,11 @@
         <service android:name=".platform.ipc.RemoteRearPlatformService" android:enabled="true" android:exported="true" />
 
         <activity android:name=".SceneActivationConfirmationActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
+        <activity android:name=".ControlledCastConfirmationActivity" android:exported="false" android:theme="@style/MiuixCastOverlayTheme" />
+        <activity android:name=".platform.mods.ModCastTargetPickerActivity" android:exported="false"
+            android:excludeFromRecents="true" android:launchMode="standard"
+            android:taskAffinity="${applicationId}.cast.confirm" android:theme="@style/MiuixCastOverlayTheme" />
+        <activity android:name=".platform.mods.ModCastForegroundTargetActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
         <activity android:name=".DataAccessConfirmationActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
         <activity android:name=".NotificationAccessConfirmationActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
         <activity android:name=".platform.actions.RegisteredActionsActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />

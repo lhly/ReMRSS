@@ -1,14 +1,14 @@
 # ReMRSS Android SDK
 
-ReMRSS Android SDK `0.4.0` 提供背屏信息与能力查询、独立 rear Activity、可选只读平台数据、用户登记的快捷操作，以及每个应用单独授权的自有背屏通知。SDK 不嵌入特权后端。请从[作者接入指南](docs/INTEGRATION.md)开始。双屏计分示例位于源码仓库 `sdk/sample/`；离线交付包将其放在 `sample/`。
+ReMRSS Android SDK `0.5.0` 提供背屏信息与能力查询、独立 rear Activity、SAFE/FULL Scene 与显式四分之一转方向、用户确认的 virtual Cast 与系统管理布局的 direct physical Cast 请求、可选只读平台数据、用户登记的快捷操作，以及每个应用单独授权的自有背屏通知。SDK 不嵌入特权后端。请从[作者接入指南](docs/INTEGRATION.md)开始。双屏计分示例位于源码仓库 `sdk/sample/`；离线交付包将其放在 `sample/`。
 
 ## 引用本地 AAR
 
-0.4.0 的交付文件名为 `platform-sdk-0.4.0.aar`，用于与旧版 SDK 二进制明确区分；它不是 Maven artifact。将文件放入 Android app module 的 `libs/`：
+0.5.0 的交付文件名为 `platform-sdk-0.5.0.aar`，用于与旧版 SDK 二进制明确区分；它不是 Maven artifact。将文件放入 Android app module 的 `libs/`：
 
 ```kotlin
 dependencies {
-    implementation(files("libs/platform-sdk-0.4.0.aar"))
+    implementation(files("libs/platform-sdk-0.5.0.aar"))
 }
 ```
 
@@ -22,6 +22,8 @@ AAR 无额外 AndroidX 或第三方运行时依赖；Kotlin API 使用 Kotlin st
 
 ## 保持能力边界清晰
 
-客户端连接时协商 `remrss.platform/1`。根据当前 capability 与结果处理能力，不要仅按 SDK 版本或设备型号推断支持情况。0.4.0 包含 rear info、Scene 激活/呈现与 `keepVisible`、授权后电池和系统指标、用户登记快捷操作及 publisher 自有通知。通知需用户逐发布者授权，使用独立命名空间和有限 TTL/配额；`ACCEPTED` 仅表示宿主接收排队，`DISPLAYED` 表示宿主确认目标显示区的窗口/布局可见，不证明物理面板点亮。通知不要求接入方启动 FGS，也不承诺第三方进程锁屏后台常驻或可靠运行。GPU 使用率可能不可用；本版不提供 FULL/region、cast session 或 clock API。
+客户端连接时协商 `remrss.platform/1`。根据当前 capability 与结果处理能力，不要仅按 SDK 版本或设备型号推断支持情况。0.5.0 增加 SAFE/FULL Scene、显式四分之一转方向与受控 Cast session API。显式 Scene 方向必须用 `QuarterTurnSceneContainer` 实际布局并在测量后报告；旧 Scene overload 保留原默认语义。Cast 仅选择发起前台 Activity 所属的真实任务，Host 确认并核对后才回调 opaque handle；通过 handle 查询或关闭，不传递 task ID 或后端 URI。`DIRECT_PHYSICAL` 是系统管理第三方窗口布局的请求，不承诺固定区域、内容转角或密度；不会自动改用 `VIRTUAL`。背屏已有投放时，宿主只会尝试明确支持且能核实的受控交接，并在用户确认后重新校验；遇到非受控占用或无法确认的状态会拒绝。新应用不能凭接管请求查询或关闭旧应用的句柄。能力查询不代表授权，也不会预留背屏。
+
+其余包括 rear info、`keepVisible`、授权后电池和系统指标、用户登记快捷操作及 publisher 自有通知。通知需用户逐发布者授权，使用独立命名空间和有限 TTL/配额；`ACCEPTED` 仅表示宿主接收排队，`DISPLAYED` 表示宿主确认目标显示区的窗口/布局可见，不证明物理面板点亮。通知不要求接入方启动 FGS，也不承诺第三方进程锁屏后台常驻或可靠运行。GPU 使用率可能不可用；本版不提供 clock API。
 
 详见[作者接入指南](docs/INTEGRATION.md)，其中包含连接、查询、Scene 确认、可见性、双屏状态、清理和自有通知流程。

@@ -4,6 +4,8 @@ import android.os.Process;
 import android.os.SystemClock;
 import androidx.annotation.Keep;
 import java.io.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 /** Independent shell watchdog: a dead caller closes stdin, so restoration survives its death. */
 @Keep
@@ -13,6 +15,7 @@ public final class RearFreezeGuardProcess {
     private static final long LEASE_MS = 6000;
     private static volatile long heartbeat;
     private static volatile boolean ended;
+    private static final BlockingQueue<String> packageUpdates = new ArrayBlockingQueue<>(4);
 
     static String command(String... args) throws Exception {
         if (android.os.Build.VERSION.SDK_INT < 33) throw new UnsupportedOperationException("Virtual casting requires Android 13");
@@ -67,8 +70,12 @@ public final class RearFreezeGuardProcess {
         for (String pkg : packages) RearFreezeState.validatePackage(pkg);
         heartbeat = SystemClock.elapsedRealtime();
         Thread reader = new Thread(() -> {
-            try {
-                while (System.in.read() != -1) heartbeat = SystemClock.elapsedRealtime();
+            try (BufferedReader input = new BufferedReader(new InputStreamReader(System.in))) {
+                String line;
+                while ((line = input.readLine()) != null) {
+                    heartbeat = SystemClock.elapsedRealtime();
+                    if (line.startsWith("PACKAGES:")) packageUpdates.offer(line.substring("PACKAGES:".length()));
+                }
             } catch (IOException ignored) { }
             finally { ended = true; }
         }, "freeze-owner-lease");
@@ -80,8 +87,19 @@ public final class RearFreezeGuardProcess {
                 state.ensureAll(packages);
                 System.out.println("READY"); System.out.flush();
                 while (!ended && SystemClock.elapsedRealtime() - heartbeat < LEASE_MS) {
-                    SystemClock.sleep(2000);
-                    if (!ended) state.ensureAll(packages);
+                    String update = packageUpdates.poll(2000, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (update != null) {
+                        try {
+                            String[] next = update.split(",", -1);
+                            if (next.length < 1 || next.length > 2) throw new IllegalArgumentException("Invalid package update");
+                            for (String pkg : next) RearFreezeState.validatePackage(pkg);
+                            state.ensureAll(next);
+                            packages = next;
+                            System.out.println("UPDATED:" + String.join(",", packages)); System.out.flush();
+                        } catch (Exception invalid) {
+                            System.out.println("REJECTED:" + invalid.getClass().getSimpleName()); System.out.flush();
+                        }
+                    } else if (!ended) state.ensureAll(packages);
                 }
             } finally {
                 // Keep the independent process alive through transient settings/provider failures.

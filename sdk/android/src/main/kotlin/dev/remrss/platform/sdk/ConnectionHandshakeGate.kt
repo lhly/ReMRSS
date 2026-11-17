@@ -5,6 +5,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 internal fun attemptBinding(bind: () -> Boolean, onFailure: () -> Unit): Boolean {
     val bound = try { bind() } catch (_: RuntimeException) { false }
@@ -12,12 +13,43 @@ internal fun attemptBinding(bind: () -> Boolean, onFailure: () -> Unit): Boolean
     return bound
 }
 
+/** Shares the exact-once guard between bind failure, accepted-close races, and normal close. */
+internal class OnceBindingRelease {
+    private val released = AtomicBoolean(false)
+    fun request(action: () -> Unit): Boolean {
+        if (!released.compareAndSet(false, true)) return false
+        action()
+        return true
+    }
+}
+
+/** The exact ServiceConnection and its once-only release guard stay attached to one attempt. */
+internal class ServiceBindingHandle<T : Any>(val attemptId: Long) {
+    lateinit var connection: T
+    val unbound = OnceBindingRelease()
+}
+
+/** A stale asynchronous cleanup may clear only the exact handle it observed. */
+internal class ActiveBindingSlot<T : Any> {
+    private val active = AtomicReference<T?>(null)
+    fun current(): T? = active.get()
+    fun publish(binding: T) { active.set(binding) }
+    fun clearIfCurrent(binding: T): Boolean = active.compareAndSet(binding, null)
+}
+
+/** Preserve terminal handshake errors; only successful results require a still-current epoch. */
+internal fun connectionWaiterCompletionIsCurrent(
+    completion: Result<Unit>,
+    expectedEpoch: Any?,
+    currentEpoch: Any?,
+): Boolean = completion.isFailure || (expectedEpoch != null && expectedEpoch === currentEpoch)
+
 /** Pure connection state used by RearClient; binder identity prevents stale handshakes reviving a link. */
 internal class ConnectionHandshakeGate<T : Any>(private val expectedContract: String) {
     sealed interface ConnectDecision {
         data class StartBinding(val attemptId: Long) : ConnectDecision
         data object AwaitingBinding : ConnectDecision
-        data object AlreadyConnected : ConnectDecision
+        data class AlreadyConnected(val identity: Any) : ConnectDecision
         data class Rejected(val code: String) : ConnectDecision
     }
 
@@ -34,9 +66,11 @@ internal class ConnectionHandshakeGate<T : Any>(private val expectedContract: St
     private var connectedBinder: T? = null
     private val waiters = ArrayList<(Result<Unit>) -> Unit>()
 
-    @Synchronized fun connect(waiter: (Result<Unit>) -> Unit): ConnectDecision {
+    @Synchronized fun connect(connectedIdentity: () -> Any? = { null }, waiter: (Result<Unit>) -> Unit): ConnectDecision {
         if (closed) return ConnectDecision.Rejected(RearSdkErrorCode.CLIENT_CLOSED)
-        if (connectedBinder != null && connectedBinder === activeBinder) return ConnectDecision.AlreadyConnected
+        if (connectedBinder != null && connectedBinder === activeBinder) {
+            return ConnectDecision.AlreadyConnected(connectedIdentity() ?: connectedBinder!!)
+        }
         waiters += waiter
         if (currentAttemptId != null) return ConnectDecision.AwaitingBinding
         val attemptId = ++nextAttemptId

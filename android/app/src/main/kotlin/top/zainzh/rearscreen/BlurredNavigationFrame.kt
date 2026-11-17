@@ -1,5 +1,6 @@
 package top.zainzh.rearscreen
 
+import android.view.ViewTreeObserver
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -13,16 +14,34 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.GraphicsLayerScope
 import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import top.yukonga.miuix.kmp.blur.*
 import top.yukonga.miuix.kmp.blur.highlight.*
+import top.yukonga.miuix.kmp.blur.sensor.DeviceTilt
 import top.yukonga.miuix.kmp.blur.sensor.rememberDeviceTilt
+import kotlinx.coroutines.flow.filterNotNull
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
+
+internal fun shouldObserveNavigationTilt(
+    windowFocused: Boolean,
+    lifecycleResumed: Boolean,
+    interacting: Boolean,
+): Boolean = windowFocused && lifecycleResumed && interacting
+
+internal fun navigationLightAngle(gravityX: Float, gravityY: Float): Float =
+    if (gravityX * gravityX + gravityY * gravityY > .01f)
+        (atan2(gravityY, gravityX) / (PI / 60)).roundToInt() * (PI / 60).toFloat()
+    else (-PI / 2).toFloat()
 
 /** The content capture excludes navigation overlays, avoiding recursive glass sampling. */
 @RequiresApi(33)
@@ -36,16 +55,48 @@ internal fun BlurredNavigationFrame(
     val backdrop = rememberLayerBackdrop { drawRect(background); drawContent() }
     val tabsBackdrop = rememberLayerBackdrop()
     val dark = isSystemInDarkTheme()
-    val tilt = rememberDeviceTilt()
-    val angle = remember(tilt) { derivedStateOf {
-        val gravity = tilt.value
-        if (gravity.gravityX * gravity.gravityX + gravity.gravityY * gravity.gravityY > .01f)
-            (atan2(gravity.gravityY, gravity.gravityX) / (PI / 60)).roundToInt() * (PI / 60).toFloat()
-        else (-PI / 2).toFloat()
-    } }
+    val view = LocalView.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val lifecycleState by lifecycle.currentStateFlow.collectAsState()
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
+    val lifecycleResumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+    val press = remember(view, lifecycle) {
+        NavigationPress { view.hasWindowFocus() && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) }
+    }
+    DisposableEffect(view, lifecycle, press) {
+        // Invalidate the current gesture on the actual edge, even if focus
+        // returns before Compose observes the intermediate state.
+        val focusListener = ViewTreeObserver.OnWindowFocusChangeListener { focused ->
+            if (!focused) press.cancel()
+        }
+        val lifeListener = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) press.cancel()
+        }
+        val tree = view.viewTreeObserver
+        tree.addOnWindowFocusChangeListener(focusListener)
+        lifecycle.addObserver(lifeListener)
+        onDispose {
+            val liveTree = if (tree.isAlive) tree else view.viewTreeObserver
+            if (liveTree.isAlive) liveTree.removeOnWindowFocusChangeListener(focusListener)
+            lifecycle.removeObserver(lifeListener)
+            press.cancel()
+        }
+    }
+    // During idle, keep the last measured light direction without requesting sensor events.
+    val angle = remember { mutableFloatStateOf((-PI / 2).toFloat()) }
+    if (shouldObserveNavigationTilt(windowFocused, lifecycleResumed, press.down)) {
+        val tilt = rememberDeviceTilt()
+        LaunchedEffect(tilt) {
+            snapshotFlow {
+                tilt.value.takeUnless { it == DeviceTilt.Zero }?.let {
+                    navigationLightAngle(it.gravityX, it.gravityY)
+                }
+            }.filterNotNull().collect { angle.floatValue = it }
+        }
+    }
     val material = remember(backdrop, tabsBackdrop, dark) { GlassNavigationMaterial(backdrop, tabsBackdrop, dark, angle) }
     CompositionLocalProvider(LocalNavigationMaterial provides material) {
-        Box(modifier) { content(Modifier.layerBackdrop(backdrop)); navigation() }
+        Box(modifier.then(press.modifier)) { content(Modifier.layerBackdrop(backdrop)); navigation() }
     }
 }
 

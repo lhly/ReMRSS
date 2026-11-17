@@ -245,8 +245,9 @@ public class UriCommandService extends IntentService {
                         ? getAppName(packageName) + " " + getString(R.string.toast_cast_to_rear)
                         : "已投放；后台守护未启动，仍可使用原返回入口结束投放");
             } else {
-                Log.i(TAG, "cast_stage mode=physical target=main_foreground status=" + result.failure + " result=not_committed");
-                showToast(getString(R.string.toast_switch_failed));
+                Log.i(TAG, "cast_stage mode=physical target=main_foreground status=" + result.failure
+                        + " result=" + (result.indeterminate ? "indeterminate" : "not_committed"));
+                showToast(result.indeterminate ? "投放状态暂时无法确认，请先检查背屏，勿重复投放" : getString(R.string.toast_switch_failed));
             }
         } catch (Exception e) {
             Log.e(TAG, "切换失败", e);
@@ -292,8 +293,8 @@ public class UriCommandService extends IntentService {
                     targetPackage, 3, createPhysicalCastPort(uri, launchCmd));
             if (!result.committed) {
                 Log.i(TAG, "cast_stage mode=physical target=" + (isSpecificActivity ? "explicit_activity" : "package_task")
-                        + " status=" + result.failure + " result=not_committed");
-                showToast(getString(R.string.toast_switch_failed));
+                        + " status=" + result.failure + " result=" + (result.indeterminate ? "indeterminate" : "not_committed"));
+                showToast(result.indeterminate ? "投放状态暂时无法确认，请先检查背屏，勿重复投放" : getString(R.string.toast_switch_failed));
                 return;
             }
 
@@ -342,14 +343,29 @@ public class UriCommandService extends IntentService {
                 Thread.sleep(500L + attempt * 200L);
                 return taskService.getCurrentForegroundApp();
             }
-            @Override public boolean moveToRear(int id) throws Exception {
+            @Override public PhysicalCastRequestFlow.MoveAttempt moveToRear(int id) throws Exception {
                 RearDisplayCastOccupancy.Result occupancy = RearDisplayCastOccupancy.query(
                         taskService, getPackageName(), RearDisplay.requireId());
                 if (!occupancy.allowed()) {
                     Log.i(TAG, "cast_gate mode=physical stage=commit result=busy disposition=" + occupancy.disposition);
-                    return false;
+                    return PhysicalCastRequestFlow.MoveAttempt.REJECTED_BEFORE_SEND;
                 }
-                return taskService.isTaskOnDisplay(id, 0) && taskService.moveTaskToDisplay(id, RearDisplay.requireId());
+                if (!taskService.isTaskOnDisplay(id, 0))
+                    return PhysicalCastRequestFlow.MoveAttempt.REJECTED_BEFORE_SEND;
+                return taskService.moveTaskToDisplay(id, RearDisplay.requireId())
+                        ? PhysicalCastRequestFlow.MoveAttempt.VERIFIED
+                        : PhysicalCastRequestFlow.MoveAttempt.SENT_UNVERIFIED;
+            }
+            @Override public PhysicalCastRequestFlow.MoveDisposition reconcileMove(
+                    PhysicalCastRequestFlow.Target target) throws Exception {
+                int rearId = RearDisplay.requireId();
+                String actualPackage = taskService.getPackageNameFromTaskId(target.taskId);
+                if (!target.packageName.equals(actualPackage)) return PhysicalCastRequestFlow.MoveDisposition.UNKNOWN;
+                if (taskService.isTaskOnDisplay(target.taskId, rearId))
+                    return PhysicalCastRequestFlow.MoveDisposition.VERIFIED_REAR;
+                if (taskService.isTaskOnDisplay(target.taskId, 0))
+                    return PhysicalCastRequestFlow.MoveDisposition.VERIFIED_NOT_REAR;
+                return PhysicalCastRequestFlow.MoveDisposition.UNKNOWN;
             }
             @Override public void projectionCommitted(int id, String pkg) {
                 RearAnimationManager.projectionStarted(UriCommandService.this, id, pkg);

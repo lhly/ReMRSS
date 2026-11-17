@@ -68,6 +68,31 @@ class ModSceneReadyControllerTest {
         assertEquals(302L, port.readyRevisions.single())
     }
 
+    @Test fun sameActivityStopResumeDuringConsumedReadyUsesFreshViewportWithoutReplayingTicket() {
+        val port = BarrierPort()
+        val controller = fixture(port).controller
+        val resumed = CountDownLatch(1)
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            controller.submit(25L, report(351), 1L, active = true) { error("stopped request callback must be detached") }
+        }
+        assertTrue("initial READY reached Core", port.readyEntered.await(3, TimeUnit.SECONDS))
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            controller.setActive(25L, false)
+            controller.submit(25L, report(352), 2L, active = true) {
+                assertEquals(25L, it.instance)
+                assertEquals(2L, it.windowEpoch)
+                assertTrue(it.result.success)
+                resumed.countDown()
+            }
+        }
+        port.releaseReady.countDown()
+        assertTrue("the resumed Activity request receives completion", resumed.await(5, TimeUnit.SECONDS))
+        assertEquals("the one-use ticket is consumed only once", 1, port.readyCalls.get())
+        assertEquals(listOf(351L), port.readyRevisions.toList())
+        assertEquals("latest applied viewport is published after READY", listOf(352L), port.viewportRevisions.toList())
+    }
+
     @Test fun alreadyReadyRecreationUsesViewportAndNeverReplaysTicket() {
         val port = BarrierPort().apply { readySnapshot = snapshot() }
         val controller = fixture(port).controller

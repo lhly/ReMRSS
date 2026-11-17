@@ -133,6 +133,12 @@ public class RearAnimationManager {
         finishTransientAnimation(context);
     }
 
+    /** Controlled callers have already committed the exact owner row; run takeover only. */
+    static synchronized void controlledProjectionStarted(android.content.Context context, int taskId, String packageName) {
+        top.zainzh.rearscreen.platform.RearCapabilityCore.onControlledProjectionStarted(context, taskId, packageName);
+        finishTransientAnimation(context);
+    }
+
     private static void finishTransientAnimation(android.content.Context context) {
         Session previous = currentSession;
         currentAnimation = AnimationType.NONE;
@@ -162,6 +168,18 @@ public class RearAnimationManager {
 
     static <T> T callDisplayAction(java.util.concurrent.Callable<T> action) throws Exception {
         return DISPLAY_ACTION_GATE.call(action);
+    }
+
+    static DisplayActionGate.Reservation reserveDisplayAction() {
+        return DISPLAY_ACTION_GATE.reserve();
+    }
+
+    static boolean isCurrentDisplayAction(DisplayActionGate.Reservation reservation) {
+        return DISPLAY_ACTION_GATE.isCurrent(reservation);
+    }
+
+    static boolean completeDisplayAction(DisplayActionGate.Reservation reservation) {
+        return DISPLAY_ACTION_GATE.complete(reservation);
     }
 
     /**

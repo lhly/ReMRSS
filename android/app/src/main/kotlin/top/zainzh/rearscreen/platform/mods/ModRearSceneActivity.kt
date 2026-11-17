@@ -1,19 +1,32 @@
 package top.zainzh.rearscreen.platform.mods
 
 import android.content.ComponentName
+import android.content.Intent
+import android.app.Activity
+import android.app.ActivityOptions
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
+import android.graphics.Point
 import android.util.Log
 import android.view.Display
 import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -23,6 +36,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.Closeable
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import top.yukonga.miuix.kmp.basic.Text
@@ -30,11 +44,41 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.window.WindowDialog
 import top.zainzh.rearscreen.AppPalette
 import top.zainzh.rearscreen.miuixContent
+import top.zainzh.rearscreen.miuixComposeView
+import top.zainzh.rearscreen.prepareMiuixWindow
+import dev.remrss.scene.geometry.CutoutKnowledge
+import dev.remrss.scene.geometry.PixelInsets
+import dev.remrss.scene.geometry.PixelRect as SharedPixelRect
+import dev.remrss.scene.geometry.SceneRegion as SharedSceneRegion
+import dev.remrss.scene.geometry.SceneViewportGeometry
+import dev.remrss.scene.geometry.QuarterTurnSceneContainer
 import top.zainzh.rearscreen.platform.*
 import top.zainzh.rearscreen.platform.actions.ActionDispatchResult
 import top.zainzh.rearscreen.platform.actions.ActionError
 import top.zainzh.rearscreen.platform.actions.RegisteredActionRef
 import kotlin.math.roundToInt
+
+/** An omitted effect rotation inherits the current explicit placement; it never demotes a nonzero turn to legacy. */
+internal fun sceneRequestForModEffect(
+    current: SceneRequest,
+    region: RearRegion,
+    requestedRotation: Int?,
+): SceneRequest {
+    val explicitRotation = requestedRotation != null || current.hasExplicitContentRotation
+    val requirements = current.requiredCapabilities.toMutableSet().apply {
+        add(CapabilityRequirement("rear.scene", 1))
+        if (current.keepVisible) add(CapabilityRequirement("rear.scene.keep_visible", 1))
+        if (region == RearRegion.FULL) add(CapabilityRequirement("rear.region", 1))
+        if (explicitRotation) add(CapabilityRequirement("rear.scene.orientation", 1))
+    }
+    return current.copy(
+        region = region,
+        keepVisible = current.keepVisible,
+        requiredCapabilities = requirements,
+        contentRotation = requestedRotation ?: current.contentRotation,
+        hasExplicitContentRotation = explicitRotation,
+    )
+}
 
 /** Ticket-routed, package-independent host shell for a verified Mod rear scene. */
 class ModRearSceneActivity : ComponentActivity() {
@@ -50,16 +94,31 @@ class ModRearSceneActivity : ComponentActivity() {
     private var readyController: ModSceneReadyController? = null
     private var sceneReady by mutableStateOf(false)
     private var effectRequest by mutableStateOf<ModRearOpenEffect?>(null)
+    private var castEffectRequest by mutableStateOf<ModCastStartEffect?>(null)
     private var effectRequestCompletion: ((Boolean, String?) -> Unit)? = null
+    private var castEffectCompletion: ((Boolean, String?, org.json.JSONObject?) -> Unit)? = null
     private var effectInFlightCompletion: ((Boolean, String?) -> Unit)? = null
+    private var sceneViewportTransition by mutableStateOf<ActiveSceneViewportTransition?>(null)
+    private var viewportPresentationRefreshPending by mutableStateOf(false)
+    private var sceneViewportTransitionTimeout: Runnable? = null
+    private val sceneViewportTransitionHandler = Handler(Looper.getMainLooper())
     private var moduleSlotActive = false
     private var sessionId: String? = null
     private var generation: Long = 0
     private var viewportRevision: Long = 0
     private var windowReported = false
+    private val windowReportRequests = ModSceneWindowReportRequests()
+    private var viewportGeometryEpoch = 0L
+    private var contentLayoutReady = false
+    private var observedWindowGeometry: ModSceneWindowGeometry? = null
+    private var sceneRoot: FrameLayout? = null
+    private var sceneContainer: QuarterTurnSceneContainer? = null
+    private var sceneContainerLayoutListener: View.OnLayoutChangeListener? = null
     private var coreClosed = false
     private var instanceToken = 0L
     private var effectConsumer: ModHostEffectRouter.Consumer? = null
+    private var castSource: ModCastActivationSource? = null
+    private var castSourceRegistration: Closeable? = null
     private var layoutListener: View.OnLayoutChangeListener? = null
     private var dataSubscription: Closeable? = null
     private val hostDataEpoch = ModDataSubscriptionEpoch()
@@ -81,7 +140,7 @@ class ModRearSceneActivity : ComponentActivity() {
                     is SceneEvent.Ready -> {
                         // READY proves the measured window, not that Core has made
                         // the rear display visible. Visibility arrives separately.
-                        sceneReady = true
+                        sceneReady = windowReported
                         message = ""
                         reconcileScenePresentation()
                     }
@@ -152,6 +211,7 @@ class ModRearSceneActivity : ComponentActivity() {
         val verified = ModPackageStore.find(this, principal.modId)
         if (installed == null || !installed.enabled || !ModPackageStore.isAuthorTrusted(this, principal.authorFingerprint) ||
             verified == null || verified.authorFingerprint != principal.authorFingerprint || installed.logicalSessionId != principal.logicalSessionId) {
+            runCatching { top.zainzh.rearscreen.platform.revokeModControlledCastOwner(this, owner) }
             core.displaySessions.closeOwnerSessions(owner, SceneCloseReason.OWNER_REVOKED)
             ModSceneReadyController.markClosed(ticket)
             finishAndRemoveTask()
@@ -167,16 +227,16 @@ class ModRearSceneActivity : ComponentActivity() {
         if (restoredSession == route.sessionId && restoredGeneration == route.generation) {
             core.displaySessions.attachSceneObserver(owner, route.sessionId, route.generation, observer)
         }
-        miuixContent {
+        val container = QuarterTurnSceneContainer(this).apply {
+            contentRotation = route.request.contentRotation
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        }
+        prepareMiuixWindow()
+        val compose = miuixComposeView {
             val activePackage = pkg
             val current = model
-            ModSceneVisibilitySurface(visible = isSceneContentVisible()) {
-                Column(Modifier.fillMaxSize().padding(
-                    start = cameraSafeInsets.left + 16.dp,
-                    top = cameraSafeInsets.top + 16.dp,
-                    end = cameraSafeInsets.right + 16.dp,
-                    bottom = cameraSafeInsets.bottom + 16.dp
-                ), verticalArrangement = Arrangement.Center) {
+            ModSceneVisibilitySurface(visible = isSceneContentVisible() && sceneViewportTransition == null && !viewportPresentationRefreshPending) {
+                Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.Center) {
                     if (cutoutReported == false) Text("ROM 未提供可核实的屏幕开孔安全区", color = AppPalette.secondary())
                     if (error.isNotEmpty()) Text(error, color = AppPalette.destructive())
                     else if (activePackage == null || current == null) Text(message, color = AppPalette.secondary())
@@ -184,7 +244,7 @@ class ModRearSceneActivity : ComponentActivity() {
                     else ModNativeScene(activePackage, activePackage.rearScene, current.state, current.config, hostData, true,
                         onBack = { finish() },
                         onEvent = { type ->
-                            if (!broker.submitUserEvent(activePackage.id, type)) {
+                            if (!broker.submitUserEvent(activePackage.id, type, castSource = castSource)) {
                                 Toast.makeText(this@ModRearSceneActivity, "操作暂未提交：输入队列已满或场景正在切换，请稍后重试", Toast.LENGTH_SHORT).show()
                             }
                         },
@@ -194,31 +254,80 @@ class ModRearSceneActivity : ComponentActivity() {
                 }
             }
             val pendingEffect = effectRequest
-            WindowDialog(show = isSceneContentVisible() && pendingEffect != null, title = "Mod 请求打开背屏场景", onDismissRequest = ::cancelPendingEffect) {
+            WindowDialog(show = isSceneContentVisible() && sceneViewportTransition == null && !viewportPresentationRefreshPending && pendingEffect != null, title = "Mod 请求打开背屏场景", onDismissRequest = ::cancelPendingEffect) {
                 pendingEffect?.let { effect ->
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text("此 Effect 已在模型保存后发出。你确认后，宿主才会请求背屏服务。")
-                        TextButton("取消", ::cancelPendingEffect, minHeight = 48.dp)
-                        TextButton("确认打开", {
-                            effectRequest = null
-                            val completion = effectRequestCompletion
-                            effectInFlightCompletion = completion
-                            effectRequestCompletion = null
-                            requestEffect(effect) { accepted, code ->
-                                effectInFlightCompletion = null
-                                completion?.invoke(accepted, code)
-                            }
-                        }, minHeight = 48.dp)
+                        Column(Modifier.heightIn(max = 72.dp).verticalScroll(rememberScrollState())) {
+                            val targetRegion = if (effect.region == "FULL") "全屏" else "相机安全区"
+                            val targetRotation = effect.contentRotation ?: launch?.request?.contentRotation ?: 0
+                            val requestedKeepVisible = if (effect.keepVisible) "保持亮屏" else "不要求保持亮屏"
+                            Text("将当前场景切换为${targetRegion}、内容旋转 ${targetRotation * 90}°。亮屏请求：${requestedKeepVisible}；当前策略不变。")
+                            Text("确认后在当前任务应用此请求。")
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton("取消", ::cancelPendingEffect, modifier = Modifier.weight(1f), minHeight = 48.dp)
+                            TextButton("确认打开", {
+                                effectRequest = null
+                                val completion = effectRequestCompletion
+                                effectInFlightCompletion = completion
+                                effectRequestCompletion = null
+                                requestEffect(effect) { accepted, code ->
+                                    effectInFlightCompletion = null
+                                    completion?.invoke(accepted, code)
+                                }
+                            }, modifier = Modifier.weight(1f), minHeight = 48.dp)
+                        }
+                    }
+                }
+            }
+            val pendingCastEffect = castEffectRequest
+            WindowDialog(show = isSceneContentVisible() && sceneViewportTransition == null && !viewportPresentationRefreshPending && pendingCastEffect != null, title = "Mod 请求开始背屏投放", onDismissRequest = ::cancelPendingCastEffect) {
+                pendingCastEffect?.let { effect ->
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column(Modifier.heightIn(max = 72.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("将在主屏选择实际应用，并另行确认投放与替换。")
+                            Text("方式：${if (effect.mode == "VIRTUAL") "虚拟投放" else "物理直投"}；区域：${effect.region ?: "沿用应用偏好"}；方向：${effect.contentRotation?.let { "${it * 90}°" } ?: "沿用应用偏好"}")
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton("取消", ::cancelPendingCastEffect, modifier = Modifier.weight(1f), minHeight = 48.dp)
+                            TextButton("选择主屏应用", {
+                                castEffectRequest = null
+                                castSource?.let { launchModCastPicker(effect, it) }
+                                    ?: cancelPendingCastEffect()
+                            }, modifier = Modifier.weight(1f), minHeight = 48.dp)
+                        }
                     }
                 }
             }
         }
+        sceneRoot = FrameLayout(this).apply { addView(container, FrameLayout.LayoutParams(-1, -1)) }
+        sceneContainer = container
+        container.addView(compose)
+        setContentView(sceneRoot)
+        window.decorView.setOnApplyWindowInsetsListener { view, insets ->
+            view.post { configureSceneViewport() }
+            insets
+        }
+        window.decorView.requestApplyInsets()
+        window.decorView.post { configureSceneViewport() }
         layoutListener = View.OnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-            if (view.width > 0 && view.height > 0 && !windowReported) reportMeasuredWindow(ticket)
+            if (view.width > 0 && view.height > 0) {
+                // Insets can be dispatched before DecorView has its final bounds.
+                // Recompute the native host geometry on the real layout edge; the
+                // resulting container layout, not gated Mod content, gates READY.
+                configureSceneViewport()
+                if (sceneViewportTransition != null || !windowReported) submitMeasuredViewportIfNeeded(ticket)
+            }
         }.also { window.decorView.addOnLayoutChangeListener(it) }
+        sceneContainerLayoutListener = View.OnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+            if (view === sceneContainer) markSceneContainerLayoutReady(ticket)
+        }.also { container.addOnLayoutChangeListener(it) }
         window.decorView.addOnAttachStateChangeListener(decorAttachListener)
         reportActualWindowVisibility()
-        window.decorView.post { if (!windowReported && window.decorView.width > 0 && window.decorView.height > 0) reportMeasuredWindow(ticket) }
+        window.decorView.post {
+            if ((sceneViewportTransition != null || !windowReported) && window.decorView.width > 0 && window.decorView.height > 0)
+                submitMeasuredViewportIfNeeded(ticket)
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -239,8 +348,12 @@ class ModRearSceneActivity : ComponentActivity() {
         super.onStart()
         if (!::windowLifecycleGate.isInitialized) return
         windowLifecycleGate.onActivityStarted(true)
+        if (window.decorView.width > 0 && window.decorView.height > 0) {
+            applyMeasuredCameraInsets()
+            configureSceneViewport()
+            markSceneContainerLayoutReady(launchTicket)
+        }
         reportActualWindowVisibility()
-        launchTicket?.takeIf { !windowReported && window.decorView.width > 0 && window.decorView.height > 0 }?.let(::reportMeasuredWindow)
     }
 
     override fun onPause() {
@@ -250,6 +363,7 @@ class ModRearSceneActivity : ComponentActivity() {
     override fun onStop() {
         // Stop this Activity's observer/data work promptly. The Core lease stays
         // open and is re-authorized only after fresh Core visibility on return.
+        windowReportRequests.invalidate()
         readyController?.setActive(instanceToken, false)
         if (::windowLifecycleGate.isInitialized) {
             windowLifecycleGate.onActivityStarted(false)
@@ -270,12 +384,31 @@ class ModRearSceneActivity : ComponentActivity() {
     override fun onDestroy() {
         val id = (launch?.owner?.principal as? SessionPrincipal.SignedMod)?.modId
         val isCurrentInstance = isCurrentSceneInstance()
+        sceneViewportTransition?.let { transition ->
+            core.sceneViewportTransitions?.abortSceneViewportTransition(
+                transition.oldRoute.owner, transition.oldRoute.sessionId, transition.oldRoute.generation, transition.id)
+            sceneViewportTransitionTimeout?.let(sceneViewportTransitionHandler::removeCallbacks)
+            sceneViewportTransitionTimeout = null
+            if (!transition.completionSent) {
+                transition.completionSent = true
+                transition.complete(false, "E_SCENE_ACTIVITY_CLOSED")
+            }
+            sceneViewportTransition = null
+        }
+        windowReportRequests.invalidate()
         readyController?.detach(instanceToken)
         layoutListener?.let(window.decorView::removeOnLayoutChangeListener)
+        sceneContainerLayoutListener?.let { sceneContainer?.removeOnLayoutChangeListener(it) }
         window.decorView.removeOnAttachStateChangeListener(decorAttachListener)
         stopHostData()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (id != null) effectConsumer?.let { ModHostEffectRouter.consumers.remove(id, it) }
+        castSourceRegistration?.close()
+        castSourceRegistration = null
+        castSource = null
+        castEffectRequest = null
+        castEffectCompletion?.invoke(false, "E_CAST_SOURCE_STALE", null)
+        castEffectCompletion = null
         effectRequestCompletion?.invoke(false, "E_SCENE_ACTIVITY_CLOSED")
         effectInFlightCompletion?.invoke(false, "E_SCENE_ACTIVITY_CLOSED")
         effectRequestCompletion = null
@@ -317,25 +450,66 @@ class ModRearSceneActivity : ComponentActivity() {
 
     private fun requestEffect(effect: ModRearOpenEffect, complete: (Boolean, String?) -> Unit = { _, _ -> }) {
         val route = launch ?: run { complete(false, "E_STALE_SESSION"); return }
+        val principal = route.owner.principal as? SessionPrincipal.SignedMod
+            ?: run { complete(false, "E_CAPABILITY_DENIED"); return }
+        val modId = principal.modId
+        if (effect.scene != "rear" || effect.region !in setOf("FULL", "CAMERA_SAFE")) {
+            complete(false, "E_INVALID_STATE"); return
+        }
+        if (core.modDataOwner(modId) != route.owner) {
+            complete(false, "E_STALE_SESSION"); return
+        }
+        if (effect.keepVisible != route.request.keepVisible) {
+            complete(false, "E_CAPABILITY_DENIED"); return
+        }
         val region = if (effect.region == "FULL") RearRegion.FULL else RearRegion.CAMERA_SAFE
-        val requirements = route.request.requiredCapabilities.toMutableSet()
-        if (region == RearRegion.FULL) requirements += CapabilityRequirement("rear.region", 1)
-        if (effect.keepVisible) requirements += CapabilityRequirement("rear.scene.keep_visible", 1)
-        val request = route.request.copy(
-            region = region,
-            keepVisible = effect.keepVisible,
-            requiredCapabilities = requirements
-        )
+        val request = sceneRequestForModEffect(route.request, region, effect.contentRotation)
+        if (request.region == route.request.region && request.contentRotation == route.request.contentRotation &&
+            request.hasExplicitContentRotation == route.request.hasExplicitContentRotation) {
+            complete(true, null)
+            return
+        }
+        val transitions = core.sceneViewportTransitions
+            ?: run { complete(false, "E_SCENE_OPEN"); return }
+        val oldWindow = runCatching { windowReport() }.getOrElse {
+            complete(false, "E_INVALID_STATE"); return
+        }
+        if (oldWindow.viewport.region != (if (route.request.region == RearRegion.FULL) SharedSceneRegion.FULL else SharedSceneRegion.SAFE) ||
+            oldWindow.viewport.contentRotation != route.request.contentRotation ||
+            !isSceneContentVisible() || !window.decorView.isAttachedToWindow || !window.decorView.isShown) {
+            complete(false, "E_INVALID_STATE"); return
+        }
         val token = runCatching { core.issueSceneActivationAfterUserConfirmation(route.owner, request) }
             .getOrElse { complete(false, "E_ACTIVATION_REQUIRED"); return }
+        val transitionId = UUID.randomUUID().toString().replace("-", "")
+        val deadline = SystemClock.elapsedRealtime() + RearSceneCoordinator.MAX_VIEWPORT_TRANSITION_MS
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = runCatching { core.displaySessions.openScene(route.owner, request, token, observer) }
+            val result = runCatching {
+                transitions.beginSceneViewportTransition(route.owner, route.sessionId, route.generation,
+                    transitionId, route.request, request, token, deadline)
+            }.getOrElse { SceneOperationResult(false, SceneError.BACKEND_UNAVAILABLE, retryable = true) }
             runOnUiThread {
-                when (val value = result.getOrNull()) {
-                    is SceneOpenResult.Accepted -> complete(true, null)
-                    is SceneOpenResult.Rejected -> { error = "无法打开背屏：${value.code}"; complete(false, "E_${value.code.name}") }
-                    null -> { error = result.exceptionOrNull()?.message ?: "无法打开背屏"; complete(false, "E_SCENE_OPEN") }
+                if (!result.success) {
+                    val code = result.error?.let { "E_${it.name}" } ?: "E_SCENE_OPEN"
+                    error = "无法切换背屏场景：${result.error ?: "服务暂不可用"}"
+                    complete(false, code)
+                    return@runOnUiThread
                 }
+                if (!isCurrentSceneInstance() || isFinishing || isDestroyed || launch != route ||
+                    core.modDataOwner(modId) != route.owner) {
+                    transitions.abortSceneViewportTransition(route.owner, route.sessionId, route.generation, transitionId)
+                    complete(false, "E_STALE_SESSION")
+                    return@runOnUiThread
+                }
+                val targetRoute = route.copy(request = request)
+                val transition = ActiveSceneViewportTransition(transitionId, route, targetRoute, oldWindow, deadline, complete)
+                sceneViewportTransition = transition
+                scheduleSceneViewportTransitionTimeout(transition)
+                launch = targetRoute
+                contentLayoutReady = false
+                viewportGeometryEpoch++
+                configureSceneViewport()
+                if (hasCurrentContainerLayout()) markSceneContainerLayoutReady(launchTicket)
             }
         }
     }
@@ -344,6 +518,54 @@ class ModRearSceneActivity : ComponentActivity() {
         effectRequest = null
         effectRequestCompletion?.invoke(false, "E_USER_CANCELLED")
         effectRequestCompletion = null
+    }
+
+    private fun cancelPendingCastEffect() {
+        castEffectRequest = null
+        castEffectCompletion?.invoke(false, "E_USER_CANCELLED", null)
+        castEffectCompletion = null
+    }
+
+    private fun launchModCastPicker(effect: ModCastStartEffect, source: ModCastActivationSource) {
+        val principal = launch?.owner?.principal as? SessionPrincipal.SignedMod
+            ?: run { castEffectCompletion?.invoke(false, "E_MOD_REVOKED", null); castEffectCompletion = null; return }
+        if (source != castSource || !ModCastActivationSources.isRegistered(source, principal.modId) ||
+            !isSceneContentVisible() || !isCurrentSceneInstance() || isFinishing || isDestroyed) {
+            castEffectCompletion?.invoke(false, "E_CAST_SOURCE_STALE", null)
+            castEffectCompletion = null
+            return
+        }
+        val intent = ModCastTargetPickerActivity.createIntent(this, effect, source)
+        runCatching {
+            startActivityForResult(intent, MOD_CAST_PICKER_REQUEST, ActivityOptions.makeBasic()
+                .setLaunchDisplayId(Display.DEFAULT_DISPLAY).toBundle())
+        }.onFailure {
+            castEffectCompletion?.invoke(false, "E_TARGET_PICKER_UNAVAILABLE", null)
+            castEffectCompletion = null
+        }
+    }
+
+    @Deprecated("Host target picker returns an opaque status only")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != MOD_CAST_PICKER_REQUEST) return
+        val completion = castEffectCompletion ?: return
+        castEffectCompletion = null
+        val source = castSource
+        if (source == null || !ModCastActivationSources.isRegistered(source, source.modId) ||
+            !isCurrentSceneInstance() || isFinishing || isDestroyed) {
+            completion(false, "E_CAST_SOURCE_STALE", null)
+            return
+        }
+        val result = if (resultCode == Activity.RESULT_OK && data != null) org.json.JSONObject()
+            .put("sessionId", data.getStringExtra(ModCastTargetPickerActivity.EXTRA_RESULT_SESSION_ID))
+            .put("generation", data.getLongExtra(ModCastTargetPickerActivity.EXTRA_RESULT_GENERATION, 0L))
+            .put("state", "READY")
+            .put("mode", data.getStringExtra(ModCastTargetPickerActivity.EXTRA_RESULT_MODE))
+            .put("region", data.getStringExtra(ModCastTargetPickerActivity.EXTRA_RESULT_REGION))
+            .put("contentRotation", data.getIntExtra(ModCastTargetPickerActivity.EXTRA_RESULT_ROTATION, 0))
+            .put("presentationKind", data.getStringExtra(ModCastTargetPickerActivity.EXTRA_RESULT_PRESENTATION_KIND)) else null
+        completion(resultCode == Activity.RESULT_OK, data?.getStringExtra(ModCastTargetPickerActivity.EXTRA_RESULT_CODE), result)
     }
 
     /** Called only from the renderer's native button click callback; Mod JSON supplies an opaque ref only. */
@@ -387,25 +609,279 @@ class ModRearSceneActivity : ComponentActivity() {
         }
     }
 
+    private fun submitMeasuredViewportIfNeeded(ticket: String) {
+        val transition = sceneViewportTransition
+        if (transition != null) {
+            when (transition.phase) {
+                SceneViewportTransitionPhase.APPLYING -> submitSceneViewportTransition(transition)
+                SceneViewportTransitionPhase.ROLLING_BACK -> finishViewportRollbackIfMeasured(transition)
+            }
+            return
+        }
+        reportMeasuredWindow(ticket)
+    }
+
+    private fun scheduleSceneViewportTransitionTimeout(transition: ActiveSceneViewportTransition) {
+        sceneViewportTransitionTimeout?.let(sceneViewportTransitionHandler::removeCallbacks)
+        val timeout = Runnable {
+            if (sceneViewportTransition !== transition) return@Runnable
+            when (transition.phase) {
+                SceneViewportTransitionPhase.APPLYING -> failSceneViewportTransition(transition, "E_DISPLAY_BUSY")
+                SceneViewportTransitionPhase.ROLLING_BACK -> {
+                    if (!transition.rollbackFallbackAttempted) {
+                        transition.rollbackFallbackAttempted = true
+                        submitSafeViewportRollbackFallback(transition)
+                        if (sceneViewportTransition === transition) scheduleSceneViewportTransitionTimeout(transition)
+                    } else {
+                        terminateUnrecoverableSceneTransition(transition)
+                    }
+                }
+            }
+        }
+        sceneViewportTransitionTimeout = timeout
+        val remaining = if (transition.phase == SceneViewportTransitionPhase.APPLYING)
+            (transition.deadlineElapsedRealtimeMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        else VIEWPORT_ROLLBACK_TIMEOUT_MS
+        sceneViewportTransitionHandler.postDelayed(timeout, remaining)
+    }
+
+    private fun submitSceneViewportTransition(transition: ActiveSceneViewportTransition) {
+        if (sceneViewportTransition !== transition || transition.phase != SceneViewportTransitionPhase.APPLYING ||
+            transition.reportInFlight || !isCurrentSceneInstance() || isFinishing || isDestroyed) return
+        if (SystemClock.elapsedRealtime() >= transition.deadlineElapsedRealtimeMs) {
+            failSceneViewportTransition(transition, "E_DISPLAY_BUSY"); return
+        }
+        if (!contentLayoutReady || !hasCurrentContainerLayout()) return
+        if (!applyMeasuredCameraInsets()) return
+        val route = launch ?: run { failSceneViewportTransition(transition, "E_STALE_SESSION"); return }
+        if (route != transition.targetRoute || core.modDataOwner(
+                (route.owner.principal as? SessionPrincipal.SignedMod)?.modId ?: "") != route.owner) {
+            failSceneViewportTransition(transition, "E_STALE_SESSION"); return
+        }
+        val report = runCatching { windowReport() }.getOrElse {
+            failSceneViewportTransition(transition, "E_INVALID_STATE"); return
+        }
+        if (report.viewport.region != (if (route.request.region == RearRegion.FULL) SharedSceneRegion.FULL else SharedSceneRegion.SAFE) ||
+            report.viewport.contentRotation != route.request.contentRotation ||
+            report.viewport.displayId != window.decorView.display?.displayId) return
+        val transitions = core.sceneViewportTransitions ?: run {
+            failSceneViewportTransition(transition, "E_SCENE_OPEN"); return
+        }
+        val geometryEpoch = viewportGeometryEpoch
+        transition.reportInFlight = true
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                transitions.reportSceneViewportTransition(route.owner, route.sessionId, route.generation, transition.id, report)
+            }.getOrElse { SceneOperationResult(false, SceneError.BACKEND_UNAVAILABLE, retryable = true) }
+            runOnUiThread {
+                if (sceneViewportTransition !== transition) return@runOnUiThread
+                transition.reportInFlight = false
+                if (transition.phase != SceneViewportTransitionPhase.APPLYING) return@runOnUiThread
+                if (!result.success) {
+                    failSceneViewportTransition(transition, result.error?.let { "E_${it.name}" } ?: "E_SCENE_OPEN")
+                    return@runOnUiThread
+                }
+                if (geometryEpoch != viewportGeometryEpoch || !hasCurrentContainerLayout()) {
+                    if (hasCurrentContainerLayout()) submitSceneViewportTransition(transition)
+                    return@runOnUiThread
+                }
+                val latestReport = runCatching { windowReport() }.getOrNull()
+                if (latestReport == null || !sameMeasuredViewport(report, latestReport)) {
+                    configureSceneViewport()
+                    if (hasCurrentContainerLayout()) submitSceneViewportTransition(transition)
+                    return@runOnUiThread
+                }
+                val principal = route.owner.principal as? SessionPrincipal.SignedMod
+                if (principal == null || core.modDataOwner(principal.modId) != route.owner ||
+                    !window.decorView.isAttachedToWindow || !window.decorView.isShown ||
+                    isFinishing || isDestroyed || !isCurrentSceneInstance()) {
+                    failSceneViewportTransition(transition, "E_STALE_SESSION"); return@runOnUiThread
+                }
+                val committed = transitions.commitSceneViewportTransition(
+                    route.owner, route.sessionId, route.generation, transition.id)
+                if (!committed.success) {
+                    failSceneViewportTransition(transition, committed.error?.let { "E_${it.name}" } ?: "E_SCENE_OPEN")
+                    return@runOnUiThread
+                }
+                sceneViewportTransitionTimeout?.let(sceneViewportTransitionHandler::removeCallbacks)
+                sceneViewportTransitionTimeout = null
+                viewportPresentationRefreshPending = true
+                sceneViewportTransition = null
+                error = ""
+                reconcileScenePresentation()
+                if (!transition.completionSent) {
+                    transition.completionSent = true
+                    transition.complete(true, null)
+                }
+            }
+        }
+    }
+
+    private fun sameMeasuredViewport(expected: SceneWindowReport, actual: SceneWindowReport): Boolean =
+        expected.component == actual.component && expected.taskId == actual.taskId &&
+            expected.viewport.copy(revision = 0L) == actual.viewport.copy(revision = 0L)
+
+    private fun failSceneViewportTransition(transition: ActiveSceneViewportTransition, code: String) {
+        if (sceneViewportTransition !== transition) return
+        val transitions = core.sceneViewportTransitions
+        transitions?.abortSceneViewportTransition(transition.oldRoute.owner, transition.oldRoute.sessionId,
+            transition.oldRoute.generation, transition.id)
+        if (transition.phase == SceneViewportTransitionPhase.ROLLING_BACK) {
+            if (!transition.completionSent) {
+                transition.completionSent = true
+                transition.complete(false, transition.failureCode ?: code)
+            }
+            return
+        }
+        transition.phase = SceneViewportTransitionPhase.ROLLING_BACK
+        transition.reportInFlight = false
+        transition.failureCode = code
+        launch = transition.oldRoute
+        contentLayoutReady = false
+        viewportGeometryEpoch++
+        configureSceneViewport()
+        scheduleSceneViewportTransitionTimeout(transition)
+        if (hasCurrentContainerLayout()) markSceneContainerLayoutReady(launchTicket)
+    }
+
+    private fun finishViewportRollbackIfMeasured(transition: ActiveSceneViewportTransition) {
+        if (sceneViewportTransition !== transition || transition.phase != SceneViewportTransitionPhase.ROLLING_BACK ||
+            transition.rollbackFallbackInFlight || !contentLayoutReady || !hasCurrentContainerLayout()) return
+        val current = runCatching { windowReport() }.getOrNull() ?: return
+        if (!sameMeasuredViewport(transition.oldWindow, current)) {
+            if (transition.rollbackFallbackAttempted) submitSafeViewportRollbackFallback(transition)
+            return
+        }
+        val principal = transition.oldRoute.owner.principal as? SessionPrincipal.SignedMod ?: return
+        if (core.modDataOwner(principal.modId) != transition.oldRoute.owner || isFinishing || isDestroyed) return
+        sceneViewportTransitionTimeout?.let(sceneViewportTransitionHandler::removeCallbacks)
+        sceneViewportTransitionTimeout = null
+        sceneViewportTransition = null
+        error = "无法切换背屏场景：${transition.failureCode ?: "E_SCENE_OPEN"}"
+        if (!transition.completionSent) {
+            transition.completionSent = true
+            transition.complete(false, transition.failureCode ?: "E_SCENE_OPEN")
+        }
+    }
+
+    /** Re-measure the original request on this exact lease before closing an unrecoverable task. */
+    private fun submitSafeViewportRollbackFallback(transition: ActiveSceneViewportTransition) {
+        if (sceneViewportTransition !== transition || transition.phase != SceneViewportTransitionPhase.ROLLING_BACK ||
+            transition.rollbackFallbackInFlight || !contentLayoutReady || !hasCurrentContainerLayout() ||
+            isFinishing || isDestroyed || !isCurrentSceneInstance()) return
+        val route = transition.oldRoute
+        val principal = route.owner.principal as? SessionPrincipal.SignedMod ?: return
+        if (launch != route || core.modDataOwner(principal.modId) != route.owner) {
+            terminateUnrecoverableSceneTransition(transition); return
+        }
+        if (!applyMeasuredCameraInsets()) return
+        val report = runCatching { windowReport() }.getOrElse { return }
+        val expectedRegion = if (route.request.region == RearRegion.FULL) SharedSceneRegion.FULL else SharedSceneRegion.SAFE
+        if (report.viewport.region != expectedRegion || report.viewport.contentRotation != route.request.contentRotation ||
+            report.viewport.displayId != window.decorView.display?.displayId) return
+        val geometryEpoch = viewportGeometryEpoch
+        transition.rollbackFallbackInFlight = true
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                core.displaySessions.reportSceneViewport(route.owner, route.sessionId, route.generation, report)
+            }.getOrElse { SceneOperationResult(false, SceneError.BACKEND_UNAVAILABLE, retryable = true) }
+            runOnUiThread {
+                if (sceneViewportTransition !== transition) return@runOnUiThread
+                transition.rollbackFallbackInFlight = false
+                if (!result.success) {
+                    terminateUnrecoverableSceneTransition(transition); return@runOnUiThread
+                }
+                if (geometryEpoch != viewportGeometryEpoch || !hasCurrentContainerLayout()) {
+                    if (hasCurrentContainerLayout()) submitSafeViewportRollbackFallback(transition)
+                    return@runOnUiThread
+                }
+                val latest = runCatching { windowReport() }.getOrNull()
+                if (latest == null || !sameMeasuredViewport(report, latest) || !window.decorView.isAttachedToWindow ||
+                    !window.decorView.isShown || core.modDataOwner(principal.modId) != route.owner) {
+                    if (latest != null && hasCurrentContainerLayout()) submitSafeViewportRollbackFallback(transition)
+                    return@runOnUiThread
+                }
+                sceneViewportTransitionTimeout?.let(sceneViewportTransitionHandler::removeCallbacks)
+                sceneViewportTransitionTimeout = null
+                viewportPresentationRefreshPending = true
+                sceneViewportTransition = null
+                error = "无法切换背屏场景：${transition.failureCode ?: "E_SCENE_OPEN"}"
+                reconcileScenePresentation()
+                if (!transition.completionSent) {
+                    transition.completionSent = true
+                    transition.complete(false, transition.failureCode ?: "E_SCENE_OPEN")
+                }
+            }
+        }
+    }
+
+    /** If neither the old geometry nor a verified same-lease re-measure is usable, close only this session. */
+    private fun terminateUnrecoverableSceneTransition(transition: ActiveSceneViewportTransition) {
+        if (sceneViewportTransition !== transition) return
+        core.sceneViewportTransitions?.abortSceneViewportTransition(
+            transition.oldRoute.owner, transition.oldRoute.sessionId, transition.oldRoute.generation, transition.id)
+        sceneViewportTransitionTimeout?.let(sceneViewportTransitionHandler::removeCallbacks)
+        sceneViewportTransitionTimeout = null
+        sceneViewportTransition = null
+        viewportPresentationRefreshPending = true
+        if (!transition.completionSent) {
+            transition.completionSent = true
+            transition.complete(false, transition.failureCode ?: "E_SCENE_OPEN")
+        }
+        coreClosed = runCatching {
+            core.displaySessions.closeScene(transition.oldRoute.owner, transition.oldRoute.sessionId).success
+        }.getOrDefault(false)
+        ModSceneReadyController.markClosed(launchTicket)
+        finishAndRemoveTask()
+    }
+
     private fun reportMeasuredWindow(ticket: String) {
-        if (!isCurrentSceneInstance() || windowReported) return
+        if (!isCurrentSceneInstance() || windowReported || windowReportRequests.isInFlight) return
+        if (!contentLayoutReady) return
+        if (!applyMeasuredCameraInsets()) return
         val route = launch ?: return
         val controller = readyController ?: return
+        val report = runCatching { windowReport() }.getOrElse {
+            error = it.message ?: "无法读取背屏窗口几何"
+            return
+        }
+        observeWindowGeometry(report.viewport)
         val epoch = windowLifecycleGate.currentWindowRequestEpoch()
+        val geometryEpoch = viewportGeometryEpoch
+        val reportToken = windowReportRequests.begin(
+            activityStarted = windowLifecycleGate.currentState().activityStarted,
+            layoutApplied = contentLayoutReady && hasCurrentContainerLayout(),
+        ) ?: return
         controller.submit(
             instance = instanceToken,
-            report = windowReport(),
+            report = report,
             windowEpoch = epoch,
             active = windowLifecycleGate.currentState().activityStarted,
         ) { completion ->
+            if (!windowReportRequests.finish(reportToken)) return@submit
             if (completion.instance != instanceToken || !isCurrentSceneInstance() || isFinishing || isDestroyed) return@submit
+            if (geometryEpoch != viewportGeometryEpoch) {
+                windowReported = false
+                // The report in flight may describe an obsolete rectangle. Re-read
+                // current insets and container bounds after it drains; submit the
+                // latest viewport now if it is already applied, otherwise the exact
+                // native layout listener will submit it when that layout completes.
+                applyMeasuredCameraInsets()
+                configureSceneViewport()
+                when (modSceneStaleReportAction(geometryEpoch, viewportGeometryEpoch, hasCurrentContainerLayout())) {
+                    ModSceneStaleReportAction.RESUBMIT_LATEST -> markSceneContainerLayoutReady(ticket)
+                    ModSceneStaleReportAction.WAIT_FOR_LAYOUT -> contentLayoutReady = false
+                    null -> markSceneContainerLayoutReady(ticket)
+                }
+                return@submit
+            }
             if (!completion.result.success) {
                 error = "背屏窗口验证失败：${completion.result.error}"
                 finishAndRemoveTask()
                 return@submit
             }
             if (completion.windowEpoch != windowLifecycleGate.currentWindowRequestEpoch()) {
-                reportMeasuredWindow(ticket)
+                submitMeasuredViewportIfNeeded(ticket)
                 return@submit
             }
             completeWindowReady(route)
@@ -414,7 +890,6 @@ class ModRearSceneActivity : ComponentActivity() {
 
     private fun completeWindowReady(route: SceneLaunchContext) {
         windowReported = true
-        layoutListener?.let(window.decorView::removeOnLayoutChangeListener)
         sceneReady = true
         message = ""
         core.displaySessions.attachSceneObserver(route.owner, route.sessionId, generation, observer)
@@ -461,7 +936,12 @@ class ModRearSceneActivity : ComponentActivity() {
             return
         }
         val snapshot = snapshotResult.getOrNull()
-        windowLifecycleGate.applyPresentationSnapshot(snapshot, requestEpoch)
+        val applied = windowLifecycleGate.applyPresentationSnapshot(snapshot, requestEpoch)
+        if (applied && viewportPresentationRefreshPending && snapshot?.visible == true &&
+            windowLifecycleGate.currentState().windowVisible && isCurrentSceneInstance() && !isFinishing && !isDestroyed) {
+            viewportPresentationRefreshPending = false
+            synchronizeVisibleConsumers()
+        }
         if (snapshot == null) {
             coreClosed = true
             sceneReady = false
@@ -472,6 +952,10 @@ class ModRearSceneActivity : ComponentActivity() {
     private fun onWindowLifecycleStateChanged(state: ModSceneWindowLifecycleGate.State) {
         windowActuallyVisible = state.windowVisible
         coordinatorVisible = state.coordinatorVisible
+        if (!state.windowVisible) {
+            sceneViewportTransition?.takeIf { it.phase == SceneViewportTransitionPhase.APPLYING }
+                ?.let { failSceneViewportTransition(it, "E_DISPLAY_BUSY") }
+        }
         synchronizeVisibleConsumers()
     }
 
@@ -504,10 +988,29 @@ class ModRearSceneActivity : ComponentActivity() {
                             effectRequestCompletion = complete
                         }
                     }
+                    override fun requestCastWithResult(mod: InstalledMod, eventId: String, effect: ModCastStartEffect,
+                        source: ModCastActivationSource, complete: (Boolean, String?, org.json.JSONObject?) -> Unit) {
+                        runOnUiThread {
+                            if (source != castSource || !ModCastActivationSources.isRegistered(source, mod.id) ||
+                                !isCurrentSceneInstance() || !moduleSlotActive || !isSceneContentVisible() || isFinishing || isDestroyed) {
+                                complete(false, "E_CAST_SOURCE_STALE", null)
+                                return@runOnUiThread
+                            }
+                            castEffectCompletion?.invoke(false, "E_EFFECT_REPLACED", null)
+                            castEffectRequest = effect
+                            castEffectCompletion = complete
+                        }
+                    }
                 }
             }
-            ModHostEffectRouter.consumers[modId] = requireNotNull(effectConsumer)
         }
+        if (castSource == null) {
+            val source = ModCastActivationSource(modId, ModCastActivationSource.Surface.REAR_SCENE,
+                UUID.randomUUID().toString(), route.sessionId, route.generation)
+            castSource = source
+            castSourceRegistration = ModCastActivationSources.register(source, requireNotNull(effectConsumer))
+        }
+        ModHostEffectRouter.consumers[modId] = requireNotNull(effectConsumer)
         broker.setObserverVisible(modId, brokerListener, true)
         startHostData()
     }
@@ -517,6 +1020,12 @@ class ModRearSceneActivity : ComponentActivity() {
         val modId = (launch?.owner?.principal as? SessionPrincipal.SignedMod)?.modId
         if (moduleSlotActive && modId != null) broker.setObserverVisible(modId, brokerListener, false)
         if (modId != null) effectConsumer?.let { ModHostEffectRouter.consumers.remove(modId, it) }
+        castSourceRegistration?.close()
+        castSourceRegistration = null
+        castSource = null
+        castEffectRequest = null
+        castEffectCompletion?.invoke(false, "E_CAST_SOURCE_STALE", null)
+        castEffectCompletion = null
     }
 
     private fun isWindowActuallyVisible(): Boolean = windowActuallyVisible && windowReported && !isFinishing && !isDestroyed
@@ -579,42 +1088,239 @@ class ModRearSceneActivity : ComponentActivity() {
         val safeTop = cutout?.safeInsetTop?.coerceIn(0, height) ?: 0
         val safeRight = cutout?.safeInsetRight?.coerceIn(0, width - safeLeft) ?: 0
         val safeBottom = cutout?.safeInsetBottom?.coerceIn(0, height - safeTop) ?: 0
-        cameraSafeInsets = CameraSafeInsets(
-            left = (safeLeft * 160f / density).dp,
-            top = (safeTop * 160f / density).dp,
-            right = (safeRight * 160f / density).dp,
-            bottom = (safeBottom * 160f / density).dp
+        val insetsKnown = Build.VERSION.SDK_INT >= 28 && root.rootWindowInsets != null
+        val cutoutKnown = cutout != null || insetsKnown
+        cutoutReported = cutoutKnown
+        if (!cutoutKnown) Log.w("ModRearScene", "ROM did not report a verifiable display-cutout safe area; camera-safe bounds are uncertain")
+        val logicalDisplaySize = Point().also(display::getRealSize)
+        val modeSize = runCatching { display.mode.physicalWidth to display.mode.physicalHeight }.getOrNull()
+        val cutoutInsets = if (Build.VERSION.SDK_INT < 28 || root.rootWindowInsets == null) null else PixelInsets(safeLeft, safeTop, safeRight, safeBottom)
+        val route = launch
+        val region = if (route?.request?.region == RearRegion.FULL) SharedSceneRegion.FULL else SharedSceneRegion.SAFE
+        val geometry = SceneViewportGeometry.fromWindow(
+            displayBounds = SharedPixelRect(0, 0, logicalDisplaySize.x, logicalDisplaySize.y),
+            windowBounds = SharedPixelRect(point[0], point[1], point[0] + width, point[1] + height),
+            cutoutInsets = cutoutInsets,
+            cutoutBoundsInWindow = cutout?.boundingRects.orEmpty().map { SharedPixelRect(it.left - point[0], it.top - point[1], it.right - point[0], it.bottom - point[1]) },
+            cutoutKnowledge = when { cutoutInsets == null -> CutoutKnowledge.UNKNOWN; cutout != null -> CutoutKnowledge.KNOWN_PRESENT; else -> CutoutKnowledge.KNOWN_NONE },
+            displayRotation = rotation,
+            // The current Mod Compose tree uses the platform's measured orientation; an additional
+            // view rotation is deliberately zero until a Scene request carries that separate intent.
+            contentRotation = route?.request?.contentRotation ?: 0,
+            effectiveDensityDpi = density,
+            physicalModeWidthPx = modeSize?.first,
+            physicalModeHeightPx = modeSize?.second,
         )
-        cutoutReported = cutout != null
-        if (cutout == null) Log.w("ModRearScene", "ROM did not report a verifiable display-cutout safe area; camera-safe bounds are uncertain")
+        val contentRect = geometry.contentBounds(region)
+        require(!contentRect.isEmpty) { "E_SCENE_CONTENT_REGION_EMPTY" }
+        val container = requireNotNull(sceneContainer) { "E_SCENE_CONTENT_NOT_APPLIED" }
+        require(container.hasAppliedContentLayout && container.contentRotation == geometry.contentRotation) { "E_SCENE_CONTENT_NOT_APPLIED" }
+        val containerPoint = IntArray(2).also(container::getLocationOnScreen)
+        require(containerPoint[0] == contentRect.left && containerPoint[1] == contentRect.top &&
+            container.width == contentRect.width && container.height == contentRect.height) { "E_SCENE_CONTENT_VIEWPORT_MISMATCH" }
         val viewport = RearViewportSnapshot(
             revision = ++viewportRevision,
             displayId = display.displayId,
-            physicalDisplayPx = PixelSize(metrics.widthPixels, metrics.heightPixels),
-            contentBoundsPx = PixelRect(
-                point[0] + safeLeft,
-                point[1] + safeTop,
-                point[0] + width - safeRight,
-                point[1] + height - safeBottom
-            ),
+            physicalDisplayPx = modeSize?.let { PixelSize(it.first, it.second) },
+            contentBoundsPx = PixelRect(contentRect.left, contentRect.top, contentRect.right, contentRect.bottom),
             windowPx = PixelSize(width, height),
             windowDp = DpSize(width * 160f / density, height * 160f / density),
             densityDpi = density,
             renderBufferPx = null,
             displayRotation = rotation,
-            contentRotation = rotation,
-            inputTransform = CoordinateTransform(1f, 0f, -safeLeft.toFloat(), 0f, 1f, -safeTop.toFloat())
+            contentRotation = geometry.contentRotation,
+            inputTransform = geometry.windowInputMatrix(region).let { CoordinateTransform(it[0], it[1], it[2], it[3], it[4], it[5]) },
+            region = region,
+            cutoutKnowledge = geometry.cutoutKnowledge,
+            cutoutBoundsPx = geometry.cutoutBoundsInWindow
         )
         return SceneWindowReport(component, taskId, viewport)
     }
+
+    /** Update safe-area padding first; report only after Compose has laid out that exact inset state. */
+    private fun applyMeasuredCameraInsets(): Boolean {
+        val root = window.decorView
+        val width = root.width.coerceAtLeast(1)
+        val height = root.height.coerceAtLeast(1)
+        val rootInsets = root.rootWindowInsets
+        val cutout = if (Build.VERSION.SDK_INT >= 28) rootInsets?.displayCutout else null
+        val left = cutout?.safeInsetLeft?.coerceIn(0, width) ?: 0
+        val top = cutout?.safeInsetTop?.coerceIn(0, height) ?: 0
+        val right = cutout?.safeInsetRight?.coerceIn(0, width - left) ?: 0
+        val bottom = cutout?.safeInsetBottom?.coerceIn(0, height - top) ?: 0
+        val density = resources.displayMetrics.densityDpi.coerceAtLeast(1)
+        val insets = CameraSafeInsets(
+            (left * 160f / density).dp, (top * 160f / density).dp,
+            (right * 160f / density).dp, (bottom * 160f / density).dp
+        )
+        val known = Build.VERSION.SDK_INT >= 28 && rootInsets != null
+        val reported = cutout != null || known
+        val layoutChanged = insets != cameraSafeInsets || cutoutReported != reported
+        cameraSafeInsets = insets
+        cutoutReported = reported
+        if (!layoutChanged) {
+            val container = sceneContainer ?: return false
+            val root = sceneRoot ?: return false
+            val params = container.layoutParams as? FrameLayout.LayoutParams ?: return false
+            return container.hasAppliedContentLayout && container.width == params.width && container.height == params.height &&
+                container.width > 0 && container.height > 0 && root.width > 0 && root.height > 0
+        }
+        viewportGeometryEpoch++
+        contentLayoutReady = false
+        invalidateGeometryPresentation()
+        configureSceneViewport()
+        return false
+    }
+
+    /** Place the native quarter-turn container on exactly the measured FULL/SAFE display rectangle. */
+    private fun configureSceneViewport() {
+        val decor = window.decorView
+        val container = sceneContainer ?: return
+        val root = sceneRoot ?: return
+        if (decor.width <= 0 || decor.height <= 0) return
+        val display = if (Build.VERSION.SDK_INT >= 30) display else @Suppress("DEPRECATION") windowManager.defaultDisplay
+        val size = Point().also(display::getRealSize)
+        val rootPoint = IntArray(2).also(decor::getLocationOnScreen)
+        val cutout = if (Build.VERSION.SDK_INT >= 28) decor.rootWindowInsets?.displayCutout else null
+        val insets = if (Build.VERSION.SDK_INT < 28 || decor.rootWindowInsets == null) null else PixelInsets(
+            cutout?.safeInsetLeft?.coerceIn(0, decor.width) ?: 0,
+            cutout?.safeInsetTop?.coerceIn(0, decor.height) ?: 0,
+            cutout?.safeInsetRight?.coerceIn(0, decor.width) ?: 0,
+            cutout?.safeInsetBottom?.coerceIn(0, decor.height) ?: 0
+        )
+        val region = if (launch?.request?.region == RearRegion.FULL) SharedSceneRegion.FULL else SharedSceneRegion.SAFE
+        val turn = launch?.request?.contentRotation ?: 0
+        container.contentRotation = turn
+        val geometry = SceneViewportGeometry.fromWindow(
+            SharedPixelRect(0, 0, size.x, size.y),
+            SharedPixelRect(rootPoint[0], rootPoint[1], rootPoint[0] + decor.width, rootPoint[1] + decor.height),
+            insets,
+            cutout?.boundingRects.orEmpty().map { SharedPixelRect(it.left - rootPoint[0], it.top - rootPoint[1], it.right - rootPoint[0], it.bottom - rootPoint[1]) },
+            when { insets == null -> CutoutKnowledge.UNKNOWN; cutout != null -> CutoutKnowledge.KNOWN_PRESENT; else -> CutoutKnowledge.KNOWN_NONE },
+            display.rotation, turn, resources.displayMetrics.densityDpi.coerceAtLeast(1)
+        )
+        val bounds = geometry.contentBounds(region)
+        if (bounds.isEmpty) return
+        val params = (container.layoutParams as? FrameLayout.LayoutParams) ?: FrameLayout.LayoutParams(-1, -1)
+        val left = bounds.left - rootPoint[0]
+        val top = bounds.top - rootPoint[1]
+        if (params.width != bounds.width || params.height != bounds.height || params.leftMargin != left || params.topMargin != top) {
+            params.width = bounds.width; params.height = bounds.height
+            params.leftMargin = left; params.topMargin = top
+            container.layoutParams = params
+            viewportGeometryEpoch++
+            contentLayoutReady = false
+            invalidateGeometryPresentation()
+        }
+        // If this exact geometry was already laid out, use it now. If requestLayout
+        // is still pending, only the container's actual layout callback may open the
+        // readiness path.
+        markSceneContainerLayoutReady(launchTicket)
+    }
+
+    private fun markSceneContainerLayoutReady(ticket: String?) {
+        if (ticket == null || isFinishing || isDestroyed) return
+        val root = sceneRoot ?: return
+        if (!hasCurrentContainerLayout() || root.width <= 0 || root.height <= 0) {
+            contentLayoutReady = false
+            return
+        }
+        contentLayoutReady = true
+        runCatching { observeWindowGeometry(windowReport().viewport) }
+        if ((sceneViewportTransition != null || !windowReported) && !windowReportRequests.isInFlight)
+            submitMeasuredViewportIfNeeded(ticket)
+    }
+
+    /** Compare every submitted viewport field plus raw cutout facts lost by FULL-region bounds. */
+    private fun observeWindowGeometry(viewport: RearViewportSnapshot): Boolean {
+        val rootInsets = window.decorView.rootWindowInsets
+        val cutout = if (Build.VERSION.SDK_INT >= 28) rootInsets?.displayCutout else null
+        val width = window.decorView.width.coerceAtLeast(1)
+        val height = window.decorView.height.coerceAtLeast(1)
+        val safeLeft = cutout?.safeInsetLeft?.coerceIn(0, width) ?: 0
+        val safeTop = cutout?.safeInsetTop?.coerceIn(0, height) ?: 0
+        val safeRight = cutout?.safeInsetRight?.coerceIn(0, width - safeLeft) ?: 0
+        val safeBottom = cutout?.safeInsetBottom?.coerceIn(0, height - safeTop) ?: 0
+        val insetsKnown = Build.VERSION.SDK_INT >= 28 && rootInsets != null
+        val current = ModSceneWindowGeometry(
+            viewport = viewport.copy(revision = 0L),
+            safeLeftPx = safeLeft.takeIf { insetsKnown },
+            safeTopPx = safeTop.takeIf { insetsKnown },
+            safeRightPx = safeRight.takeIf { insetsKnown },
+            safeBottomPx = safeBottom.takeIf { insetsKnown },
+            insetsKnown = insetsKnown,
+        )
+        val previous = observedWindowGeometry
+        if (!modSceneViewportGeometryChanged(previous, current)) return false
+        observedWindowGeometry = current
+        if (previous == null) return false
+        viewportGeometryEpoch++
+        // Keep the current, unchanged READY/visibility lease and keepVisible window policy
+        // while the view is temporarily blacked out for an explicit same-task transaction.
+        // No new viewport is published until its exact measured report commits.
+        if (sceneViewportTransition == null) invalidateGeometryPresentation()
+        return true
+    }
+
+    private fun invalidateGeometryPresentation() {
+        // A same-lease region/rotation transition has not replaced the accepted Core
+        // viewport yet. Keep its READY and keepVisible policy until the exact measured
+        // target report commits; the transition surface itself stays black meanwhile.
+        if (sceneViewportTransition != null) return
+        windowReported = false
+        sceneReady = false
+        // The prior Core-visible snapshot belongs to the old geometry. Advancing
+        // the lifecycle request epoch rejects any query already in flight; only a
+        // fresh query after the replacement viewport is accepted can reopen content.
+        if (::windowLifecycleGate.isInitialized) {
+            windowLifecycleGate.invalidateForGeometryChange()
+        } else {
+            synchronizeVisibleConsumers()
+        }
+    }
+
+    private fun hasCurrentContainerLayout(): Boolean {
+        val container = sceneContainer ?: return false
+        val params = container.layoutParams as? FrameLayout.LayoutParams ?: return false
+        return ModSceneContainerLayout(
+            actualWidth = container.width,
+            actualHeight = container.height,
+            actualLeft = container.left,
+            actualTop = container.top,
+            expectedWidth = params.width,
+            expectedHeight = params.height,
+            expectedLeft = params.leftMargin,
+            expectedTop = params.topMargin,
+            contentApplied = container.hasAppliedContentLayout,
+        ).matchesCurrentGeometry()
+    }
+
+    private data class ActiveSceneViewportTransition(
+        val id: String,
+        val oldRoute: SceneLaunchContext,
+        val targetRoute: SceneLaunchContext,
+        val oldWindow: SceneWindowReport,
+        val deadlineElapsedRealtimeMs: Long,
+        val complete: (Boolean, String?) -> Unit,
+        var phase: SceneViewportTransitionPhase = SceneViewportTransitionPhase.APPLYING,
+        var reportInFlight: Boolean = false,
+        var failureCode: String? = null,
+        var completionSent: Boolean = false,
+        var rollbackFallbackAttempted: Boolean = false,
+        var rollbackFallbackInFlight: Boolean = false,
+    )
+
+    private enum class SceneViewportTransitionPhase { APPLYING, ROLLING_BACK }
 
     private data class CameraSafeInsets(val left: Dp, val top: Dp, val right: Dp, val bottom: Dp) {
         companion object { val Zero = CameraSafeInsets(0.dp, 0.dp, 0.dp, 0.dp) }
     }
 
     companion object {
+        private const val MOD_CAST_PICKER_REQUEST = 0x4D43
         private const val MAX_INITIAL_READY_RETRIES = 20
         private const val INITIAL_READY_RETRY_DELAY_MS = 150L
+        private const val VIEWPORT_ROLLBACK_TIMEOUT_MS = MAX_INITIAL_READY_RETRIES * INITIAL_READY_RETRY_DELAY_MS
         private val nextSceneInstance = AtomicLong()
         private val activeSceneInstances = ConcurrentHashMap<String, Long>()
     }

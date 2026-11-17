@@ -22,6 +22,18 @@ public class ShellArgumentChecks {
   String result=new String(child.getInputStream().readAllBytes(),StandardCharsets.UTF_8);
   check(child.waitFor()==0,"shell failed");check(!Files.exists(Path.of(file)),"argument executed as shell code");
   check(result.split(java.util.regex.Pattern.quote(attack),-1).length==4,"notification argument changed");
+  for (String app : new String[]{"top.zainzh.rearscreen","top.zainzh.rearscreen.debug","top.zainzh.rearscreen.compat"}) {
+   String activity=app+"/top.zainzh.rearscreen.RearScreenNotificationActivity";
+   var privateLaunch=PrivilegedShellArguments.notificationLaunchPrefix(activity);
+   String legacy=PrivilegedShellArguments.notification(activity,"com.example",attack,attack,7);
+   check(privateLaunch.matcher(legacy).lookingAt(),"legacy notification launch would log its payload");
+   String extras=" --es packageName 'com.example' --es title "+PrivilegedShellArguments.quote(attack)
+       +" --es text "+PrivilegedShellArguments.quote(attack);
+   check(privateLaunch.matcher("am start --display 0 -n "+activity+extras).lookingAt(),"locked notification launch would log its payload");
+   check(privateLaunch.matcher("am start --display 123 -n "+activity+extras).lookingAt(),"rear notification launch would log its payload");
+   check(!privateLaunch.matcher("am start --display 0 -n "+activity+"Other"+extras).lookingAt(),"unrelated launch lost diagnostics");
+   check(!privateLaunch.matcher("input -d 123 keyevent KEYCODE_WAKEUP").lookingAt(),"wake command lost diagnostics");
+  }
   for(String value:new String[]{"com.test;id","com.test$(id)","com.test`id`","com.test x","com.test\nwhoami","../com.test","-p"}){
    reject(()->PrivilegedShellArguments.validateTargets(value,null));
    reject(()->PrivilegedShellArguments.validateTargets(null,value+"/.Main"));
@@ -37,7 +49,7 @@ public class ShellArgumentChecks {
   reject(()->PrivilegedShellArguments.stopRecording(123,"/tmp/video;id",2));
   String guarded=PrivilegedShellArguments.stopRecording(123,output,2);
   check(guarded.contains("/proc/123/comm")&&guarded.contains("/proc/123/cmdline"),"recording signal lacks identity guards");
-  System.out.println("PASS external targets, literal notification arguments, NUL and recording identity guards");
+  System.out.println("PASS external targets, literal notification arguments, private notification launch matching, NUL and recording identity guards");
  }
 }'''
 
@@ -45,10 +57,19 @@ with tempfile.TemporaryDirectory(prefix="remrss-shell-arguments-") as temp:
     target = Path(temp)
     source = target / "ShellArgumentChecks.java"
     source.write_text(SOURCE)
+    # These scene lookups are unrelated to shell argument validation.
+    capability = target / "RearCapabilityCore.java"
+    capability.write_text("""package top.zainzh.rearscreen.platform;
+public final class RearCapabilityCore {
+    public static boolean isActiveSceneTaskForeground(String foreground, int display) { return false; }
+    public static boolean hasActiveScenePackage(String app) { return false; }
+    public static boolean isActiveSceneTask(int task, int display) { return false; }
+}
+""")
     java_home = os.environ.get("JAVA_HOME")
     java = str(Path(java_home) / "bin/java") if java_home else shutil.which("java")
     javac = str(Path(java_home) / "bin/javac") if java_home else shutil.which("javac")
     code = ROOT / "android/app/src/main/java/top/zainzh/rearscreen"
-    subprocess.run([javac, "--release", "11", "-d", temp, str(source),
+    subprocess.run([javac, "--release", "11", "-d", temp, str(source), str(capability),
                     str(code / "PrivilegedShellArguments.java"), str(code / "VirtualCastRequest.java")], check=True)
     subprocess.run([java, "-cp", temp, "top.zainzh.rearscreen.ShellArgumentChecks", temp], check=True)

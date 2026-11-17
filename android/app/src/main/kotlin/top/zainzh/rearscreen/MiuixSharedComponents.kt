@@ -71,6 +71,11 @@ internal object AppPalette {
 }
 
 internal fun ComponentActivity.miuixContent(content: @Composable () -> Unit) {
+    prepareMiuixWindow()
+    setContentView(miuixComposeView(content))
+}
+
+internal fun ComponentActivity.prepareMiuixWindow() {
     SharedActivityTransitions.apply(this)
     WindowCompat.setDecorFitsSystemWindows(window, false)
     window.statusBarColor = android.graphics.Color.TRANSPARENT
@@ -80,11 +85,13 @@ internal fun ComponentActivity.miuixContent(content: @Composable () -> Unit) {
     WindowCompat.getInsetsController(window, window.decorView).apply {
         isAppearanceLightStatusBars = !dark; isAppearanceLightNavigationBars = !dark
     }
-    setContentView(ComposeView(this).apply {
+}
+
+/** Shared themed Compose host for native View containers that need their own measured bounds. */
+internal fun ComponentActivity.miuixComposeView(content: @Composable () -> Unit): ComposeView = ComposeView(this).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         setContent { AppTheme { content() } }
-    })
-}
+    }
 
 @Composable internal fun AppCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Card(modifier = modifier.fillMaxWidth().shadow(1.dp, RoundedCornerShape(26.dp), clip = false),

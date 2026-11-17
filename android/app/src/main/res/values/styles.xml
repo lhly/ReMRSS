@@ -8,6 +8,14 @@
         <item name="android:windowLightStatusBar">true</item>
     </style>
 
+    <!-- Trusted Cast approvals are non-occluding overlays so the selected main-display task stays visible. -->
+    <style name="MiuixCastOverlayTheme" parent="MiuixHostTheme">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+
     <!-- 透明Activity主题 -->
     <style name="Theme.Transparent" parent="android:Theme.NoTitleBar.Fullscreen">
         <item name="android:windowIsTranslucent">true</item>

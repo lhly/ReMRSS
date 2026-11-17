@@ -84,7 +84,7 @@ f'{PACKAGE}/ITaskService.java': '''package top.zainzh.rearscreen; public interfa
  class Stub { public static ITaskService asInterface(android.os.IBinder b){return (ITaskService)b;} }
 }''',
 f'{PACKAGE}/TaskService.java': '''package top.zainzh.rearscreen; import android.os.*; import java.util.*; public class TaskService implements IBinder,ITaskService {
- static final int USER_SERVICE_CONTRACT_VERSION=61;
+ static final int RUNTIME_USER_SERVICE_VERSION=98;
  public boolean alive=true,failLink,moveSuccess=true; public volatile int moves,restores,disables; public int links,occupancyQueries; public String occupancy="test-fixture:focused-main-app"; public Runnable beforeTarget,beforeOccupancy; public final List<DeathRecipient> recipients=new ArrayList<>();
  public boolean isBinderAlive(){return alive;} public void linkToDeath(DeathRecipient r,int f) throws RemoteException {if(failLink)throw new RemoteException();recipients.add(r);links++;} public boolean unlinkToDeath(DeathRecipient r,int f){return recipients.remove(r);}
  public void die(){alive=false;for(DeathRecipient r:new ArrayList<>(recipients))r.binderDied();}
@@ -92,7 +92,28 @@ f'{PACKAGE}/TaskService.java': '''package top.zainzh.rearscreen; import android.
  public String getDisplayCastOccupancy(int d){occupancyQueries++;if(occupancyQueries>1&&beforeTarget!=null)beforeTarget.run();if(beforeOccupancy!=null)beforeOccupancy.run();return occupancy;}
  public boolean disableSubScreenLauncher(){disables++;return true;} public boolean enableSubScreenLauncher(){restores++;return true;} public boolean moveTaskToDisplay(int t,int d){moves++;return moveSuccess;} public boolean launchWakeActivity(int d){return true;} public boolean collapseStatusBar(){return true;}
 }''',
-f'{PACKAGE}/RearScreenKeeperService.java': '''package top.zainzh.rearscreen; public class RearScreenKeeperService {static boolean physical;static boolean isRunning(){return physical;}static boolean isPhysicalCastRunning(){return physical;}static String physicalCastTask(){return physical?"com.test:42":null;}}''',
+f'{PACKAGE}/RearScreenKeeperService.java': '''package top.zainzh.rearscreen; public class RearScreenKeeperService {static boolean physical;static boolean isRunning(){return physical;}static boolean isPhysicalCastRunning(){return physical;}static String physicalCastTask(){return physical?"com.test:42":null;}static void notifyControlledPhysicalRecovery(android.content.Context c,int task,long generation){}}''',
+'top/zainzh/rearscreen/platform/LegacyDisplayOccupancy.java': '''package top.zainzh.rearscreen.platform;
+import android.content.Context;
+public final class LegacyDisplayOccupancy {
+ public static final class ControlledPhysicalProjectionIdentity {
+  public int getTaskId(){return 0;} public long getGeneration(){return 0L;} public String getPackageName(){return null;}
+  public String getBaseComponent(){return null;} public int getDisplayId(){return 0;} public String getIdentity(){return null;}
+ }
+ public static final class PhysicalReplacementJournal { public String getToken(){return "";} }
+ public static ControlledPhysicalProjectionIdentity controlledPhysicalProjectionForRecovery(Context c,int d){return null;}
+ public static PhysicalReplacementJournal physicalReplacementJournal(Context c){return null;}
+ public static boolean hasControlledPhysicalProjectionRecord(Context c){return false;}
+}''',
+'top/zainzh/rearscreen/ControlledPhysicalCastOperations.java': '''package top.zainzh.rearscreen;
+import android.content.Context;
+public final class ControlledPhysicalCastOperations {
+ public static final class ReturnResult { public final String result; public final boolean stopped;
+  ReturnResult(String result,boolean stopped){this.result=result;this.stopped=stopped;} }
+ public static boolean recoverPhysicalReplacement(Context c,ITaskService s){return false;}
+ public static ReturnResult stop(Context c,ITaskService s,String token,int task,String pkg,String base,int display,String identity,long generation){
+  throw new AssertionError("controlled stop is outside this harness fixture"); }
+}''',
 # This harness owns Tile lifecycle/effects. The production occupancy policy/JSON reader is exercised by its JVM tests.
 f'{PACKAGE}/RearDisplayCastOccupancy.java': '''package top.zainzh.rearscreen; final class RearDisplayCastOccupancy {
  static final class Result {final String foreground;Result(String value){foreground=value.isEmpty()?null:value;}boolean allowed(){return foreground==null;}}
@@ -106,6 +127,7 @@ f'{PACKAGE}/R.java': '''package top.zainzh.rearscreen; public class R { public s
 }
 HARNESS = '''package top.zainzh.rearscreen;
 import android.content.*; import android.os.*; import rikka.shizuku.Shizuku;
+import top.zainzh.rearscreen.platform.LegacyDisplayOccupancy;
 import java.util.concurrent.*;
 public class ConnectionRegressionTest {
  static void check(boolean condition,String message){if(!condition)throw new AssertionError(message);}
@@ -214,6 +236,13 @@ public class ConnectionRegressionTest {
       case "tile_prototype_permission_denied":
        BuildConfig.VIRTUAL_CAST_ENABLED=true;Shizuku.permission=-1;tile.onClick();
        check(Context.started.isEmpty()&&service.moves==0,"prototype bypassed permission gate");break;
+      case "tile_no_controlled_owner_or_journal":
+       check(LegacyDisplayOccupancy.controlledPhysicalProjectionForRecovery(context,RearDisplay.requireId())==null,
+        "fixture unexpectedly has a controlled owner");
+       check(LegacyDisplayOccupancy.physicalReplacementJournal(context)==null
+        &&!LegacyDisplayOccupancy.hasControlledPhysicalProjectionRecord(context),"fixture unexpectedly has replacement state");
+       check(SwitchToRearTileService.routeForControlledState(false,false)==SwitchToRearTileService.ClickRoute.LEGACY_SWITCH,
+        "empty controlled state did not preserve legacy route");break;
       case "tile_delayed_ready": tile.onClick();Handler.advance(1600);Shizuku.ready(0,service);awaitFinished(tile);check(service.moves==1,"click lost after one second");break;
       case "tile_duplicate_click": Shizuku.ready(0,service);tile.onClick();tile.onClick();awaitFinished(tile);check(service.moves==1,"duplicate move");break;
       case "tile_close_pending": tile.onClick();tile.onStopListening();Shizuku.ready(0,service);Handler.drain();check(service.moves==0,"closed panel moved task");break;
@@ -284,7 +313,7 @@ for scenario in ['switch_timeout_cancel', 'switch_old_callbacks', 'switch_active
                  'tile_delayed_ready', 'tile_duplicate_click', 'tile_close_pending',
                  'tile_timeout', 'tile_other_owner', 'tile_destroy_pending',
                  'tile_failed_move', 'tile_visible_owner', 'tile_occupancy_query_failed', 'tile_active_physical_owner',
-                 'tile_close_during_occupancy', 'tile_close_during_target', 'tile_prototype_serial_route',
+                 'tile_close_during_occupancy', 'tile_close_during_target', 'tile_no_controlled_owner_or_journal', 'tile_prototype_serial_route',
                  'tile_prototype_serial_route_pre34', 'tile_prototype_permission_denied']:
     setattr(ConnectionTests, 'test_' + scenario, lambda self, name=scenario: self.run_scenario(name))
 

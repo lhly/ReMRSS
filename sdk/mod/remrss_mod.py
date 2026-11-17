@@ -14,7 +14,9 @@ MAX_UI = 64 * 1024
 TOKEN = re.compile(r"^[a-z][A-Za-z0-9._-]{0,63}$")
 SCHEMA_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 CAPABILITY_NAMES = {
-    "rear.scene": 1, "rear.scene.keep_visible": 1, "data.battery": 1, "data.systemMetrics": 1,
+    "rear.scene": 1, "rear.scene.keep_visible": 1, "rear.region": 1, "rear.scene.orientation": 1,
+    "rear.cast.virtual": 1, "rear.cast.direct_physical": 1,
+    "data.battery": 1, "data.systemMetrics": 1,
     "model.local": 1, "ui.native": 1, "ui.dialog": 1, "action.invoke": 1, "schedule.visible": 1, "clock.snapshot": 1,
     "rear.notification": 1,
 }
@@ -326,10 +328,37 @@ def validate_effect_intent(effect, capabilities, field):
             if len(json.dumps(effect,ensure_ascii=False,separators=(",",":" )).encode("utf-8")) > 2048: fail(f"{field} 通知 Effect 超过 2 KiB")
         except UnicodeEncodeError: fail(f"{field} 通知文本不是有效 UTF-8")
     elif kind=="rear.open":
-        if "rear.scene" not in capabilities or set(effect)-{"type","id","scene","region","keepVisible"} or not {"type","scene","region","keepVisible"}.issubset(effect): fail(f"{field} rear.open 字段无效或未声明 rear.scene")
-        if effect["scene"]!="rear" or effect["region"]!="CAMERA_SAFE" or not isinstance(effect["keepVisible"],bool): fail(f"{field} rear.open 参数不受支持")
+        if "rear.scene" not in capabilities or set(effect)-{"type","id","scene","region","keepVisible","contentRotation"} or not {"type","scene","region","keepVisible"}.issubset(effect): fail(f"{field} rear.open 字段无效或未声明 rear.scene")
+        if effect["scene"]!="rear" or effect["region"] not in ("CAMERA_SAFE", "FULL") or not isinstance(effect["keepVisible"],bool): fail(f"{field} rear.open 参数不受支持")
         if "id" in effect and (not isinstance(effect["id"],str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",effect["id"])): fail(f"{field} rear.open id 无效")
+        if effect["region"] == "FULL" and "rear.region" not in capabilities: fail(f"{field} FULL Scene 需要声明 rear.region")
+        rotation=effect.get("contentRotation")
+        if rotation is not None and (isinstance(rotation,bool) or not isinstance(rotation,int) or rotation not in range(4)): fail(f"{field} contentRotation 必须为 0..3")
+        if rotation is not None and "rear.scene.orientation" not in capabilities: fail(f"{field} 显式方向需要声明 rear.scene.orientation")
         if effect["keepVisible"] and "rear.scene.keep_visible" not in capabilities: fail(f"{field} rear.open keepVisible 需要声明 rear.scene.keep_visible")
+    elif kind=="cast.start":
+        allowed={"type","id","mode","region","contentRotation","requestedDensityDpi"}
+        if set(effect)-allowed or not {"type","mode"}.issubset(effect): fail(f"{field} cast.start 字段无效")
+        if effect["mode"] not in ("VIRTUAL","DIRECT_PHYSICAL"): fail(f"{field} cast.start mode 无效")
+        capability="rear.cast.virtual" if effect["mode"]=="VIRTUAL" else "rear.cast.direct_physical"
+        if capability not in capabilities: fail(f"{field} cast.start 必须声明 {capability}")
+        if "id" in effect and (not isinstance(effect["id"],str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",effect["id"])): fail(f"{field} cast.start id 无效")
+        region=effect.get("region")
+        if region is not None and region not in ("SAFE","FULL"): fail(f"{field} cast.start region 无效")
+        if region=="FULL" and "rear.region" not in capabilities: fail(f"{field} FULL cast 需要声明 rear.region")
+        rotation=effect.get("contentRotation")
+        if rotation is not None and (isinstance(rotation,bool) or not isinstance(rotation,int) or rotation not in range(4)): fail(f"{field} cast.start contentRotation 必须为 0..3")
+        if rotation is not None and "rear.scene.orientation" not in capabilities: fail(f"{field} 显式方向需要声明 rear.scene.orientation")
+        density=effect.get("requestedDensityDpi")
+        if density is not None and (isinstance(density,bool) or not isinstance(density,int) or not 72<=density<=1000): fail(f"{field} requestedDensityDpi 无效")
+        if effect["mode"]=="DIRECT_PHYSICAL" and any(k in effect for k in ("region","contentRotation","requestedDensityDpi")): fail(f"{field} DIRECT_PHYSICAL 不支持区域、内容方向或密度设置")
+    elif kind in ("cast.query", "cast.close"):
+        if set(effect)-{"type","id","sessionId","generation"} or not {"type","sessionId","generation"}.issubset(effect): fail(f"{field} {kind} 字段无效")
+        if not isinstance(effect["sessionId"],str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}",effect["sessionId"]): fail(f"{field} Cast handle 无效")
+        generation=effect["generation"]
+        if isinstance(generation,bool) or not isinstance(generation,int) or not 1<=generation<=9007199254740991: fail(f"{field} generation 无效")
+        if "id" in effect and (not isinstance(effect["id"],str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",effect["id"])): fail(f"{field} Effect id 无效")
+        if not {"rear.cast.virtual", "rear.cast.direct_physical"}.intersection(capabilities): fail(f"{field} {kind} 必须声明 Cast 能力")
     else: fail(f"{field} effect 类型未支持：{kind}")
 
 def validate_manifest(m, entries=None):

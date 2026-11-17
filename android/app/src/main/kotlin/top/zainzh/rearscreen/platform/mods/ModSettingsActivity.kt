@@ -185,8 +185,12 @@ class ModSettingsActivity : ComponentActivity() {
                     ModPackageStore.install(this@ModSettingsActivity, archive, ModInstallDecision(pkg.authorFingerprint, selected), IsolatedModMigrationRunner(this@ModSettingsActivity))
                 }
             }
-            if (old != null) {
-                if (result.isSuccess) withContext(Dispatchers.IO) {
+            var oldCastCleanupRequested = old == null
+            if (old != null && result.isSuccess) {
+                oldCastCleanupRequested = withContext(Dispatchers.IO) {
+                    runCatching { closeModSessions(old)?.let { it.authorizationRevoked && it.cleanupRequested } == true }.getOrDefault(false)
+                }
+                withContext(Dispatchers.IO) {
                     runCatching { top.zainzh.rearscreen.platform.RearCapabilityCore.get(this@ModSettingsActivity).displaySessions.closeOwnerSessions(sessionOwner(old), top.zainzh.rearscreen.platform.SceneCloseReason.OWNER_REVOKED) }
                 }
                 val closeUnconfirmed = isRuntimeCloseUnconfirmed(result.exceptionOrNull())
@@ -196,46 +200,109 @@ class ModSettingsActivity : ComponentActivity() {
                 if (!closeUnconfirmed) ModBrokerProvider.get(this@ModSettingsActivity).finishPackageReplacement(old.id, result.isSuccess)
             }
             working = false; pending = null; stagedArchive = null
-            result.onSuccess { reload(); notice = modInstallSuccessNotice(it.name, old != null, it.enabled) }
-                .onFailure { error = it.message ?: "安装失败，旧版本和本地数据保持不变" }
+            result.onSuccess {
+                reload()
+                notice = when {
+                    old == null -> modInstallSuccessNotice(it.name, false, it.enabled)
+                    oldCastCleanupRequested -> "已更新 ${it.name}；旧 Cast owner 已失权并提交异步收尾，实际结束状态待核验。"
+                    else -> "已更新 ${it.name}；旧 Cast owner 清理请求未确认，需继续核实。"
+                }
+            }.onFailure { error = it.message ?: "安装失败，旧版本和本地数据保持不变" }
         }
     }
 
     private fun changeEnabled(mod: InstalledMod, enabled: Boolean) {
         lifecycleScope.launch(Dispatchers.IO) {
-            runCatching { ModPackageStore.setEnabled(this@ModSettingsActivity, mod.id, enabled) }
-                .onSuccess { if (!enabled) closeModSessions(it); withContext(Dispatchers.Main) { reload(); error = ""; notice = if (enabled) "Mod 已启用" else "Mod 已停用" } }
+            runCatching {
+                val updated = ModPackageStore.setEnabled(this@ModSettingsActivity, mod.id, enabled)
+                val cleanupRequested = enabled || runCatching { closeModSessions(updated)?.let { it.authorizationRevoked && it.cleanupRequested } == true }.getOrDefault(false)
+                updated to cleanupRequested
+            }
+                .onSuccess { (updated, cleanupRequested) -> withContext(Dispatchers.Main) {
+                    reload(); error = ""
+                    notice = if (enabled) "Mod 已启用" else if (cleanupRequested)
+                        "Mod 已停用；Cast owner 已失权并提交异步收尾，结束状态待核验。"
+                    else "Mod 已停用；Cast owner 收尾请求未确认，授权保持撤销。"
+                } }
                 .onFailure { withContext(Dispatchers.Main) { reload(); error = it.message ?: "状态更新失败" } }
         }
     }
 
     private fun changeGrant(mod: InstalledMod, capability: ModCapability, enabled: Boolean) {
         lifecycleScope.launch(Dispatchers.IO) {
-            runCatching { ModPackageStore.setCapabilityGrant(this@ModSettingsActivity, mod.id, capability.name, capability.minimumVersion, enabled) }
-                .onSuccess { if (!enabled) closeModSessions(mod); withContext(Dispatchers.Main) { reload(); error = ""; notice = if (enabled) "能力已授权" else "能力已撤销" } }
-                .onFailure { withContext(Dispatchers.Main) { reload(); error = it.message ?: "能力授权更新失败" } }
+            runCatching {
+                val updated = ModPackageStore.setCapabilityGrant(this@ModSettingsActivity, mod.id, capability.name, capability.minimumVersion, enabled)
+                val cleanupRequested = enabled || runCatching { closeModSessions(updated)?.let { it.authorizationRevoked && it.cleanupRequested } == true }.getOrDefault(false)
+                updated to cleanupRequested
+            }
+                .onSuccess { (_, cleanupRequested) -> withContext(Dispatchers.Main) {
+                    reload(); error = ""
+                    notice = if (enabled) "能力已授权" else if (cleanupRequested)
+                        "能力已撤销；Cast owner 已失权并提交异步收尾，结束状态待核验。"
+                    else "能力已撤销；Cast owner 收尾请求未确认，授权保持撤销。"
+                } }
+                .onFailure { withContext(Dispatchers.Main) { reload(); error = it.message ?: "授权更新失败" } }
         }
     }
 
     private fun revokeAuthor(mod: InstalledMod) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val ids = runCatching { ModPackageStore.revokeAuthorTrust(this@ModSettingsActivity, mod.authorFingerprint) }.getOrDefault(emptySet())
-            ids.forEach { id -> ModPackageStore.installed(this@ModSettingsActivity, id)?.let(::closeModSessions) }
-            withContext(Dispatchers.Main) { reload(); error = ""; notice = "已撤销作者信任，并停用其 ${ids.size} 个 Mod；数据保留" }
+            val ids = runCatching { ModPackageStore.revokeAuthorTrust(this@ModSettingsActivity, mod.authorFingerprint) }
+                .getOrElse {
+                    withContext(Dispatchers.Main) { error = it.message ?: "作者信任撤销失败" }
+                    return@launch
+                }
+            var allCleanupRequested = true
+            ids.mapNotNull { id -> ModPackageStore.installed(this@ModSettingsActivity, id) }
+                .forEach { installed ->
+                    val requested = runCatching { closeModSessions(installed)?.let { it.authorizationRevoked && it.cleanupRequested } == true }.getOrDefault(false)
+                    if (!requested) allCleanupRequested = false
+                }
+            withContext(Dispatchers.Main) {
+                reload(); error = ""
+                notice = if (allCleanupRequested)
+                    "已撤销作者信任并停用 ${ids.size} 个 Mod；Cast owner 收尾已提交，结束状态待核验。"
+                else "作者信任已撤销并停用 ${ids.size} 个 Mod；至少一个 Cast owner 收尾请求未确认，授权保持撤销。"
+            }
         }
     }
 
-    private fun closeModSessions(mod: InstalledMod) {
+    private fun closeModSessions(mod: InstalledMod): top.zainzh.rearscreen.platform.ModCastRevocationSubmission? {
+        val castCleanup = runCatching {
+            top.zainzh.rearscreen.platform.revokeModControlledCastOwner(this, sessionOwner(mod))
+        }.getOrNull()
         runCatching { ModBrokerProvider.get(this).invalidateAndWait(mod.id) }
         runCatching { top.zainzh.rearscreen.platform.RearCapabilityCore.get(this).displaySessions.closeOwnerSessions(sessionOwner(mod), top.zainzh.rearscreen.platform.SceneCloseReason.OWNER_REVOKED) }
+        return castCleanup
     }
 
     private fun uninstall(mod: InstalledMod) {
         lifecycleScope.launch(Dispatchers.IO) {
+            val disabled = runCatching { ModPackageStore.setEnabled(this@ModSettingsActivity, mod.id, false) }
+            if (disabled.isFailure) {
+                withContext(Dispatchers.Main) { error = disabled.exceptionOrNull()?.message ?: "无法停用 Mod" }
+                return@launch
+            }
+            val workerDrained = runCatching {
+                ModBrokerProvider.get(this@ModSettingsActivity).invalidateAndWait(mod.id, "E_MOD_UNINSTALLED", "Mod 已卸载")
+            }.isSuccess
+            val castCleanup = runCatching {
+                top.zainzh.rearscreen.platform.revokeModControlledCastOwner(this@ModSettingsActivity, sessionOwner(mod))
+            }.getOrNull()
+            if (!workerDrained || castCleanup?.let { it.authorizationRevoked && it.cleanupRequested } != true) {
+                withContext(Dispatchers.Main) {
+                    error = "Mod 已停用且授权保持撤销，但清理请求未确认；为保留恢复依据，暂不删除安装数据。"
+                }
+                return@launch
+            }
             runCatching { top.zainzh.rearscreen.platform.RearCapabilityCore.get(this@ModSettingsActivity).displaySessions.closeOwnerSessions(sessionOwner(mod), top.zainzh.rearscreen.platform.SceneCloseReason.OWNER_REVOKED) }
-            runCatching { ModBrokerProvider.get(this@ModSettingsActivity).invalidateAndWait(mod.id, "E_MOD_UNINSTALLED", "Mod 已卸载") }
-            runCatching { ModPackageStore.uninstall(this@ModSettingsActivity, mod.id) }
-            withContext(Dispatchers.Main) { reload(); error = ""; notice = "已卸载 ${mod.name} 并删除其本地数据" }
+            val removal = runCatching { ModPackageStore.uninstall(this@ModSettingsActivity, mod.id) }
+            if (removal.isSuccess) withContext(Dispatchers.Main) {
+                reload(); error = ""
+                notice = "已卸载 ${mod.name} 并删除本地数据；Cast owner 收尾已提交，实际结束状态待核验。"
+            } else withContext(Dispatchers.Main) {
+                reload(); error = removal.exceptionOrNull()?.message ?: "卸载失败；Mod 保持停用。"
+            }
         }
     }
 

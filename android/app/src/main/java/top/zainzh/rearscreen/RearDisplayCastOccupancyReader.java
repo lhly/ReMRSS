@@ -111,6 +111,21 @@ final class RearDisplayCastOccupancyReader {
         return (List<?>) result;
     }
 
+    /** Exact normalized base component, only when one typed row identifies the task on that display. */
+    static String exactTaskBaseComponent(List<?> infos, int taskId, int displayId) {
+        if (infos == null || taskId < 0 || displayId < 0) return null;
+        String found = null;
+        try {
+            for (Object row : infos) {
+                if (row == null || intField(row, "taskId", "id") != taskId
+                        || intField(row, "displayId") != displayId) continue;
+                if (found != null) return null;
+                found = flattenComponent(componentField(row, "baseActivity"));
+            }
+            return found;
+        } catch (Exception unavailable) { return null; }
+    }
+
     /** Returns only the exact focused root task when the privileged Binder exposes it. */
     static int focusedRootTaskId(Object manager, int expectedDisplayId) {
         if (manager == null || expectedDisplayId < 0) return -1;
@@ -210,6 +225,7 @@ final class RearDisplayCastOccupancyReader {
                 if (match != null) return null;
                 match = new RearDisplayCastOccupancy.Task(id,
                         componentPackage(componentField(row, "baseActivity")), componentPackage(rowTop),
+                        flattenComponent(componentField(row, "baseActivity")), rowTop,
                         booleanProperty(row, "isVisible"), booleanProperty(row, "isVisibleRequested"),
                         booleanProperty(row, "isSleeping"));
             }
@@ -240,8 +256,22 @@ final class RearDisplayCastOccupancyReader {
     }
 
     private static String flattenComponent(Object component) throws ReflectiveOperationException {
-        return component == null ? null
-                : (String) component.getClass().getMethod("flattenToString").invoke(component);
+        if (component == null) return null;
+        String value = (String) component.getClass().getMethod("flattenToString").invoke(component);
+        return canonicalComponent(value);
+    }
+
+    /** Canonicalizes short and full ComponentName forms before identity comparisons. */
+    static String canonicalComponent(String value) {
+        if (value == null) return null;
+        int slash = value.indexOf('/');
+        if (slash <= 0 || slash == value.length() - 1 || value.indexOf('/', slash + 1) >= 0) return null;
+        String pkg = value.substring(0, slash), klass = value.substring(slash + 1);
+        if (pkg.isBlank() || klass.isBlank() || pkg.chars().anyMatch(Character::isWhitespace)
+                || klass.chars().anyMatch(Character::isWhitespace)) return null;
+        if (klass.startsWith(".")) klass = pkg + klass;
+        if (!klass.contains(".")) return null;
+        return pkg + "/" + klass;
     }
 
     private static boolean hasExactFocusedRow(List<?> infos, FocusedStack focused, int displayId) {
@@ -312,7 +342,9 @@ final class RearDisplayCastOccupancyReader {
             if (selected != null) throw new IllegalStateException("duplicate_focused_task");
             // StackInfo exposes focused-stack visibility on pre-Q; RunningTaskInfo is used
             // only to bind the exact id and base/top identity, never to choose list order.
-            selected = new RearDisplayCastOccupancy.Task(id, base, top, focused.visible, null, null);
+            selected = new RearDisplayCastOccupancy.Task(id, base, top,
+                    flattenComponent(componentField(row, "baseActivity")), topComponent,
+                    focused.visible, null, null);
         }
         if (selected == null) throw new IllegalStateException("focused_task_missing");
         return new RearDisplayCastOccupancy.Snapshot(0, stable, powerBefore, afterPower,
@@ -389,11 +421,19 @@ final class RearDisplayCastOccupancyReader {
                 if (Boolean.FALSE.equals(focused.visible)) visible = Boolean.FALSE;
                 else if (visible == null) visible = focused.visible;
             }
-            tasks.add(new RearDisplayCastOccupancy.Task(task, base, top, visible,
+            tasks.add(new RearDisplayCastOccupancy.Task(task, base, top,
+                    flattenComponent(info.getClass().getField("baseActivity").get(info)),
+                    flattenComponent(info.getClass().getField("topActivity").get(info)),
+                    optionalIntField(info, "userId", -1), visible,
                     booleanProperty(info, "isVisibleRequested"), booleanProperty(info, "isSleeping")));
         }
         return new RearDisplayCastOccupancy.Snapshot(displayId, power, powerBefore, powerAfter,
                 focusedTaskId, tasks, source, null);
+    }
+
+    private static int optionalIntField(Object instance, String name, int fallback) {
+        try { return ((Number) instance.getClass().getField(name).get(instance)).intValue(); }
+        catch (ReflectiveOperationException | ClassCastException unavailable) { return fallback; }
     }
 
     /** Root-level visibility lacks pending-show/sleep evidence, so this compatibility path stays conservative. */

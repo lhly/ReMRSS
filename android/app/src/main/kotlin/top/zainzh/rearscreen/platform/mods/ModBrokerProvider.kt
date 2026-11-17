@@ -18,6 +18,10 @@ object ModBrokerProvider {
                 if (consumer == null) complete(false, "E_SCENE_NOT_VISIBLE")
                 else consumer.requestWithResult(mod, eventId, effect, complete)
             }
+            override fun requestCastWithResult(mod: InstalledMod, eventId: String, effect: ModCastStartEffect,
+                source: ModCastActivationSource, complete: (Boolean, String?, org.json.JSONObject?) -> Unit) {
+                ModCastActivationSources.dispatch(source, mod, eventId, effect, complete)
+            }
         }).also { broker = it }
     }
 }
@@ -30,6 +34,12 @@ internal object ModHostEffectRouter {
                 .onSuccess { complete(true, null) }
                 .onFailure { complete(false, "E_EFFECT_DISPATCH") }
         }
+        fun requestCastWithResult(mod: InstalledMod, eventId: String, effect: ModCastStartEffect,
+            source: ModCastActivationSource, complete: (Boolean, String?, org.json.JSONObject?) -> Unit) {
+            complete(false, "E_UNSUPPORTED", null)
+        }
+        fun completeCast(source: ModCastActivationSource, requestId: String, accepted: Boolean, code: String?, result: org.json.JSONObject?) {}
+        fun isCastRequestCurrent(source: ModCastActivationSource, requestId: String): Boolean = false
     }
     val consumers = ConcurrentHashMap<String, Consumer>()
 }

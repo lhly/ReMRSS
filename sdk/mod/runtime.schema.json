@@ -55,12 +55,60 @@
               "const": "rear"
             },
             "region": {
-              "const": "CAMERA_SAFE"
+              "enum": ["CAMERA_SAFE", "FULL"]
             },
             "keepVisible": {
               "type": "boolean"
+            },
+            "contentRotation": {
+              "type": "integer",
+              "enum": [0, 1, 2, 3],
+              "default": 0
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "sessionId", "generation"],
+          "properties": {
+            "type": { "enum": ["cast.query", "cast.close"] },
+            "id": { "$ref": "#/$defs/identifier" },
+            "sessionId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$" },
+            "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "mode"],
+          "properties": {
+            "id": { "$ref": "#/$defs/identifier" },
+            "type": { "const": "cast.start" },
+            "mode": { "enum": ["VIRTUAL", "DIRECT_PHYSICAL"] },
+            "region": { "enum": ["SAFE", "FULL"] },
+            "contentRotation": { "type": "integer", "enum": [0, 1, 2, 3] },
+            "requestedDensityDpi": { "type": "integer", "minimum": 72, "maximum": 1000 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "mode"],
+          "properties": {
+            "type": { "const": "cast.start" },
+            "id": { "$ref": "#/$defs/identifier" },
+            "mode": { "enum": ["VIRTUAL", "DIRECT_PHYSICAL"] },
+            "region": { "enum": ["SAFE", "FULL"] },
+            "contentRotation": { "type": "integer", "minimum": 0, "maximum": 3 },
+            "requestedDensityDpi": { "type": "integer", "minimum": 72, "maximum": 1000 }
+          },
+          "allOf": [{
+            "if": { "properties": { "mode": { "const": "DIRECT_PHYSICAL" } }, "required": ["mode"] },
+            "then": { "not": { "anyOf": [
+              { "required": ["region"] }, { "required": ["contentRotation"] }, { "required": ["requestedDensityDpi"] }
+            ] } }
+          }]
         },
         {
           "type": "object",
@@ -255,6 +303,20 @@
         "code": {
           "type": "string",
           "maxLength": 64
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sessionId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$" },
+            "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "state": { "type": "string", "maxLength": 32 },
+            "mode": { "enum": ["VIRTUAL", "DIRECT_PHYSICAL"] },
+            "region": { "enum": ["SAFE", "FULL", "CAMERA_SAFE"] },
+            "contentRotation": { "type": "integer", "minimum": 0, "maximum": 3 },
+            "presentationKind": { "enum": ["MANAGED_VIEWPORT", "SYSTEM_MANAGED"] },
+            "failureCode": { "type": ["string", "null"], "maxLength": 64 }
+          }
         }
       }
     },

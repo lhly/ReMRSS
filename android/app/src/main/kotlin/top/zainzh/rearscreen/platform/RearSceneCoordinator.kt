@@ -59,6 +59,44 @@ internal interface SceneLegacyLeasePort {
     fun release(sessionId: String, restorePriorMode: Boolean)
 }
 
+/** Host-only same-task Mod viewport transition; deliberately not part of the SDK coordinator API. */
+internal interface SceneViewportTransitionPort {
+    fun beginSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+        expectedRequest: SceneRequest,
+        targetRequest: SceneRequest,
+        activation: UserActivationToken,
+        expiresAtElapsedRealtimeMs: Long,
+    ): SceneOperationResult
+
+    fun reportSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+        window: SceneWindowReport,
+    ): SceneOperationResult
+
+    fun commitSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+    ): SceneOperationResult
+
+    fun abortSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+    ): SceneOperationResult
+
+    fun queryCommittedSceneWindow(owner: SessionOwner, sessionId: String, generation: Long): SceneWindowReport?
+}
+
 /** Confirms that an activation was minted after a real host UI action and consumes it once. */
 fun interface UserActivationVerifier {
     fun consume(owner: SessionOwner, request: SceneRequest, token: UserActivationToken): Boolean
@@ -80,7 +118,7 @@ internal class RearSceneCoordinator(
     private val lifecycleMonitor: SceneDisplayLifecycleMonitor? = null,
     private val legacyServiceLease: SceneLegacyLeasePort? = null,
     private val onSceneCommitted: () -> Unit = {}
-) : DisplaySessionCoordinator {
+) : DisplaySessionCoordinator, SceneViewportTransitionPort {
     private data class Ticket(
         val owner: SessionOwner,
         val sessionId: String,
@@ -92,7 +130,7 @@ internal class RearSceneCoordinator(
 
     private data class Record(
         val owner: SessionOwner,
-        val request: SceneRequest,
+        var request: SceneRequest,
         val generation: Long,
         val displayOwnershipEpoch: Long,
         var launch: LaunchedScene?,
@@ -124,6 +162,7 @@ internal class RearSceneCoordinator(
         var screenOffRecoveryAttempted: Boolean = false,
         var coverRecoveryScheduled: Boolean = false,
         var coverRecoveryAttempted: Boolean = false,
+        var pendingViewportTransition: PendingViewportTransition? = null,
         /** One same-lease recovery intent survives asynchronous cover/cancellation ordering. */
         var pendingRecoveryFromScreenOff: Boolean? = null,
         /** Monotonic identity for one return cause; capture tokens may change across temporary overlays. */
@@ -143,6 +182,15 @@ internal class RearSceneCoordinator(
         var recoveryToken: Long = 0L,
         var lifecycle: Closeable? = null,
         var closed: Boolean = false
+    )
+
+    private data class PendingViewportTransition(
+        val id: String,
+        val request: SceneRequest,
+        val displayOwnershipEpoch: Long,
+        val presentationRevision: Long,
+        val expiresAtElapsedRealtimeMs: Long,
+        var verifiedWindow: SceneWindowReport? = null,
     )
 
     private data class RecoveryCapture(
@@ -367,6 +415,202 @@ internal class RearSceneCoordinator(
         return SceneOperationResult(true)
     }
 
+    /**
+     * Reserve a user-confirmed region/rotation change for the exact live signed-Mod lease.
+     * The old request and accepted viewport remain authoritative until a real measured report
+     * for the same Activity task passes the usual gateway verification.
+     */
+    override fun beginSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+        expectedRequest: SceneRequest,
+        targetRequest: SceneRequest,
+        activation: UserActivationToken,
+        expiresAtElapsedRealtimeMs: Long,
+    ): SceneOperationResult {
+        if (owner.principal !is SessionPrincipal.SignedMod || transitionId.isBlank() || transitionId.length > 64)
+            return SceneOperationResult(false, SceneError.CAPABILITY_DENIED)
+        if (!isAllowedViewportTransition(expectedRequest, targetRequest))
+            return SceneOperationResult(false, SceneError.INVALID_STATE)
+        if (!activationVerifier.consume(owner, targetRequest, activation))
+            return SceneOperationResult(false, SceneError.CAPABILITY_DENIED)
+        val now = clock()
+        if (expiresAtElapsedRealtimeMs <= now || expiresAtElapsedRealtimeMs - now > MAX_VIEWPORT_TRANSITION_MS)
+            return SceneOperationResult(false, SceneError.INVALID_STATE)
+        val (record, presentationRevision) = synchronized(lock) {
+            val current = sessions[sessionId] ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (current.owner != owner) return SceneOperationResult(false, SceneError.CAPABILITY_DENIED)
+            if (current.generation != generation || current.closed || !sameSceneRequest(current.request, expectedRequest))
+                return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (current.pendingViewportTransition != null || current.viewport == null || current.launch == null ||
+                !current.visible || !current.activityVisible || temporaryOverlayActive || sessions.size != 1 ||
+                tickets.values.any { it.sessionId != sessionId || it.owner != owner || !it.consumed } ||
+                current.displayOwnershipEpoch != displayOwnershipEpoch() || hasPendingSceneRecovery(current))
+                return SceneOperationResult(false, SceneError.DISPLAY_BUSY, retryable = true)
+            if (!matchesRequestedScene(current.viewport!!, current.request) ||
+                current.viewport!!.displayId != current.launch!!.displayId)
+                return SceneOperationResult(false, SceneError.INVALID_STATE)
+            current to current.presentationRevision
+        }
+        val authorizationError = try { gateway.authorize(owner, targetRequest) }
+            catch (_: Exception) { SceneError.BACKEND_UNAVAILABLE }
+        if (authorizationError != null) return SceneOperationResult(false, authorizationError,
+            retryable = authorizationError == SceneError.BACKEND_UNAVAILABLE)
+        if (displayOwnershipEpoch() != record.displayOwnershipEpoch)
+            return SceneOperationResult(false, SceneError.DISPLAY_BUSY, retryable = true)
+        synchronized(lock) {
+            val current = sessions[sessionId] ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (current !== record || current.owner != owner || current.generation != generation || current.closed ||
+                !sameSceneRequest(current.request, expectedRequest) || current.pendingViewportTransition != null)
+                return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (temporaryOverlayActive || !current.visible || !current.activityVisible || sessions.size != 1 ||
+                current.displayOwnershipEpoch != displayOwnershipEpoch() || displayOwnershipEpoch() != record.displayOwnershipEpoch ||
+                current.presentationRevision != presentationRevision || hasPendingSceneRecovery(current))
+                return SceneOperationResult(false, SceneError.DISPLAY_BUSY, retryable = true)
+            current.pendingViewportTransition = PendingViewportTransition(
+                transitionId, targetRequest, record.displayOwnershipEpoch, presentationRevision, expiresAtElapsedRealtimeMs)
+        }
+        return SceneOperationResult(true)
+    }
+
+    /** Commit only after the exact existing task reports the measured requested viewport. */
+    override fun reportSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+        window: SceneWindowReport,
+    ): SceneOperationResult {
+        val (record, pending, launch) = synchronized(lock) {
+            val current = sessions[sessionId] ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (current.owner != owner) return SceneOperationResult(false, SceneError.CAPABILITY_DENIED)
+            if (current.generation != generation || current.closed) return SceneOperationResult(false, SceneError.STALE_SESSION)
+            val transition = current.pendingViewportTransition
+                ?.takeIf { it.id == transitionId } ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
+            val expected = current.launch ?: return SceneOperationResult(false, SceneError.INVALID_STATE)
+            if (clock() >= transition.expiresAtElapsedRealtimeMs || temporaryOverlayActive ||
+                current.displayOwnershipEpoch != transition.displayOwnershipEpoch || displayOwnershipEpoch() != transition.displayOwnershipEpoch ||
+                !current.visible || !current.activityVisible || current.presentationRevision != transition.presentationRevision ||
+                hasPendingSceneRecovery(current))
+                return SceneOperationResult(false, SceneError.DISPLAY_BUSY, retryable = true)
+            if (!matchesTransitionWindow(transition.request, expected, window, current.viewport))
+                return SceneOperationResult(false, SceneError.INVALID_STATE)
+            Triple(current, transition, expected)
+        }
+        val authorizationError = try { gateway.authorize(owner, pending.request) }
+            catch (_: Exception) { SceneError.BACKEND_UNAVAILABLE }
+        if (authorizationError != null) return SceneOperationResult(false, authorizationError,
+            retryable = authorizationError == SceneError.BACKEND_UNAVAILABLE)
+        if (!gateway.verifyLaunchedTask(owner, launch, window))
+            return SceneOperationResult(false, SceneError.INVALID_STATE)
+        synchronized(lock) {
+            val current = sessions[sessionId] ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (current !== record || current.owner != owner || current.generation != generation || current.closed ||
+                current.pendingViewportTransition !== pending || current.pendingViewportTransition?.id != transitionId)
+                return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (clock() >= pending.expiresAtElapsedRealtimeMs || temporaryOverlayActive ||
+                current.displayOwnershipEpoch != pending.displayOwnershipEpoch || displayOwnershipEpoch() != pending.displayOwnershipEpoch ||
+                !current.visible || !current.activityVisible || current.presentationRevision != pending.presentationRevision ||
+                hasPendingSceneRecovery(current))
+                return SceneOperationResult(false, SceneError.DISPLAY_BUSY, retryable = true)
+            if (!matchesTransitionWindow(pending.request, launch, window, current.viewport))
+                return SceneOperationResult(false, SceneError.INVALID_STATE)
+            if (pending.verifiedWindow?.viewport?.revision?.let { window.viewport.revision <= it } == true)
+                return SceneOperationResult(false, SceneError.STALE_SESSION)
+            pending.verifiedWindow = window
+        }
+        return SceneOperationResult(true)
+    }
+
+    /** Final, main-thread-safe commit after the host rechecks that the measured View did not change. */
+    override fun commitSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+    ): SceneOperationResult {
+        synchronized(lock) {
+            val current = sessions[sessionId] ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
+            if (current.owner != owner) return SceneOperationResult(false, SceneError.CAPABILITY_DENIED)
+            if (current.generation != generation || current.closed) return SceneOperationResult(false, SceneError.STALE_SESSION)
+            val pending = current.pendingViewportTransition?.takeIf { it.id == transitionId }
+                ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
+            val window = pending.verifiedWindow ?: return SceneOperationResult(false, SceneError.INVALID_STATE, retryable = true)
+            val launch = current.launch ?: return SceneOperationResult(false, SceneError.INVALID_STATE)
+            if (clock() >= pending.expiresAtElapsedRealtimeMs || temporaryOverlayActive ||
+                current.displayOwnershipEpoch != pending.displayOwnershipEpoch || displayOwnershipEpoch() != pending.displayOwnershipEpoch ||
+                !current.visible || !current.activityVisible || current.presentationRevision != pending.presentationRevision ||
+                hasPendingSceneRecovery(current))
+                return SceneOperationResult(false, SceneError.DISPLAY_BUSY, retryable = true)
+            if (!matchesTransitionWindow(pending.request, launch, window, current.viewport))
+                return SceneOperationResult(false, SceneError.INVALID_STATE)
+            current.request = pending.request
+            current.viewport = window.viewport
+            current.pendingViewportTransition = null
+            emit(sessionId, current, SceneEvent.ViewportChanged(window.viewport.revision, window.viewport))
+        }
+        return SceneOperationResult(true)
+    }
+
+    /** Cancel only the exact transition; late task reports cannot commit after this returns. */
+    override fun abortSceneViewportTransition(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+        transitionId: String,
+    ): SceneOperationResult = synchronized(lock) {
+        val current = sessions[sessionId] ?: return@synchronized SceneOperationResult(false, SceneError.STALE_SESSION)
+        if (current.owner != owner) return@synchronized SceneOperationResult(false, SceneError.CAPABILITY_DENIED)
+        if (current.generation != generation || current.closed) return@synchronized SceneOperationResult(false, SceneError.STALE_SESSION)
+        if (current.pendingViewportTransition?.id != transitionId)
+            return@synchronized SceneOperationResult(false, SceneError.STALE_SESSION)
+        current.pendingViewportTransition = null
+        SceneOperationResult(true)
+    }
+
+    override fun queryCommittedSceneWindow(
+        owner: SessionOwner,
+        sessionId: String,
+        generation: Long,
+    ): SceneWindowReport? = synchronized(lock) {
+        val current = sessions[sessionId] ?: return@synchronized null
+        if (current.owner != owner || current.generation != generation || current.closed) return@synchronized null
+        val launch = current.launch ?: return@synchronized null
+        val viewport = current.viewport ?: return@synchronized null
+        SceneWindowReport(launch.component, launch.taskId, viewport)
+    }
+
+    private fun sameSceneRequest(left: SceneRequest, right: SceneRequest): Boolean =
+        left === right || (sameComponent(left.component, right.component) && left.region == right.region &&
+            left.keepVisible == right.keepVisible && left.requiredCapabilities == right.requiredCapabilities &&
+            left.contentRotation == right.contentRotation &&
+            left.hasExplicitContentRotation == right.hasExplicitContentRotation)
+
+    private fun isAllowedViewportTransition(current: SceneRequest, target: SceneRequest): Boolean {
+        val expectedCapabilities = current.requiredCapabilities + buildSet {
+            add(CapabilityRequirement("rear.scene", 1))
+            if (current.keepVisible) add(CapabilityRequirement("rear.scene.keep_visible", 1))
+            if (target.region == RearRegion.FULL) add(CapabilityRequirement("rear.region", 1))
+            if (target.hasExplicitContentRotation) add(CapabilityRequirement("rear.scene.orientation", 1))
+        }
+        return sameComponent(target.component, current.component) && target.keepVisible == current.keepVisible &&
+            target.requiredCapabilities == expectedCapabilities &&
+            (target.region != current.region || target.contentRotation != current.contentRotation ||
+                target.hasExplicitContentRotation != current.hasExplicitContentRotation)
+    }
+
+    private fun matchesTransitionWindow(
+        request: SceneRequest,
+        launch: LaunchedScene,
+        window: SceneWindowReport,
+        currentViewport: RearViewportSnapshot?,
+    ): Boolean = sameComponent(window.component, launch.component) && window.taskId == launch.taskId &&
+        window.viewport.displayId == launch.displayId && window.viewport.revision > (currentViewport?.revision ?: 0L) &&
+        window.viewport.windowPx.width > 0 && window.viewport.windowPx.height > 0 && window.viewport.densityDpi > 0 &&
+        matchesRequestedScene(window.viewport, request) && window.viewport.contentRotation == request.contentRotation
+
     override fun reportSceneWindowReady(owner: SessionOwner, launchTicket: String, window: SceneWindowReport): SceneOperationResult {
         val pair = synchronized(lock) {
             val ticket = tickets[launchTicket] ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
@@ -378,7 +622,8 @@ internal class RearSceneCoordinator(
             if (record.closed || record.generation != ticket.generation || window.taskId != launch.taskId ||
                 window.viewport.displayId != launch.displayId || window.viewport.revision < 1 ||
                 window.viewport.windowPx.width <= 0 || window.viewport.windowPx.height <= 0 ||
-                window.viewport.densityDpi <= 0) return SceneOperationResult(false, SceneError.INVALID_STATE)
+                window.viewport.densityDpi <= 0 || !matchesRequestedScene(window.viewport, record.request))
+                return SceneOperationResult(false, SceneError.INVALID_STATE)
             ticket to record
         }
         val launch = pair.second.launch ?: return SceneOperationResult(false, SceneError.STALE_SESSION)
@@ -409,7 +654,8 @@ internal class RearSceneCoordinator(
                 return SceneOperationResult(false, SceneError.STALE_SESSION)
             if (current.viewport == null) return SceneOperationResult(false, SceneError.INVALID_STATE, true)
             if (window.viewport.revision <= (current.viewport?.revision ?: 0L) ||
-                window.viewport.windowPx.width <= 0 || window.viewport.windowPx.height <= 0 || window.viewport.densityDpi <= 0)
+                window.viewport.windowPx.width <= 0 || window.viewport.windowPx.height <= 0 || window.viewport.densityDpi <= 0 ||
+                !matchesRequestedScene(window.viewport, current.request))
                 return SceneOperationResult(false, SceneError.INVALID_STATE)
             current
         }
@@ -489,6 +735,10 @@ internal class RearSceneCoordinator(
         inheritedReturnWasSuppressed: Boolean = false
     ): Boolean {
         val suppressLegacyRestore = synchronized(lock) {
+            // A viewport handoff is valid only if no transient owner takes over while it is pending.
+            // Clearing the exact reservation makes any later window report stale even if the
+            // overlay ends before that asynchronous report returns.
+            sessions.values.forEach { it.pendingViewportTransition = null }
             val prior = activeOverlayLease?.takeIf {
                 it.overlayId == replacesOverlayId && activeTransientOverlayId == replacesOverlayId &&
                     !overlayOwnershipWasRevokedLocked(it)
@@ -612,6 +862,7 @@ internal class RearSceneCoordinator(
         val nextReason = if (visible) null else hiddenReason
         if (record.visible == visible && record.hiddenReason == nextReason) return
         val visibilityChanged = record.visible != visible
+        if (record.visible && !visible) record.pendingViewportTransition = null
         record.visible = visible
         record.hiddenReason = nextReason
         record.presentationRevision++
@@ -775,7 +1026,7 @@ internal class RearSceneCoordinator(
         val fromScreenOff = record.pendingRecoveryFromScreenOff ?: return null
         if (presentationOnly) record.recoveryPresentationPhase = true
         val presentationPhase = record.recoveryPresentationPhase
-        if (!record.sceneRestorationEligible || record.closed ||
+        if (!record.sceneRestorationEligible || record.closed || record.pendingViewportTransition != null ||
             record.viewport == null || record.launch == null || record.covered || temporaryOverlayActive) return null
         val displayOn = record.targetDisplayOn ?: return null
         if (record.awaitFreshRearOn) return null
@@ -1169,6 +1420,7 @@ internal class RearSceneCoordinator(
 
     private fun closeLocked(id: String, record: Record): Record {
         record.closed = true
+        record.pendingViewportTransition = null
         tickets.entries.removeAll { it.value.sessionId == id }
         return record
     }
@@ -1177,11 +1429,19 @@ internal class RearSceneCoordinator(
     private fun sameComponent(left: android.content.ComponentName, right: android.content.ComponentName): Boolean =
         left === right || left == right
 
+    private fun hasPendingSceneRecovery(record: Record): Boolean =
+        record.pendingRecoveryFromScreenOff != null || record.screenOffRecoveryScheduled || record.coverRecoveryScheduled
+
     private fun SceneRequest.derivedCapabilities(): Set<CapabilityRequirement> = buildSet {
         add(CapabilityRequirement("rear.scene", 1))
         if (keepVisible) add(CapabilityRequirement("rear.scene.keep_visible", 1))
         if (region == RearRegion.FULL) add(CapabilityRequirement("rear.region", 1))
+        if (hasExplicitContentRotation) add(CapabilityRequirement("rear.scene.orientation", 1))
     }
+
+    private fun matchesRequestedScene(viewport: RearViewportSnapshot, request: SceneRequest): Boolean =
+        viewport.region == (if (request.region == RearRegion.FULL) dev.remrss.scene.geometry.SceneRegion.FULL else dev.remrss.scene.geometry.SceneRegion.SAFE) &&
+            (!request.hasExplicitContentRotation || viewport.contentRotation == request.contentRotation)
 
     /** Atomically releases a launch reservation when its caller can no longer receive a handle. */
     private fun discardPendingLaunch(sessionId: String, launchTicket: String, reason: SceneCloseReason) {
@@ -1220,6 +1480,7 @@ internal class RearSceneCoordinator(
     companion object {
         const val PLATFORM_CONTRACT = "remrss.platform/1"
         const val LAUNCH_TICKET_TTL_MS = 5_000L
+        const val MAX_VIEWPORT_TRANSITION_MS = 12_000L
         private const val RECOVERY_SETTLE_MS = 350L
         private val secureRandom = SecureRandom()
         private fun newToken(): String = ByteArray(24).also(secureRandom::nextBytes).let { Base64.getUrlEncoder().withoutPadding().encodeToString(it) }

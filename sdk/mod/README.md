@@ -1,8 +1,6 @@
 ## ReMRSS Mod SDK kit 1.2.0
 
-**RC4 本地候选**：自有通知接口加入独立 `rear.notification@1` 能力、Mod Effect、TS helper、CLI/JSON Schema 校验，以及可打包的 `notification` ZIP 示例。RC3 原有 Mod 接口保持兼容；RC4 此处为本地实现，不代表已发布。
-
-从普通 ZIP 开始：Mod 用 JSON 声明两个原生场景；只有确实需要自定义业务规则时才附带 `main.js`。宿主按同一 manifest、签名和载荷摘要校验安装包。无脚本包不会启动 JavaScript runtime。
+**RC5 作者入口（kit 1.2.0，接口版本不变）**：在本目录运行以下命令，在本机创建、检查、预览并打包 Mod；然后在 ReMRSS 导入 ZIP、审核作者与能力授权，再从 Mod 卡片打开本机预览或启用。Mod 用 JSON 声明原生场景；只有需要自定义业务规则时才附带 `main.js`。无脚本包不会启动 JavaScript runtime。下面的命令就是从空模板到可导入 ZIP 的完整起点。
 
 ## 快速开始
 
@@ -44,7 +42,7 @@ reduce({ state, config, previousConfig, event }) {
 
 宿主校验 reducer 返回的 state 后，将 state 与新 config 在同一 revision 提交，再通知所有设置/背屏观察者。脚本异常拒绝配置时只拒绝本次 Save：旧 state/config 与逻辑场景观察者保留；为覆盖脚本异常和 native 分配/栈失败的共同错误码，宿主会先确认关闭旧 worker，再从已提交模型启动新 worker。设置页显示错误并保留草稿；新 worker 恢复后可在同一页重试。关闭或恢复失败、预算耗尽、worker/transport 故障仍按终态路径收尾。
 
-配置事件返回的 Effect 也必须经过类型、能力和来源预校验，且只有事务提交后才派发。Save 本身不产生用户激活：当前 `rear.open` 需要明确的用户手势，因此在配置更新中会被拒绝且不投放；这不代表所有未来 Effect 类型一律禁用。CLI 用例可断言 reducer 产生的 Effect 意图，但只是作者侧 reducer 检查，不代表宿主授权、激活或实际派发已通过。无脚本 Mod 的保存仍直接校验并提交 config，不启动 QuickJS；首次 init 规则不变，配置事件不会重跑 init。
+配置事件返回的 Effect 也必须经过类型、能力和来源预校验，且只有事务提交后才派发。Save 本身不产生用户激活：`rear.open` 与 `cast.start` 需要明确的用户手势，因此在配置更新中都会被拒绝且不投放；这不代表所有未来 Effect 类型一律禁用。Cast 由宿主选择并二次确认准确主屏任务，不会静默使用 Mod 设置页。CLI 用例可断言 reducer 产生的 Effect 意图，但只是作者侧 reducer 检查，不代表宿主授权、激活或实际派发已通过。无脚本 Mod 的保存仍直接校验并提交 config，不启动 QuickJS；首次 init 规则不变，配置事件不会重跑 init。
 
 作者侧测试把这类用例放入 `tests/config-changes.json`，用 `remrss test <project>` 验证成功派生和拒绝分支。CLI 会验证输入/期望值符合 manifest schema、期望 config 等于提交的新 config，并拒绝将 host 保留事件写在普通事件用例中。
 
@@ -88,7 +86,11 @@ ZIP 条目仅含 `manifest.json`、`manifest.sig`、`author.pub` 及 manifest �
 }
 ```
 
-`minimumVersion` 与 core `CapabilityRequirement(name, minimumVersion)` 同形；当前工具开放 `rear.scene@1`、`rear.scene.keep_visible@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1`、`action.invoke@1`、`clock.snapshot@1`、`schedule.visible@1`，以及宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`。`data.battery` UI binding 为 `data.battery.level`（百分比）、`data.battery.scale`（100）和 `data.battery.charging`；`data.systemMetrics` UI binding 为 `data.systemMetrics.cpu.utilizationPercent`、`data.systemMetrics.memory.availableBytes` 与 `.totalBytes`。数据只在获授权且页面可见时供原生场景绑定使用，关闭订阅即清空旧值，不默认传入脚本；GPU字段目前不受支持。设计文档 §4.1 中其余能力仍在实现/验收中，不会因为名字已列在设计表就被工具当作可用。设备能力、后端连接、作者信任和用户逐项授权仍由宿主分别判断；声明不是授权。
+`minimumVersion` 与 core `CapabilityRequirement(name, minimumVersion)` 同形；当前 CLI 开放 `rear.scene@1`、`rear.scene.keep_visible@1`、`rear.region@1`、`rear.scene.orientation@1`、`rear.cast.virtual@1`、`rear.cast.direct_physical@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1`、`action.invoke@1`、`clock.snapshot@1`、`schedule.visible@1`，以及宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`。设备能力、后端连接、作者信任和用户逐项授权由宿主分别判断；声明不等于授权。数据能力的绑定路径、订阅边界和其他作者操作见[作者快速上手](docs/mod-sdk.md#包协议与作者身份)。
+
+### RC5 Scene 与 Cast 接入
+
+`rear.open` 的区域可用 `CAMERA_SAFE` 或需声明并获授权 `rear.region@1` 的 `FULL`；显式 `contentRotation` 使用 `0/1/2/3`，分别表示 `0°/90°/180°/270°`，并需声明并获授权 `rear.scene.orientation@1`。Cast 需声明并获授权对应模式的 `rear.cast.virtual@1` 或 `rear.cast.direct_physical@1`：`VIRTUAL` 可选 SAFE/FULL 区域与显式方向，`DIRECT_PHYSICAL` 由系统布局，不能指定区域、内容方向或密度。Scene/Cast 都必须来自真实用户操作并经宿主确认，实际支持以运行时 capability 与请求结果为准；宿主不会自动切换模式。Mod 只能查询或关闭自己持有的 Cast opaque handle。字段与 Effect 示例见[受控 Cast Effect 指南](docs/mod-sdk.md#受控-cast-effect)；Scene 与能力说明见[作者快速上手](docs/mod-sdk.md#包协议与作者身份)。
 
 上限：ZIP 2 MiB、展开 8 MiB、64 条目、`main.js` 512 KiB、单场景 UI 64 KiB；拒绝路径穿越、重复条目、符号链接、未知 UI 组件/字段和未声明载荷。状态/配置 schema 只支持有界 JSON 基础类型与 object/array 子结构；UI binding 只能引用 `state.*`、`config.*` 或版本化公开 `data.*` 路径，不接受表达式。
 

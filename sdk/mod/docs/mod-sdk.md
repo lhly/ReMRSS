@@ -15,7 +15,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private
 ./bin/remrss check hello-panel.zip
 ```
 
-这些命令从解压后的 SDK kit 根目录运行（`bin/remrss` 在 ZIP 中保留可执行权限）。若直接在 ReMRSS 源码仓库根目录开发，可改用 `./sdk/mod/bin/remrss`。
+这些命令以源码仓库的 `sdk/mod/` 目录为工作目录；在仓库根目录开发时，先进入该目录再运行 `./bin/remrss`。
 
 `pack` 会签名并重新验签 ZIP。作者私钥只保存在你自己的密钥管理器中；它既不放入包，也不交给 ReMRSS 维护者。导入时先验证公钥指纹和全部载荷，再单独展示作者信任与每项能力授权。新 Mod 默认停用；启用、撤权、卸载与更新由设置页控制。
 
@@ -27,7 +27,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private
 
 作者身份由公钥 DER 的 SHA-256 指纹确定。维护者私钥不能代表作者签包。同一个 Mod ID 一经安装会永久绑定其作者指纹；不同作者不能接管。更新需要更高 `versionCode`，同作者更新保留逻辑会话身份和数据。旧 `.remodule` / schema 1 不兼容此协议。
 
-作者声明的能力、宿主识别的声明、用户实际授权是三件事：未知能力或高于宿主支持版本的 `minimumVersion` 会在打包/导入时拒绝；必需能力须逐项授权，可选能力默认关闭；撤权不会改写模型。当前CLI与host开放 `rear.scene@1`、`rear.scene.keep_visible@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1` 与宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`、`action.invoke@1`、`clock.snapshot@1` 与 `schedule.visible@1`。数据能力仅提供通过授权的可见原生 UI 绑定：`data.battery` 有 `data.battery.level`、`.scale`、`.charging`；`data.systemMetrics` 有 CPU 利用率百分比和内存可用/总字节数绑定。provider按需共享低频采集，页面不可见时停止订阅；数据不会默认周期性传入 JavaScript。GPU 当前标为不支持，不提供伪值。设计中的 `rear.region@1`（当前FULL返回UNSUPPORTED）、`rear.cast@1`及其余尚未接入的能力仍不会因为写入设计文档就被工具视为可用。`rear.scene` 只有在用户已授权后才能从设置页的真实“显示到背屏”点击触发；一次点击签发单次短期激活票据。Reducer 不能自行签发票据、开场景或调用 Android 服务。
+作者声明的能力、宿主识别的声明、用户实际授权是三件事：未知能力或高于宿主支持版本的 `minimumVersion` 会在打包/导入时拒绝；必需能力须逐项授权，可选能力默认关闭；撤权不会改写模型。当前CLI与host开放 `rear.scene@1`、`rear.scene.keep_visible@1`、`rear.region@1`、`rear.scene.orientation@1`、`rear.cast.virtual@1`、`rear.cast.direct_physical@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1` 与宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`、`action.invoke@1`、`clock.snapshot@1` 与 `schedule.visible@1`。数据能力仅提供通过授权的可见原生 UI 绑定：`data.battery` 有 `data.battery.level`、`.scale`、`.charging`；`data.systemMetrics` 有 CPU 利用率百分比和内存可用/总字节数绑定。provider按需共享低频采集，页面不可见时停止订阅；数据不会默认周期性传入 JavaScript。GPU 当前标为不支持，不提供伪值。投放方式是否可用，以宿主当前 capability/state 为准；声明能力不代表用户已授权或预留了背屏。`rear.scene` 只有在用户已授权后才能从设置页的真实“显示到背屏”点击触发；一次点击签发单次短期激活票据。`cast.start` 同样只接受有效用户手势：Host 先显示任务选择器，用户选择准确主屏任务并二次确认后才提交。Reducer 不能自行签发票据、开场景或调用 Android 服务。
 
 ## 两种 Mod：声明式与 reducer
 
@@ -139,3 +139,102 @@ clock 环境字段为 `wallTimeMs`、`elapsedRealtimeMs`、`timezoneId`、`bootI
 ### Debug 自有 Mod 诊断
 
 Debug 构建的“Mod 开发重载”页面可输入单个已安装 Mod ID 并连接其诊断会话。页面只保留最多 64 条运行就绪、模型提交 revision、Effect 请求和错误代码；不记录 state/config 或错误正文，不枚举/读取其他 Mod。切到后台、关闭页面或选择文件时会停止观察；记录仅在当前 Debug Activity 内存中，不写盘。资源计数是这个 Mod 签名 ZIP 载荷的字节数，不代表 worker/进程 PSS、CPU 或电量。该工具不轮询、不启动常驻服务，Release 不含 Debug 入口。
+
+
+## 从 Mod 设置页启动、查询和结束虚拟投放
+
+在 manifest 声明 `rear.cast.virtual@1`、`rear.region@1` 与 `rear.scene.orientation@1`，并在导入后授予这三项能力。这个例子请求全域和 90°；虚拟投放可省略区域和方向以沿用目标 App 的偏好，省略与显式指定 `0` 不同。
+
+从 `./bin/remrss create cast-panel --template counter` 开始，保留 `runtime.kind: "quickjs"`。将模板的背屏 UI 替换为静态文字或改为绑定 `state.status`，不要保留对计数器字段的绑定。空字符串和 `0` 表示没有会话；句柄保存在 state，而不是配置。将以下对象填入 `data.stateSchema`：
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "generation", "status", "pending", "requestNo"],
+  "properties": {
+    "sessionId": { "type": "string", "maxLength": 128 },
+    "generation": { "type": "integer", "minimum": 0, "maximum": 1000000000000 },
+    "status": { "type": "string", "maxLength": 128 },
+    "pending": { "type": "string", "maxLength": 64 },
+    "requestNo": { "type": "integer", "minimum": 0, "maximum": 1000000000000 }
+  }
+}
+```
+
+在主屏设置场景放三个按钮：
+
+```json
+{
+  "scene": "settings",
+  "root": {
+    "type": "layout.column",
+    "gap": 12,
+    "children": [
+      { "type": "ui.text", "value": { "bind": "state.status" } },
+      { "type": "ui.button", "label": "开始投放", "onPress": { "type": "event", "name": "start-cast" } },
+      { "type": "ui.button", "label": "查询投放", "onPress": { "type": "event", "name": "query-cast" } },
+      { "type": "ui.button", "label": "结束投放", "onPress": { "type": "event", "name": "close-cast" } }
+    ]
+  }
+}
+```
+
+点击「开始投放」后，先在宿主选择主屏目标，再点「确认并投放」。选择本身不会启动投放；宿主在确认时重新核对原任务，不会改选其他 App。等宿主回报就绪才保存会话句柄。点击「结束投放」可能先得到 CLOSING，保留句柄供「查询投放」确认 CLOSED。每次只提交一个请求；回调的 effectId 必须对应当前请求，迟到的结果不能覆盖下一笔会话。
+
+```js
+function issue(state, kind, params) {
+  const requestNo = state.requestNo + 1;
+  const id = kind + '-' + requestNo;
+  return {
+    state: { ...state, requestNo, pending: id, status: '等待宿主处理' },
+    effects: [{ type: kind, id, ...params }],
+  };
+}
+
+globalThis.__remrss = {
+  init() {
+    return { sessionId: '', generation: 0, status: '还没有投放', pending: '', requestNo: 0 };
+  },
+  reduce({ state, event }) {
+    switch (event?.type) {
+      case 'start-cast':
+        if (state.pending || state.sessionId) return { state };
+        return issue(state, 'cast.start', { mode: 'VIRTUAL', region: 'FULL', contentRotation: 1 });
+      case 'query-cast':
+      case 'close-cast': {
+        if (state.pending || !state.sessionId) return { state };
+        const { sessionId, generation } = state;
+        const kind = event.type === 'close-cast' ? 'cast.close' : 'cast.query';
+        return issue(state, kind, { sessionId, generation });
+      }
+      case 'host.effectResult': {
+        const { effectId, status, result, code } = event.payload ?? {};
+        if (!state.pending || effectId !== state.pending) return { state };
+        const next = { ...state, pending: '' };
+        if (status !== 'accepted' || !result) {
+          return { state: { ...next, status: code ?? '请求未完成' } };
+        }
+        if (effectId.startsWith('cast.start-')) {
+          const { sessionId, generation } = result;
+          if (typeof sessionId !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(sessionId) ||
+              !Number.isSafeInteger(generation) || generation <= 0 || generation > 1e12) {
+            return { state: { ...next, status: '宿主未返回可用句柄' } };
+          }
+          return { state: { ...next, sessionId, generation, status: '投放已就绪' } };
+        }
+        if (result.state === 'CLOSED' || result.state === 'FAILED') {
+          return { state: { ...next, sessionId: '', generation: 0, status: result.state } };
+        }
+        return { state: { ...next, status: result.state ?? '请求已接受' } };
+      }
+      default:
+        return { state };
+    }
+  },
+};
+```
+
+`sessionId` 与 `generation` 是本 Mod 的不透明句柄，不是 task ID。查询和关闭只能访问同一签名 Mod 自己的投放；重建背屏场景或 worker 不会自动关闭投放。开始和关闭需要真实的新鲜用户手势，不能在 `host.effectResult` 中再次请求开始或关闭。
+
+`DIRECT_PHYSICAL` 需要 `rear.cast.direct_physical@1`，由系统布局，不接受区域、内容方向或密度参数。宿主只在能核实原受控投放和交接方式、用户又确认替换时才尝试接管；非受控占用、状态不明或不支持的交接会被拒绝，不会自动改成虚拟投放。背屏 Mod 场景本身不属于可替换的投放。按宿主 capability 与实际请求结果处理，不用设备型号推定结果。

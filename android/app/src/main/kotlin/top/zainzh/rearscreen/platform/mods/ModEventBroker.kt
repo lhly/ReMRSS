@@ -38,8 +38,23 @@ data class ModRearOpenEffect(
     val scene: String,
     val region: String,
     val keepVisible: Boolean,
+    val contentRotation: Int? = null,
     override val requiresUserActivation: Boolean = true,
 ) : ModHostEffect
+
+data class ModCastStartEffect(
+    override val id: String,
+    val mode: String,
+    val region: String? = null,
+    val contentRotation: Int? = null,
+    val requestedDensityDpi: Int? = null,
+    override val requiresUserActivation: Boolean = true,
+) : ModHostEffect
+
+data class ModCastCloseEffect(override val id: String, val sessionId: String, val generation: Long,
+    override val requiresUserActivation: Boolean = true) : ModHostEffect
+data class ModCastQueryEffect(override val id: String, val sessionId: String, val generation: Long,
+    override val requiresUserActivation: Boolean = false) : ModHostEffect
 
 data class ModVisibleScheduleEffect(
     override val id: String,
@@ -85,6 +100,10 @@ fun interface ModEffectDispatcher {
         runCatching { requestRearScene(mod, eventId, effect) }
             .onSuccess { complete(true, null) }
             .onFailure { complete(false, "E_EFFECT_DISPATCH") }
+    }
+    fun requestCastWithResult(mod: InstalledMod, eventId: String, effect: ModCastStartEffect,
+        source: ModCastActivationSource, complete: (Boolean, String?, JSONObject?) -> Unit) {
+        complete(false, "E_UNSUPPORTED", null)
     }
 }
 
@@ -149,7 +168,12 @@ internal class ModEffectRateLimiter(
     }
 }
 
-internal class ModUserGesture(val modId: String, val epoch: Long, val issuedAtElapsedRealtimeMs: Long) {
+internal class ModUserGesture(
+    val modId: String,
+    val epoch: Long,
+    val issuedAtElapsedRealtimeMs: Long,
+    val castSource: ModCastActivationSource? = null,
+) {
     private val consumed = AtomicInteger(0)
     fun consume(modId: String, epoch: Long, nowMs: Long): Boolean =
         this.modId == modId && this.epoch == epoch && nowMs >= issuedAtElapsedRealtimeMs &&
@@ -430,11 +454,13 @@ class ModEventBroker(
     }
 
     /** Only native Activity click handlers call this; activation stays on the host-side command. */
-    fun submitUserEvent(modId: String, type: String, payload: JSONObject = JSONObject()): Boolean {
+    fun submitUserEvent(modId: String, type: String, payload: JSONObject = JSONObject(),
+        castSource: ModCastActivationSource? = null): Boolean {
         val slot = slots[modId] ?: return false
         if (slot.visibleObservers.isEmpty() || type.isBlank() || type in HOST_ONLY_EVENTS || payload.toString().toByteArray(Charsets.UTF_8).size > 16 * 1024) return false
+        if (castSource != null && !ModCastActivationSources.isRegistered(castSource, modId)) return false
         val eventId = UUID.randomUUID().toString()
-        val gesture = ModUserGesture(modId, slot.epoch, SystemClock.elapsedRealtime())
+        val gesture = ModUserGesture(modId, slot.epoch, SystemClock.elapsedRealtime(), castSource)
         return enqueue(slot, ModBrokerCommand.Event(eventId, type, JSONObject(payload.toString()), gesture))
     }
 
@@ -791,17 +817,62 @@ class ModEventBroker(
         val type = value.optString("type")
         return when (type) {
             "rear.open" -> {
-                require(value.keys().asSequence().toSet() in setOf(setOf("type", "scene", "region", "keepVisible"), setOf("id", "type", "scene", "region", "keepVisible"))) { "rear.open 字段无效" }
+                val fields = value.keys().asSequence().toSet()
+                val base = setOf("type", "scene", "region", "keepVisible")
+                require(fields == base || fields == base + "id" || fields == base + "contentRotation" || fields == base + setOf("id", "contentRotation")) { "rear.open 字段无效" }
                 require(value.getString("scene") == "rear") { "Mod 只能打开自身声明的 rear scene" }
                 require(value.getString("region") in setOf("CAMERA_SAFE", "FULL")) { "rear.open region 无效" }
                 require(value.get("keepVisible") is Boolean) { "rear.open keepVisible 必须为 boolean" }
+                val contentRotation = if (value.has("contentRotation")) value.getInt("contentRotation") else null
+                require(contentRotation == null || contentRotation in 0..3) { "rear.open contentRotation 必须为 0、1、2 或 3 个顺时针 90°" }
                 val needed = mutableSetOf("rear.scene")
                 if (value.getString("region") == "FULL") needed += "rear.region"
                 if (value.getBoolean("keepVisible")) needed += "rear.scene.keep_visible"
+                if (contentRotation != null) needed += "rear.scene.orientation"
                 val declared = (slot.pkg.requiredCapabilities + slot.pkg.optionalCapabilities).map { it.name }.toSet()
                 require(needed.all { it in declared }) { "Mod manifest 未声明所需能力：${(needed-declared).joinToString()}" }
                 require(needed.all { it in slot.mod.grantedCapabilities }) { "rear.open 缺少能力授权：${(needed-slot.mod.grantedCapabilities).joinToString()}" }
-                ModRearOpenEffect(value.optString("id").ifBlank { UUID.randomUUID().toString() }, "rear", value.getString("region"), value.getBoolean("keepVisible"))
+                ModRearOpenEffect(value.optString("id").ifBlank { UUID.randomUUID().toString() }, "rear", value.getString("region"), value.getBoolean("keepVisible"), contentRotation)
+            }
+            "cast.start" -> {
+                val fields = value.keys().asSequence().toSet()
+                val allowed = setOf("type", "id", "mode", "region", "contentRotation", "requestedDensityDpi")
+                require(fields.containsAll(setOf("type", "mode")) && fields.all { it in allowed }) { "cast.start 字段无效" }
+                val mode = value.getString("mode")
+                require(mode in setOf("VIRTUAL", "DIRECT_PHYSICAL")) { "cast.start mode 无效" }
+                val region = if (value.has("region")) value.getString("region") else null
+                require(region == null || region in setOf("SAFE", "FULL")) { "cast.start region 无效" }
+                val rotation = if (value.has("contentRotation")) value.getInt("contentRotation") else null
+                require(rotation == null || rotation in 0..3) { "cast.start contentRotation 必须为 0..3" }
+                val density = if (value.has("requestedDensityDpi")) value.getInt("requestedDensityDpi") else null
+                require(density == null || density in 72..1000) { "cast.start requestedDensityDpi 无效" }
+                require(mode != "DIRECT_PHYSICAL" || (region == null && rotation == null && density == null)) { "物理直投不支持区域、内容方向或密度设置" }
+                val needed = mutableSetOf<String>()
+                if (region == "FULL") needed += "rear.region"
+                if (rotation != null) needed += "rear.scene.orientation"
+                val castCapability = if (mode == "VIRTUAL") "rear.cast.virtual" else "rear.cast.direct_physical"
+                needed += castCapability
+                val declared = (slot.pkg.requiredCapabilities + slot.pkg.optionalCapabilities).map { it.name }.toSet()
+                require(needed.all { it in declared }) { "Mod manifest 未声明所需能力：${(needed-declared).joinToString()}" }
+                require(needed.all { it in slot.mod.grantedCapabilities }) { "cast.start 缺少能力授权：${(needed-slot.mod.grantedCapabilities).joinToString()}" }
+                if ("id" in fields) require(value.getString("id").matches(Regex("[A-Za-z0-9_.-]{1,64}"))) { "cast.start id 无效" }
+                ModCastStartEffect(value.optString("id").ifBlank { UUID.randomUUID().toString() }, mode, region, rotation, density)
+            }
+            "cast.query", "cast.close" -> {
+                val fields = value.keys().asSequence().toSet()
+                val required = setOf("type", "sessionId", "generation")
+                require(fields.containsAll(required) && fields.all { it in required + "id" }) { "$type 字段无效" }
+                val sessionId = value.getString("sessionId")
+                require(sessionId.matches(Regex("[A-Za-z0-9_-]{16,128}"))) { "$type session handle 无效" }
+                val generationValue = value.get("generation")
+                require(generationValue is Number && generationValue.toLong() > 0 && generationValue.toDouble() == generationValue.toLong().toDouble()) { "$type generation 无效" }
+                val declared = (slot.pkg.requiredCapabilities + slot.pkg.optionalCapabilities).map { it.name }.toSet()
+                val castCaps = setOf("rear.cast.virtual", "rear.cast.direct_physical")
+                require(declared.any { it in castCaps } && slot.mod.grantedCapabilities.any { it in castCaps }) { "$type 缺少 Cast 授权" }
+                val id = value.optString("id").ifBlank { UUID.randomUUID().toString() }
+                require(id.matches(Regex("[A-Za-z0-9_.-]{1,64}"))) { "$type id 无效" }
+                if (type == "cast.query") ModCastQueryEffect(id, sessionId, (generationValue as Number).toLong())
+                else ModCastCloseEffect(id, sessionId, (generationValue as Number).toLong())
             }
             "schedule.visible.register", "schedule.visible.cancel" -> {
                 val declared = (slot.pkg.requiredCapabilities + slot.pkg.optionalCapabilities).any { it.name == "schedule.visible" }
@@ -915,6 +986,18 @@ class ModEventBroker(
             else ModNotificationDeniedEffect(id, "E_CAPABILITY_DENIED")
     }
 
+    private fun resolveCastModOwner(slot: Slot): top.zainzh.rearscreen.platform.SessionOwner {
+        val installed = ModPackageStore.installed(appContext, slot.mod.id, testStoreStorage)
+            ?: throw SecurityException("E_MOD_REVOKED")
+        require(installed.enabled && installed.authorFingerprint == slot.pkg.authorFingerprint &&
+            ModPackageStore.isAuthorTrusted(appContext, installed.authorFingerprint)) { "E_MOD_REVOKED" }
+        val castCapabilities = setOf("rear.cast.virtual", "rear.cast.direct_physical")
+        require(installed.grantedCapabilities.any { it in castCapabilities } &&
+            (installed.requiredCapabilities + installed.optionalCapabilities).any { it.name in castCapabilities }) { "E_CAPABILITY_DENIED" }
+        return top.zainzh.rearscreen.platform.RearCapabilityCore.get(appContext).modDataOwner(slot.mod.id)
+            ?: throw SecurityException("E_MOD_REVOKED")
+    }
+
     private fun dispatchEffect(
         slot: Slot,
         eventId: String,
@@ -923,7 +1006,7 @@ class ModEventBroker(
         effectChain: ModEffectChainBudget,
     ) {
         val completed = AtomicInteger(0)
-        fun complete(status: String, code: String? = null) {
+        fun complete(status: String, code: String? = null, result: JSONObject? = null) {
             if (!completed.compareAndSet(0, 1)) return
             when (effectChain.reserveResultEvent()) {
                 ResultEventReservation.CPU_LIMIT -> {
@@ -938,6 +1021,7 @@ class ModEventBroker(
             }
             val payload = JSONObject().put("effectId", effect.id).put("requestEventId", eventId).put("status", status)
             if (code != null) payload.put("code", code)
+            if (result != null) payload.put("result", result)
             if (slots[slot.mod.id] === slot && slot.acceptsEpoch(slot.epoch)) {
                 if (!enqueue(slot, ModBrokerCommand.Event(UUID.randomUUID().toString(), HOST_EFFECT_RESULT_EVENT, payload, effectChain = effectChain)))
                     notifyObservers(slot) { it.onError(slot.mod.id, "E_EFFECT_RESULT_QUEUE", "Effect 结果事件队列已满，操作状态未能回送") }
@@ -963,6 +1047,50 @@ class ModEventBroker(
                 .onFailure { complete("rejected", "E_SCHEDULE_INVALID") }
             is ModRearOpenEffect -> effectDispatcher.requestRearSceneWithResult(slot.mod, eventId, effect) { accepted, code ->
                 complete(if (accepted) "accepted" else "rejected", code)
+            }
+            is ModCastStartEffect -> {
+                val now = SystemClock.elapsedRealtime()
+                if (gesture == null || !gesture.consume(slot.mod.id, slot.epoch, now)) {
+                    complete("rejected", "E_ACTIVATION_REQUIRED")
+                } else if (gesture.castSource == null || !ModCastActivationSources.isRegistered(gesture.castSource, slot.mod.id)) {
+                    complete("rejected", "E_CAST_SOURCE_STALE")
+                } else effectDispatcher.requestCastWithResult(slot.mod, eventId, effect, gesture.castSource) { accepted, code, result ->
+                    complete(if (accepted) "accepted" else "rejected", code, result)
+                }
+            }
+            is ModCastQueryEffect -> runCatching {
+                val owner = resolveCastModOwner(slot)
+                val runtime = top.zainzh.rearscreen.platform.ControlledCastRuntimeProvider.get(appContext)
+                val snapshot = runtime.coordinator.query(owner,
+                    top.zainzh.rearscreen.platform.CastSessionHandle(effect.sessionId, effect.generation))
+                when (snapshot) {
+                    is top.zainzh.rearscreen.platform.CastQueryResult.Rejected -> throw IllegalStateException("E_${snapshot.code.name}")
+                    is top.zainzh.rearscreen.platform.CastQueryResult.Snapshot -> JSONObject()
+                        .put("sessionId", snapshot.handle.sessionId).put("generation", snapshot.handle.generation)
+                        .put("state", snapshot.state.name).put("mode", snapshot.target.mode.name)
+                        .put("region", snapshot.target.region.name).put("contentRotation", snapshot.target.contentRotation)
+                        .put("presentationKind", snapshot.presentationKind.name)
+                        .put("failureCode", snapshot.failure?.let { "E_${it.code.name}" } ?: JSONObject.NULL)
+                }
+            }.onSuccess { complete("accepted", null, it) }
+                .onFailure { complete("rejected", it.message?.takeIf { code -> code.startsWith("E_") } ?: "E_CAST_QUERY") }
+            is ModCastCloseEffect -> {
+                val now = SystemClock.elapsedRealtime()
+                if (gesture == null || !gesture.consume(slot.mod.id, slot.epoch, now)) {
+                    complete("rejected", "E_ACTIVATION_REQUIRED")
+                } else runCatching {
+                    val owner = resolveCastModOwner(slot)
+                    val runtime = top.zainzh.rearscreen.platform.ControlledCastRuntimeProvider.get(appContext)
+                    runtime.coordinator.close(owner,
+                        top.zainzh.rearscreen.platform.CastSessionHandle(effect.sessionId, effect.generation))
+                }.onSuccess { result ->
+                    when (result) {
+                        top.zainzh.rearscreen.platform.CastOperationResult.Completed -> complete("accepted", null, JSONObject().put("state", "CLOSED"))
+                        is top.zainzh.rearscreen.platform.CastOperationResult.Accepted -> complete("accepted", null,
+                            JSONObject().put("state", "CLOSING").put("generation", result.generation))
+                        is top.zainzh.rearscreen.platform.CastOperationResult.Rejected -> complete("rejected", "E_${result.code.name}")
+                    }
+                }.onFailure { complete("rejected", it.message?.takeIf { code -> code.startsWith("E_") } ?: "E_CAST_CLOSE") }
             }
             is ModRegisteredActionEffect -> {
                 val now = SystemClock.elapsedRealtime()

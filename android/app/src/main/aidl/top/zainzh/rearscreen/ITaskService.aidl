@@ -4,8 +4,16 @@ import android.view.Surface;
 import android.os.ParcelFileDescriptor;
 import top.zainzh.rearscreen.IRearGestureListener;
 import top.zainzh.rearscreen.ISceneTaskActionGate;
+import top.zainzh.rearscreen.ITaskFocusActionGate;
+import top.zainzh.rearscreen.IPhysicalCastReaderLifecycle;
+import top.zainzh.rearscreen.IPhysicalReplacementMoveGate;
 
 interface ITaskService {
+    const int CONTROLLED_CAST_WAKE_FAILED = 0;
+    const int CONTROLLED_CAST_WAKE_ALREADY_ON = 2;
+    const int CONTROLLED_CAST_WAKE_CONFIRMED = 3;
+    const int TASK_FOCUS_FAILED = 0;
+    const int TASK_FOCUS_CONFIRMED = 2;
     void destroy() = 16777114;  // Shizuku required
     
     /**
@@ -197,5 +205,131 @@ interface ITaskService {
             ISceneTaskActionGate currentGate) = 60;
     /** Restore only the rear Launcher through the privileged backend; leaves virtual casting/input ownership untouched. */
     boolean restoreSubScreenLauncherOnly() = 61;
+    /** Internal host-only prepare: exact old owner/session/task/reader plus new target; allocates B without stopping A. */
+    String prepareRearVirtualCastReplacement(String previousSessionId, long previousGeneration,
+            long previousOwnerGeneration, String previousOwnerIdentity,
+            int previousTaskId, int previousHostTaskId,
+            String previousInputSessionId, String previousBaseComponent, String expectedRearIdentity,
+            String expectedCandidateBaseComponent, int rearDisplayId, String operationId,
+            long ownerGeneration, String ownerIdentity,
+            in Surface candidateSurface, String readerPath, int taskId, int hostTaskId, int density,
+            String component, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean densityCompatibility, int contentRotation, boolean fullViewport) = 62;
+    /** One-shot host acknowledgment after a real candidate Surface buffer was observed. */
+    boolean reportRearVirtualCastReplacementOutputFrame(String candidateToken) = 63;
+    /** Pause the original reader on its native PAUSED acknowledgment before swapping host layers. */
+    boolean beginRearVirtualCastReplacementHandoff(String candidateToken, ISceneTaskActionGate actionGate) = 64;
+    /** Rebind the same reader while paused; does not resume until finish. */
+    boolean bindRearVirtualCastReplacementInput(String candidateToken, ISceneTaskActionGate actionGate) = 65;
+    /** Resume/commit, or restore A route and abort B. */
+    String finishRearVirtualCastReplacement(String candidateToken, boolean commit,
+            ISceneTaskActionGate actionGate) = 66;
+    /** Abort a prepared candidate before or during the reversible handoff. */
+    boolean abortRearVirtualCastReplacement(String candidateToken) = 67;
+    /** Exact base activity for one task on one display; null means unavailable or ambiguous. */
+    String getTaskBaseComponent(int taskId, int displayId) = 68;
+    /** Ticket-bound typed placement for a new explicit Scene layout; legacy launchSceneActivity remains unchanged. */
+    int launchSceneActivityWithPlacement(String component, int displayId, String launchTicket,
+            boolean fullRegion, int contentRotation, boolean explicitRotation) = 69;
+    /** Internal controlled empty-cast start; refuses all existing virtual/input owners and never calls legacy stop(null). */
+    String startControlledRearVirtualCast(in Surface surface, String readerPath, int taskId, int hostTaskId,
+            int density, String component, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean densityCompatibility, int contentRotation, boolean fullViewport,
+            String expectedBaseComponent, int expectedRearDisplayId, String expectedRearIdentity,
+            String operationId, long ownerGeneration, String ownerIdentity) = 70;
+    /** One-shot authorized idle-panel wake; returns FAILED, ALREADY_ON, or command-issued-and-confirmed. */
+    int wakeRearDisplayForControlledCast(int displayId, String expectedRearIdentity,
+            ISceneTaskActionGate actionGate) = 71;
+    /** Same replacement prepare contract with an optional explicit target gate for the pre-move phase. */
+    String prepareRearVirtualCastReplacementWithTargetGate(String previousSessionId, long previousGeneration,
+            long previousOwnerGeneration, String previousOwnerIdentity,
+            int previousTaskId, int previousHostTaskId, String previousInputSessionId,
+            String previousBaseComponent, String expectedRearIdentity, String expectedCandidateBaseComponent,
+            int rearDisplayId, String operationId, long ownerGeneration, String ownerIdentity,
+            in Surface candidateSurface, String readerPath, int taskId, int hostTaskId, int density,
+            String component, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean densityCompatibility, int contentRotation, boolean fullViewport,
+            ISceneTaskActionGate targetActionGate) = 79;
+    /** Same typed empty-start contract as transaction 70, with a final host-owned action gate. */
+    String startControlledRearVirtualCastWithGate(in Surface surface, String readerPath, int taskId, int hostTaskId,
+            int density, String component, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean densityCompatibility, int contentRotation, boolean fullViewport,
+            String expectedBaseComponent, int expectedRearDisplayId, String expectedRearIdentity,
+            String operationId, long ownerGeneration, String ownerIdentity,
+            ISceneTaskActionGate actionGate) = 72;
+    /** Focuses one exact sole-task root already on display 0, without touching input-proxy or rear ownership. */
+    int focusExactMainTask(int taskId, String expectedBaseComponent, String expectedTopComponent,
+            ITaskFocusActionGate actionGate) = 73;
+    /** Controlled physical-cast move; validates exact task/root and selected rear identity at the privileged move point. */
+    String moveControlledPhysicalTask(int taskId, String packageName, String baseComponent,
+            int sourceDisplayId, int targetDisplayId, String expectedRearIdentity) = 74;
+    /** All-display authoritative exact task identity for legacy owner reconciliation; unavailable is distinct from absent. */
+    String queryExactTaskPlacement(int taskId) = 75;
+    /** One-shot bounded exact drawn-window plus InputDispatcher touchability proof; unavailable is unknown. */
+    String queryExactPhysicalPresentation(int taskId, String packageName, String baseComponent,
+            int displayId, String expectedRearIdentity) = 76;
+    /** Controlled physical→virtual handoff: defer OEM launcher start until exact B cleanup. */
+    String startControlledRearVirtualCastForPhysicalReplacement(in Surface surface, String readerPath,
+            int taskId, int hostTaskId, int density, String component, IBinder owner,
+            IRearGestureListener gestures, String viewport, boolean densityCompatibility,
+            int contentRotation, boolean fullViewport, String expectedBaseComponent,
+            int expectedRearDisplayId, String expectedRearIdentity, String operationId,
+            long ownerGeneration, String ownerIdentity, ISceneTaskActionGate actionGate,
+            IPhysicalCastReaderLifecycle readerLifecycle) = 77;
+    /** Restores OEM launcher only after an exact selected-display and empty/system-launcher recheck. */
+    boolean restoreSubScreenLauncherForControlledReplacement(int displayId, String expectedRearIdentity) = 78;
+    /** txn77-compatible physical→virtual start; admits only the exact journaled physical A beside the exact host. */
+    String startControlledRearVirtualCastForPhysicalReplacementWithA(in Surface surface, String readerPath,
+            int taskId, int hostTaskId, int density, String component, IBinder owner,
+            IRearGestureListener gestures, String viewport, boolean densityCompatibility,
+            int contentRotation, boolean fullViewport, String expectedBaseComponent,
+            int expectedRearDisplayId, String expectedRearIdentity, String operationId,
+            long ownerGeneration, String ownerIdentity, ISceneTaskActionGate actionGate,
+            int expectedOldTaskId, String expectedOldPackage, String expectedOldBaseComponent,
+            IPhysicalCastReaderLifecycle readerLifecycle) = 80;
+    /** One-shot read of an already-confirmed Mod picker while its exact rear presenter owns global focus. */
+    boolean isControlledCastPickerStillOnMain(int pickerTaskId, int targetTaskId,
+            String expectedBaseComponent, String expectedTopComponent,
+            int hostTaskId, int rearDisplayId, String rearIdentity) = 81;
+    /** P→V's first return of A: re-attest the exact live B and the host's durable journal at dispatch. */
+    String returnPhysicalAForVirtualReplacement(int oldTaskId, String oldPackage, String oldBase,
+            int rearDisplayId, String rearIdentity, String operationId, long ownerGeneration,
+            String ownerIdentity, String sessionId, long sessionGeneration, int newTaskId, String newBase,
+            String readerId, long readerGeneration, ISceneTaskActionGate actionGate) = 82;
+    /** Explicit close after a failed mixed handoff: only A on rear, B on main, and no virtual resources. */
+    String returnPhysicalAAfterVirtualRollback(int oldTaskId, String oldPackage, String oldBase,
+            int rearDisplayId, String rearIdentity, int newTaskId, String newPackage, String newBase,
+            ISceneTaskActionGate actionGate) = 83;
+    /** P→P A return: exact two-task rear snapshot plus live journal gate at the physical dispatch boundary. */
+    String returnPhysicalAForPhysicalReplacement(int oldTaskId, String oldPackage, String oldBase,
+            int rearDisplayId, String rearIdentity, String operationId, long oldGeneration,
+            int newTaskId, String newPackage, String newBase, long newGeneration,
+            long newCoordinatorGeneration, String newOwnerIdentity,
+            IPhysicalReplacementMoveGate actionGate) = 84;
+    /** P→P compensation: only restore A after B is MAIN and rear is empty or only the exact OEM launcher. */
+    String restorePhysicalAForPhysicalReplacement(int oldTaskId, String oldPackage, String oldBase,
+            int rearDisplayId, String rearIdentity, String operationId, long oldGeneration,
+            int newTaskId, String newPackage, String newBase, long newGeneration,
+            long newCoordinatorGeneration, String newOwnerIdentity,
+            IPhysicalReplacementMoveGate actionGate) = 85;
+    /** Debug-only exact RC5 A/B experiment: attach exact fixture B at the bottom of selected rear display. */
+    String moveRc5PhysicalFixtureBToRearBottom(int aTaskId, long aGeneration, int bTaskId,
+            int aProcessPid, int bProcessPid, int rearDisplayId, String expectedRearIdentity,
+            String operationId, ITaskFocusActionGate actionGate) = 86;
+    /** Debug-only exact RC5 A/B experiment: request focus for exact B already attached on that rear display. */
+    String focusRc5PhysicalFixtureBOnRear(int aTaskId, long aGeneration, int bTaskId,
+            int aProcessPid, int bProcessPid, int rearDisplayId, String expectedRearIdentity,
+            String operationId, ITaskFocusActionGate actionGate) = 87;
+    /** Debug-only exact-operation cleanup for an abandoned bottom-stage desktop binding. */
+    boolean clearRc5PhysicalFixtureBottomBinding(int aTaskId, long aGeneration, int bTaskId,
+            int rearDisplayId, String expectedRearIdentity, String operationId) = 88;
+    /** One product P→P transaction: exact B bottom move, strict interstage readback, then one focus request. */
+    String moveControlledPhysicalReplacementBWithBottomFocus(int oldTaskId, String oldPackage, String oldBase,
+            long oldGeneration, int newTaskId, String newPackage, String newBase, long newGeneration,
+            long newCoordinatorGeneration, String newOwnerIdentity, int rearDisplayId, String rearIdentity,
+            String operationId, IPhysicalReplacementMoveGate bottomGate,
+            IPhysicalReplacementMoveGate focusGate) = 89;
+    /** Normal controlled physical close: no-op for the exact hidden/asleep OEM launcher; restore only from empty. */
+    boolean restoreSubScreenLauncherAfterNormalControlledClose(int displayId, String expectedRearIdentity) = 90;
 }
 

@@ -1,5 +1,7 @@
 package top.zainzh.rearscreen;
 
+import java.util.regex.Pattern;
+
 /** Boundaries shared by both privilege sources: external text is never shell syntax. */
 final class PrivilegedShellArguments {
     private PrivilegedShellArguments() {}
@@ -17,6 +19,12 @@ final class PrivilegedShellArguments {
         return "am start -n " + quote(component) + " --es packageName " + quote(packageName)
                 + " --es title " + quote(title) + " --es text " + quote(text) + " --el when " + when;
     }
+
+    static Pattern notificationLaunchPrefix(String component) {
+        return Pattern.compile("^am start (?:--display [0-9]+ )?-n (?:"
+                + Pattern.quote(component) + "|" + Pattern.quote(quote(component)) + ") ");
+    }
+
     static String stopRecording(int pid, String output, int signal) {
         if (pid <= 0 || signal != 2 && signal != 15 || output == null
                 || !output.matches("/storage/emulated/[0-9]+/Movies/ReMRSS_[0-9]{8}_[0-9]{6}(?:_[a-f0-9]{8})?\\.mp4"))

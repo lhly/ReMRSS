@@ -35,4 +35,10 @@ final class PhysicalKeeperStopPolicy {
                 && (disposition == RearDisplayCastOccupancy.OwnerDisposition.EMPTY
                     || disposition == RearDisplayCastOccupancy.OwnerDisposition.SYSTEM_LAUNCHER);
     }
+
+    /** A missing explicit stop acknowledgement is recoverable only after the Keeper is gone. */
+    static boolean mayReconcileNaturallyStoppedKeeper(boolean stopAcknowledged, boolean keeperPresent) {
+        return !stopAcknowledged && !keeperPresent;
+    }
+
 }

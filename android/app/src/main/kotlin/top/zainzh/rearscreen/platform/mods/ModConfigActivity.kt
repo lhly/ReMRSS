@@ -1,9 +1,16 @@
 package top.zainzh.rearscreen.platform.mods
 
+import android.app.ActivityOptions
 import android.os.Bundle
 import android.view.View
+import android.view.ViewTreeObserver
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +25,20 @@ import top.zainzh.rearscreen.AppPalette
 import top.zainzh.rearscreen.miuixContent
 import top.zainzh.rearscreen.platform.actions.RegisteredActionRef
 import top.zainzh.rearscreen.platform.actions.RegisteredActionsActivity
+import java.util.UUID
+
+internal class ModConfigCastState : ViewModel() {
+    var source: ModCastActivationSource? = null
+    @Volatile var completion: ((Boolean, String?, JSONObject?) -> Unit)? = null
+    @Volatile var requestId: String? = null
+
+    fun sourceFor(modId: String): ModCastActivationSource {
+        val current = source
+        if (current?.modId == modId) return current
+        return ModCastActivationSource(modId, ModCastActivationSource.Surface.MAIN_SETTINGS, UUID.randomUUID().toString())
+            .also { source = it }
+    }
+}
 
 internal data class RestoredModConfigPickerState(
     val pendingBinding: String?, val pendingModId: String?, val drafts: Map<String, RegisteredActionRef>
@@ -48,7 +69,9 @@ internal fun isModConfigSceneVisible(
     attached: Boolean,
     shown: Boolean,
     windowVisible: Boolean,
-): Boolean = resumed && attached && shown && windowVisible
+    displayId: Int?,
+    closing: Boolean,
+): Boolean = resumed && attached && shown && windowVisible && isModConfigMainDisplay(displayId) && !closing
 
 /** Settings scene Activity for a single installed, trusted Mod. */
 class ModConfigActivity : ComponentActivity() {
@@ -57,6 +80,28 @@ class ModConfigActivity : ComponentActivity() {
     private var model by mutableStateOf<ModPersistedModel?>(null)
     private var error by mutableStateOf("")
     private var sceneVisible by mutableStateOf(false)
+    private var visibilityDecor: View? = null
+    private val windowVisibilityListener = ViewTreeObserver.OnWindowVisibilityChangeListener {
+        updateSceneVisibility()
+    }
+    private val decorAttachListener = object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(view: View) {
+            view.viewTreeObserver.addOnWindowVisibilityChangeListener(windowVisibilityListener)
+            updateSceneVisibility()
+        }
+
+        override fun onViewDetachedFromWindow(view: View) {
+            view.viewTreeObserver.takeIf { it.isAlive }
+                ?.removeOnWindowVisibilityChangeListener(windowVisibilityListener)
+            publishSceneVisibility(false)
+        }
+    }
+    private val visibilityLifecycle = object : DefaultLifecycleObserver {
+        // Activity.onResume runs before AndroidX reaches RESUMED. When the other
+        // display owns focus, a window focus callback need not follow.
+        override fun onResume(owner: LifecycleOwner) = updateSceneVisibility()
+        override fun onPause(owner: LifecycleOwner) = publishSceneVisibility(false)
+    }
     private var hostData by mutableStateOf(JSONObject())
     private var dataSubscription: Closeable? = null
     private val hostDataEpoch = ModDataSubscriptionEpoch()
@@ -65,6 +110,31 @@ class ModConfigActivity : ComponentActivity() {
     private var pendingActionBinding: String? = null
     private var pendingActionModId: String? = null
     private var registeredActionDrafts by mutableStateOf<Map<String, RegisteredActionRef>>(emptyMap())
+    private var castSource: ModCastActivationSource? = null
+    private var castSourceRegistration: Closeable? = null
+    private lateinit var castState: ModConfigCastState
+    private val castConsumer = object : ModHostEffectRouter.Consumer {
+        override fun request(mod: InstalledMod, eventId: String, effect: ModRearOpenEffect) {
+            throw IllegalStateException("E_CAST_SOURCE_UNSUPPORTED_EFFECT")
+        }
+        override fun requestCastWithResult(mod: InstalledMod, eventId: String, effect: ModCastStartEffect,
+            source: ModCastActivationSource, complete: (Boolean, String?, JSONObject?) -> Unit) {
+            runOnUiThread { launchCastPicker(mod, effect, source, complete) }
+        }
+        override fun completeCast(source: ModCastActivationSource, requestId: String, accepted: Boolean, code: String?, result: JSONObject?) {
+            runOnUiThread {
+                if (source != castSource || castState.requestId != requestId ||
+                    !ModCastActivationSources.isRegistered(source, modId)) return@runOnUiThread
+                val completion = castState.completion ?: return@runOnUiThread
+                castState.completion = null
+                castState.requestId = null
+                completion(accepted, code, result)
+            }
+        }
+        override fun isCastRequestCurrent(source: ModCastActivationSource, requestId: String): Boolean =
+            source == castSource && castState.requestId == requestId && castState.completion != null &&
+                ModCastActivationSources.isRegistered(source, modId)
+    }
     private val actionPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
         val id = data?.getStringExtra(RegisteredActionsActivity.EXTRA_SELECTED_REF_ID)
@@ -91,6 +161,7 @@ class ModConfigActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        castState = ViewModelProvider(this)[ModConfigCastState::class.java]
         modId = intent.getStringExtra("mod_id").orEmpty()
         val restoredPickerState = ModConfigPickerState.read(savedInstanceState)
         pendingActionBinding = restoredPickerState.pendingBinding
@@ -101,6 +172,8 @@ class ModConfigActivity : ComponentActivity() {
         packageInfo = runCatching { ModPackageStore.find(this, modId) }.getOrNull()
         model = ModPackageStore.model(this, modId)
         val verified = packageInfo ?: run { finish(); return }
+        castSource = castState.sourceFor(modId)
+        castSourceRegistration = ModCastActivationSources.register(requireNotNull(castSource), castConsumer)
         broker.open(modId, mainExecutor, brokerListener)
         miuixContent {
             val active = packageInfo
@@ -110,7 +183,13 @@ class ModConfigActivity : ComponentActivity() {
             } else {
                 ModNativeScene(active, active.settingsScene, current.state, current.config, hostData, false,
                     onBack = ::finish,
-                    onEvent = { if (!broker.submitUserEvent(active.id, it)) error = "操作暂未提交：输入队列已满或设置页正在切换，请稍后重试" },
+                    onEvent = {
+                        if (!sceneVisible || isFinishing || isDestroyed ||
+                            !broker.submitUserEvent(active.id, it, castSource = castSource)
+                        ) {
+                            error = "操作暂未提交：输入队列已满、设置页不可见或场景正在切换，请稍后重试"
+                        }
+                    },
                     visible = sceneVisible,
                     onRegisteredAction = ::invokeRegisteredAction,
                     registeredActionDrafts = registeredActionDrafts,
@@ -123,36 +202,32 @@ class ModConfigActivity : ComponentActivity() {
                     notice = error.ifBlank { null })
             }
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        updateSceneVisibility()
-        broker.setObserverVisible(modId, brokerListener, sceneVisible)
-        startHostData()
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        updateSceneVisibility()
-    }
-
-    override fun onPause() {
-        sceneVisible = false
-        if (modId.isNotEmpty()) broker.setObserverVisible(modId, brokerListener, false)
-        stopHostData()
-        super.onPause()
+        val decor = window.decorView
+        visibilityDecor = decor
+        decor.addOnAttachStateChangeListener(decorAttachListener)
+        if (decor.isAttachedToWindow) decorAttachListener.onViewAttachedToWindow(decor)
+        lifecycle.addObserver(visibilityLifecycle)
     }
 
     private fun updateSceneVisibility() {
-        val decor = window.decorView
-        sceneVisible = isModConfigSceneVisible(
-            resumed = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED),
-            attached = decor.isAttachedToWindow,
-            shown = decor.isShown,
-            windowVisible = decor.windowVisibility == View.VISIBLE,
+        val decor = visibilityDecor ?: return
+        publishSceneVisibility(
+            isModConfigSceneVisible(
+                resumed = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+                attached = decor.isAttachedToWindow,
+                shown = decor.isShown,
+                windowVisible = decor.windowVisibility == View.VISIBLE,
+                displayId = decor.display?.displayId,
+                closing = isFinishing || isDestroyed,
+            ),
         )
-        if (modId.isNotEmpty()) broker.setObserverVisible(modId, brokerListener, sceneVisible)
+    }
+
+    private fun publishSceneVisibility(visible: Boolean) {
+        if (sceneVisible == visible) return
+        sceneVisible = visible
+        broker.setObserverVisible(modId, brokerListener, visible)
+        if (visible) startHostData() else stopHostData()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -161,8 +236,62 @@ class ModConfigActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        lifecycle.removeObserver(visibilityLifecycle)
+        visibilityDecor?.let { decor ->
+            decor.removeOnAttachStateChangeListener(decorAttachListener)
+            decor.viewTreeObserver.takeIf { it.isAlive }
+                ?.removeOnWindowVisibilityChangeListener(windowVisibilityListener)
+        }
+        visibilityDecor = null
+        publishSceneVisibility(false)
         if (modId.isNotEmpty()) broker.closeObserver(modId, brokerListener)
+        castSourceRegistration?.close()
+        castSourceRegistration = null
+        if (!isChangingConfigurations) {
+            castState.completion?.invoke(false, "E_CAST_SOURCE_STALE", null)
+            castState.completion = null
+            castState.source = null
+            castState.requestId = null
+        }
         super.onDestroy()
+    }
+
+    private fun launchCastPicker(
+        mod: InstalledMod,
+        effect: ModCastStartEffect,
+        source: ModCastActivationSource,
+        complete: (Boolean, String?, JSONObject?) -> Unit,
+    ) {
+        val active = packageInfo
+        val currentSource = castSource
+        if (source != currentSource || !ModCastActivationSources.isRegistered(source, modId) ||
+            !sceneVisible || !isModConfigMainDisplay(display?.displayId) || isFinishing || isDestroyed ||
+            active == null || active.id != mod.id || active.authorFingerprint != mod.authorFingerprint) {
+            complete(false, "E_CAST_SOURCE_STALE", null)
+            return
+        }
+        val installed = ModPackageStore.installed(this, mod.id)
+        val verified = runCatching { ModPackageStore.find(this, mod.id) }.getOrNull()
+        val capability = if (effect.mode == "VIRTUAL") "rear.cast.virtual" else "rear.cast.direct_physical"
+        if (installed == null || !installed.enabled || installed.authorFingerprint != active.authorFingerprint ||
+            verified?.authorFingerprint != active.authorFingerprint || !ModPackageStore.isAuthorTrusted(this, active.authorFingerprint) ||
+            capability !in installed.grantedCapabilities) {
+            complete(false, "E_MOD_REVOKED", null)
+            return
+        }
+        castState.completion?.invoke(false, "E_EFFECT_REPLACED", null)
+        val requestId = UUID.randomUUID().toString()
+        castState.requestId = requestId
+        castState.completion = complete
+        val intent = ModCastForegroundTargetActivity.createIntent(this, effect, source, requestId)
+        try {
+            startActivity(intent, ActivityOptions.makeBasic()
+                .setLaunchDisplayId(android.view.Display.DEFAULT_DISPLAY).toBundle())
+        } catch (_: Exception) {
+            castState.completion = null
+            castState.requestId = null
+            complete(false, "E_TARGET_PICKER_UNAVAILABLE", null)
+        }
     }
 
     private fun startHostData() {
@@ -175,7 +304,9 @@ class ModConfigActivity : ComponentActivity() {
         if (fields.isEmpty()) return
         val owner = core.modDataOwner(modId) ?: return
         dataSubscription = ModHostDataSnapshot.observe(core, owner, fields) { snapshot ->
-            runOnUiThread { if (hostDataEpoch.isCurrent(generation) && !isFinishing && !isDestroyed) hostData = snapshot }
+            runOnUiThread {
+                if (sceneVisible && hostDataEpoch.isCurrent(generation) && !isFinishing && !isDestroyed) hostData = snapshot
+            }
         }
     }
 
@@ -229,3 +360,5 @@ class ModConfigActivity : ComponentActivity() {
     }
 
 }
+
+internal fun isModConfigMainDisplay(displayId: Int?): Boolean = displayId == android.view.Display.DEFAULT_DISPLAY

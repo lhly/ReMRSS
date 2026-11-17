@@ -13,6 +13,13 @@ import android.os.IBinder
 import android.os.Looper
 import android.view.Display
 import android.view.WindowManager
+import android.graphics.Point
+import dev.remrss.scene.geometry.CutoutKnowledge
+import dev.remrss.scene.geometry.PixelInsets
+import dev.remrss.scene.geometry.PixelRect
+import dev.remrss.scene.geometry.SceneRegion
+import dev.remrss.scene.geometry.SceneViewportGeometry
+import dev.remrss.scene.geometry.QuarterTurnSceneContainer
 import org.json.JSONArray
 import org.json.JSONObject
 import top.zainzh.rearscreen.platform.ipc.IRemoteRearPlatformCallback
@@ -82,9 +89,12 @@ class RearClient private constructor(
     @Volatile var contractVersion: String? = null
         private set
     private val connectionGate = ConnectionHandshakeGate<IBinder>(RearPlatformSdk.HOST_CONTRACT_VERSION)
-    @Volatile private var activeBinding: BindingHandle? = null
+    private val activeBinding = ActiveBindingSlot<ServiceBindingHandle<ServiceConnection>>()
     private val dataLock = Any()
     private val dataHandlers = ConcurrentHashMap<String, (RearDataSnapshot) -> Unit>()
+    private val pendingCastResults = ConcurrentHashMap<String, (Result<RearCastSessionHandle>) -> Unit>()
+    private val pendingCastProgress = ConcurrentHashMap<String, (RearCastProgress) -> Unit>()
+    private val pendingCastGates = ConcurrentHashMap<String, CastRequestEpochTerminalGate>()
     private val closedDataIds = ConcurrentHashMap.newKeySet<String>()
     private val pendingData = LinkedHashMap<String, RearDataSnapshot>()
     val isConnected: Boolean get() = currentEpoch.get() != null
@@ -100,16 +110,15 @@ class RearClient private constructor(
         }
     }
 
-    private class BindingHandle(val attemptId: Long, val connection: ServiceConnection) {
-        val unbound = AtomicBoolean(false)
-    }
-
-    private fun newServiceConnection(attemptId: Long): ServiceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, service: IBinder) = handleServiceConnected(attemptId, service)
-        override fun onServiceDisconnected(name: ComponentName) = handleServiceDisconnected(attemptId, name)
-        override fun onBindingDied(name: ComponentName) = invalidateBinding(attemptId, RearSdkErrorCode.BINDING_DIED)
-        override fun onNullBinding(name: ComponentName) = invalidateBinding(attemptId, RearSdkErrorCode.SERVICE_UNAVAILABLE)
-    }
+    private fun newBindingHandle(attemptId: Long): ServiceBindingHandle<ServiceConnection> =
+        ServiceBindingHandle<ServiceConnection>(attemptId).also { binding ->
+            binding.connection = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName, service: IBinder) = handleServiceConnected(binding, service)
+                override fun onServiceDisconnected(name: ComponentName) = handleServiceDisconnected(binding, name)
+                override fun onBindingDied(name: ComponentName) = invalidateBinding(binding, RearSdkErrorCode.BINDING_DIED)
+                override fun onNullBinding(name: ComponentName) = invalidateBinding(binding, RearSdkErrorCode.SERVICE_UNAVAILABLE)
+            }
+        }
 
     private fun handleEvent(epoch: ClientEpoch, eventJson: String) {
         if (closed.get() || currentEpoch.get() !== epoch) return
@@ -117,6 +126,7 @@ class RearClient private constructor(
             RearPlatformEvent("error", data = JSONObject().put("code", "E_INVALID_STATE").put("message", it.message))
         }
         eventDispatcher.dispatch(epoch) {
+            deliverCastResult(epoch, event)
             if (event.type == "data") {
                 val id = event.data.optString("subscriptionId")
                 val snapshot = runCatching { RearDataSnapshot.fromJson(event.data.toString()) }.getOrNull()
@@ -132,7 +142,49 @@ class RearClient private constructor(
         }
     }
 
-    private fun handleServiceConnected(attemptId: Long, binder: IBinder) {
+    private fun deliverCastResult(epoch: ClientEpoch, event: RearPlatformEvent) {
+        if (event.type !in setOf("castStage", "castReady", "castFailed")) return
+        val requestId = event.data.optString("requestId").takeIf(String::isNotEmpty) ?: return
+        val gate = pendingCastGates[requestId] ?: return
+        if (event.type == "castStage") {
+            val stage = runCatching { RearCastProgressStage.valueOf(event.data.optString("stage")) }.getOrNull() ?: return
+            gate.dispatch(epoch) {
+                pendingCastProgress[requestId]?.invoke(RearCastProgress(stage, event.data.optString("phase").takeIf(String::isNotEmpty),
+                    event.data.optString("code").takeIf(String::isNotEmpty)))
+            }
+            return
+        }
+        gate.terminate(epoch) {
+            val progress = pendingCastProgress.remove(requestId)
+            pendingCastGates.remove(requestId, gate)
+            val completion = pendingCastResults.remove(requestId) ?: return@terminate
+            when (event.type) {
+                "castReady" -> {
+                val sessionId = event.data.optString("sessionId")
+                val generation = event.data.optLong("generation")
+                if (sessionId.isBlank() || generation <= 0L) {
+                    progress?.invoke(RearCastProgress(RearCastProgressStage.FAILED, "BACKEND", "E_INVALID_STATE"))
+                    completion(Result.failure(IllegalStateException("E_INVALID_STATE")))
+                } else {
+                    progress?.invoke(RearCastProgress(RearCastProgressStage.READY))
+                    completion(Result.success(RearCastSessionHandle(sessionId, generation)))
+                }
+                }
+                "castFailed" -> {
+                val code = event.data.optString("code", "E_CAST_FAILED")
+                val phase = event.data.optString("phase", when (code) {
+                    "E_USER_CANCELLED", "E_TICKET_STALE" -> "CONFIRMATION"
+                    else -> "BACKEND"
+                })
+                progress?.invoke(RearCastProgress(RearCastProgressStage.FAILED, phase, code))
+                completion(Result.failure(IllegalStateException(code)))
+                }
+            }
+        }
+    }
+
+    private fun handleServiceConnected(binding: ServiceBindingHandle<ServiceConnection>, binder: IBinder) {
+        val attemptId = binding.attemptId
         val candidate: IRemoteRearPlatformService = IRemoteRearPlatformService.Stub.asInterface(binder)
         var replacedEpoch: ClientEpoch? = null
         val acceptedBinding = connectionGate.serviceConnected(attemptId, binder) {
@@ -145,14 +197,17 @@ class RearClient private constructor(
             }
         if (!acceptedBinding) return
         replacedEpoch?.let(::releaseEpochAsync)
+        replacedEpoch?.let { failPendingCastRequests(it, RearSdkErrorCode.SERVICE_DISCONNECTED) }
         try {
             worker.execute {
                 val result: Result<String> = runCatching { candidate.getContractVersion() }
                 val contract: String? = result.getOrNull()
+                var publishedEpoch: ClientEpoch? = null
                 val transition: ConnectionHandshakeGate.Transition = connectionGate.handshakeCompleted(
                     attemptId, binder, contract,
                     publish = {
                         val epoch = ClientEpoch(epochIds.incrementAndGet(), attemptId, binder, candidate)
+                        publishedEpoch = epoch
                         currentEpoch.set(epoch)
                         contractVersion = contract
                         connectionStateVersion.incrementAndGet()
@@ -160,19 +215,22 @@ class RearClient private constructor(
                     clear = { currentEpoch.set(null); contractVersion = null }
                 ) ?: return@execute
                 if (RearContractNegotiation.failureCode(contract) != null && transition.wasBound) {
-                    activeBinding?.takeIf { it.attemptId == attemptId }?.let(::unbindService)
+                    unbindService(binding)
                 }
+                val expectedEpoch = publishedEpoch
                 transition.completion?.let { completion ->
-                    val expectedEpoch = currentEpoch.get()
-                    completeConnectionWaiters(completion) { expectedEpoch != null && currentEpoch.get() === expectedEpoch }
+                    completeConnectionWaiters(completion) {
+                        connectionWaiterCompletionIsCurrent(completion.result, expectedEpoch, currentEpoch.get())
+                    }
                 }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
-            activeBinding?.takeIf { it.attemptId == attemptId }?.let(::unbindService)
+            unbindService(binding)
         }
     }
 
-    private fun handleServiceDisconnected(attemptId: Long, name: ComponentName) {
+    private fun handleServiceDisconnected(binding: ServiceBindingHandle<ServiceConnection>, name: ComponentName) {
+        val attemptId = binding.attemptId
         var retiredEpoch: ClientEpoch? = null
         val transition = connectionGate.disconnected(attemptId) {
             currentEpoch.get()?.takeIf { it.bindAttemptId == attemptId }?.let { current ->
@@ -182,6 +240,7 @@ class RearClient private constructor(
             contractVersion = null
         }
         retiredEpoch?.let(::releaseEpochAsync)
+        retiredEpoch?.let { failPendingCastRequests(it, RearSdkErrorCode.SERVICE_DISCONNECTED) }
         transition?.completion?.let(::completeConnectionWaiters)
         if (transition != null) {
             val stateVersion = connectionStateVersion.incrementAndGet()
@@ -193,15 +252,17 @@ class RearClient private constructor(
     }
 
     /** A dead/null binding will not reconnect by itself; release it so a later connect() can retry. */
-    private fun invalidateBinding(attemptId: Long, code: String) {
+    private fun invalidateBinding(binding: ServiceBindingHandle<ServiceConnection>, code: String) {
+        val attemptId = binding.attemptId
         var retiredEpoch: ClientEpoch? = null
         val transition = connectionGate.bindingFailed(attemptId, code) {
             retiredEpoch = currentEpoch.getAndSet(null)
             contractVersion = null
         } ?: return
         retiredEpoch?.let(::releaseEpochAsync)
-        if (transition.wasBound) activeBinding?.takeIf { it.attemptId == attemptId }?.let(::unbindService)
-        activeBinding?.takeIf { it.attemptId == attemptId }?.let { activeBinding = null }
+        retiredEpoch?.let { failPendingCastRequests(it, code) }
+        if (transition.wasBound) unbindService(binding)
+        activeBinding.clearIfCurrent(binding)
         transition.completion?.let(::completeConnectionWaiters)
         val stateVersion = connectionStateVersion.incrementAndGet()
         eventExecutor.execute {
@@ -210,11 +271,12 @@ class RearClient private constructor(
         }
     }
 
-    private fun unbindService(binding: BindingHandle) {
-        if (!binding.unbound.compareAndSet(false, true)) return
-        Handler(Looper.getMainLooper()).post {
-            try { appContext.unbindService(binding.connection) } catch (_: RuntimeException) { /* Already unbound or service process died. */ }
-            if (activeBinding === binding) activeBinding = null
+    private fun unbindService(binding: ServiceBindingHandle<ServiceConnection>) {
+        binding.unbound.request {
+            Handler(Looper.getMainLooper()).post {
+                try { appContext.unbindService(binding.connection) } catch (_: RuntimeException) { /* Already unbound or service process died. */ }
+                activeBinding.clearIfCurrent(binding)
+            }
         }
     }
 
@@ -224,13 +286,31 @@ class RearClient private constructor(
             "rear-sdk-release-${epoch.id}").apply { isDaemon = true }.start()
     }
 
+    private fun failPendingCastRequests(epoch: ClientEpoch, code: String) {
+        pendingCastGates.entries.toList().forEach { (id, gate) ->
+            if (gate.isOpenFor(epoch)) failCastRequest(id, epoch, "CONNECTION", code)
+        }
+    }
+
+    private fun failCastRequest(requestId: String, epoch: ClientEpoch, phase: String, code: String, cause: Throwable? = null) {
+        val gate = pendingCastGates[requestId] ?: return
+        gate.terminate(epoch) {
+            pendingCastGates.remove(requestId, gate)
+            pendingCastProgress.remove(requestId)?.invoke(RearCastProgress(RearCastProgressStage.FAILED, phase, code))
+            pendingCastResults.remove(requestId)?.let {
+                dispatchResult(it, Result.failure(IllegalStateException(code, cause)))
+            }
+        }
+    }
+
     private fun completeConnectionWaiters(completion: ConnectionHandshakeGate.Completion, isCurrent: () -> Boolean = { true }) {
         completion.waiters.forEach { waiter -> resultDispatcher.dispatch(waiter, completion.result, isCurrent) }
     }
 
     fun connect(callback: (Result<Unit>) -> Unit) {
-        when (val decision = connectionGate.connect(callback)) {
-            ConnectionHandshakeGate.ConnectDecision.AlreadyConnected -> dispatchResult(callback, Result.success(Unit))
+        when (val decision = connectionGate.connect({ currentEpoch.get() }, callback)) {
+            is ConnectionHandshakeGate.ConnectDecision.AlreadyConnected ->
+                dispatchResult(callback, Result.success(Unit)) { currentEpoch.get() === decision.identity }
             ConnectionHandshakeGate.ConnectDecision.AwaitingBinding -> Unit
             is ConnectionHandshakeGate.ConnectDecision.Rejected -> {
                 val code = decision.code
@@ -238,14 +318,16 @@ class RearClient private constructor(
             }
             is ConnectionHandshakeGate.ConnectDecision.StartBinding -> {
                 val attemptId = decision.attemptId
-                val binding = BindingHandle(attemptId, newServiceConnection(attemptId))
-                activeBinding = binding
+                val binding = newBindingHandle(attemptId)
+                activeBinding.publish(binding)
                 if (!connectionGate.shouldStartBinding(attemptId)) {
-                    if (activeBinding === binding) activeBinding = null
+                    activeBinding.clearIfCurrent(binding)
                     return
                 }
                 val intent = Intent().setComponent(ComponentName(hostPackageName, HOST_SERVICE))
                 val didBind = attemptBinding({ appContext.bindService(intent, binding.connection, Context.BIND_AUTO_CREATE) }) {
+                    // Context may register a dispatcher before returning false or throwing; release only this attempt.
+                    unbindService(binding)
                     val transition = connectionGate.bindingFailed(attemptId, RearSdkErrorCode.SERVICE_UNAVAILABLE) {
                         currentEpoch.set(null)
                         contractVersion = null
@@ -255,13 +337,70 @@ class RearClient private constructor(
                 val bindResult = connectionGate.bindingCompleted(attemptId, didBind)
                 bindResult.completion?.let(::completeConnectionWaiters)
                 if (bindResult.unbind) unbindService(binding)
-                if (!didBind && activeBinding === binding) activeBinding = null
+                if (!didBind) activeBinding.clearIfCurrent(binding)
             }
         }
     }
 
     fun queryCapabilities(callback: (Result<RearCapabilities>) -> Unit) = onBinder(callback) { service ->
         RearCapabilities.fromJson(service.service.queryCapabilities(callerPackage))
+    }
+
+    /** One-shot callback completes only when the host verifies both output and input readiness. */
+    fun openCastSession(activity: Activity, request: RearCastRequest, callback: (Result<RearCastSessionHandle>) -> Unit) =
+        openCastSession(activity, request, {}, callback)
+
+    /** Opens a host-confirmed Cast session and reports request/confirmation/backend stages separately. */
+    fun openCastSession(
+        activity: Activity,
+        request: RearCastRequest,
+        onProgress: (RearCastProgress) -> Unit,
+        callback: (Result<RearCastSessionHandle>) -> Unit
+    ) {
+        if (Looper.myLooper() != Looper.getMainLooper() || activity.isFinishing || activity.isDestroyed || !activity.hasWindowFocus()) {
+            onProgress(RearCastProgress(RearCastProgressStage.FAILED, "FOREGROUND", RearSdkErrorCode.FOREGROUND_REQUIRED))
+            dispatchResult(callback, Result.failure(IllegalStateException(RearSdkErrorCode.FOREGROUND_REQUIRED))); return
+        }
+        val requestId = java.util.UUID.randomUUID().toString()
+        val requestEpoch = currentEpoch.get()
+        if (requestEpoch == null) {
+            onProgress(RearCastProgress(RearCastProgressStage.FAILED, "PREPARATION", RearSdkErrorCode.NOT_CONNECTED))
+            dispatchResult(callback, Result.failure(IllegalStateException(RearSdkErrorCode.NOT_CONNECTED)))
+            return
+        }
+        val requestGate = CastRequestEpochTerminalGate(requestEpoch)
+        pendingCastGates[requestId] = requestGate
+        pendingCastResults[requestId] = callback
+        pendingCastProgress[requestId] = onProgress
+        onProgress(RearCastProgress(RearCastProgressStage.PREPARING))
+        val payload = request.toJson().toString()
+        onBinder<PendingIntent>({ result -> result.fold(onSuccess = { pending ->
+            if (!requestGate.isOpenFor(requestEpoch)) return@fold
+            if (activity.isFinishing || activity.isDestroyed || !activity.hasWindowFocus()) {
+                failCastRequest(requestId, requestEpoch, "FOREGROUND", RearSdkErrorCode.FOREGROUND_REQUIRED)
+            } else try {
+                pendingCastProgress[requestId]?.invoke(RearCastProgress(RearCastProgressStage.WAITING_CONFIRMATION))
+                activity.startIntentSenderForResult(pending.intentSender, CAST_REQUEST_CODE, null, 0, 0, 0)
+            } catch (error: IntentSender.SendIntentException) {
+                val code = "E_CONFIRMATION_LAUNCH"
+                failCastRequest(requestId, requestEpoch, "CONFIRMATION", code, error)
+            }
+        }, onFailure = { error ->
+            val code = error.message?.substringBefore(':')?.takeIf { it.startsWith("E_") } ?: "E_PREPARE_FAILED"
+            failCastRequest(requestId, requestEpoch, "PREPARATION", code, error)
+        }) }) { service ->
+            if (service !== requestEpoch || currentEpoch.get() !== requestEpoch) throw IllegalStateException(RearSdkErrorCode.SERVICE_DISCONNECTED)
+            service.service.requestCastActivation(callerPackage, requestId, payload, service.callback)
+        }
+    }
+
+    fun queryCastSession(handle: RearCastSessionHandle, callback: (Result<RearCastSessionSnapshot>) -> Unit) = onBinder(callback) { service ->
+        RearCastSessionSnapshot.fromJson(service.service.queryCastSession(callerPackage, handle.sessionId, handle.generation, service.callback))
+    }
+
+    /** Close only the caller-owned opaque session; this never targets the current foreground task. */
+    fun closeCastSession(handle: RearCastSessionHandle, callback: (Result<RearOperationResult>) -> Unit = {}) = onBinder(callback) { service ->
+        RearOperationResult.fromJson(service.service.closeCastSession(callerPackage, handle.sessionId, handle.generation, service.callback))
     }
 
     /**
@@ -375,7 +514,21 @@ class RearClient private constructor(
     }
 
     /** Call from a focused foreground Activity after the app's own user action. The SDK never starts the host UI from a service. */
-    fun requestSceneActivation(activity: Activity, request: RearSceneRequest, callback: (Result<Unit>) -> Unit = {}) {
+    fun requestSceneActivation(activity: Activity, request: RearSceneRequest, callback: (Result<Unit>) -> Unit = {}) =
+        requestSceneActivationJson(activity, request.toJson().toString(), callback)
+
+    /** New explicit quarter-turn overload; unlike the old method, orientation never follows display.rotation. */
+    fun requestSceneActivation(
+        activity: Activity,
+        request: RearSceneRequest,
+        contentRotation: Int,
+        callback: (Result<Unit>) -> Unit = {}
+    ) {
+        require(contentRotation in 0..3) { "contentRotation must be a quarter-turn in 0..3" }
+        requestSceneActivationJson(activity, request.toJson(contentRotation).toString(), callback)
+    }
+
+    private fun requestSceneActivationJson(activity: Activity, requestJson: String, callback: (Result<Unit>) -> Unit) {
         if (Looper.myLooper() != Looper.getMainLooper() || activity.isFinishing || activity.isDestroyed || !activity.hasWindowFocus()) {
             dispatchResult(callback, Result.failure(IllegalStateException(RearSdkErrorCode.FOREGROUND_REQUIRED)))
             return
@@ -396,7 +549,7 @@ class RearClient private constructor(
                 },
                 onFailure = { callback(Result.failure(it)) }
             )
-        }) { service -> service.service.requestSceneActivation(callerPackage, request.toJson().toString(), service.callback) }
+        }) { service -> service.service.requestSceneActivation(callerPackage, requestJson, service.callback) }
     }
 
     /** Call from the target Activity after its first real layout, not before setContent/onCreate. */
@@ -417,10 +570,51 @@ class RearClient private constructor(
         ) }
     }
 
+    /** Explicit-orientation Scene report. Call only after the matching QuarterTurnSceneContainer is laid out. */
+    fun reportWindowReady(
+        activity: Activity,
+        launchTicket: String,
+        region: RearRegion,
+        container: QuarterTurnSceneContainer,
+        revision: Long = 1L,
+        callback: (Result<RearOperationResult>) -> Unit
+    ) {
+        val report = runCatching {
+            RearViewportReporter.capture(activity, revision, region.toSceneRegion(), container)
+        }.getOrElse { dispatchResult(callback, Result.failure(it)); return }
+        submitWindowReady(activity, launchTicket, report, callback)
+    }
+
+    private fun submitWindowReady(activity: Activity, launchTicket: String, report: RearWindowReport, callback: (Result<RearOperationResult>) -> Unit) {
+        onBinder({ result ->
+            val operation = result.getOrNull()
+            if (operation?.error == "E_STALE_SESSION" && !activity.isFinishing && !activity.isDestroyed)
+                activity.runOnUiThread { if (!activity.isFinishing && !activity.isDestroyed) activity.finishAndRemoveTask() }
+            callback(result)
+        }) { service -> RearOperationResult.fromJson(
+            service.service.reportSceneWindowReady(callerPackage, launchTicket, report.toJson().toString(), service.callback)
+        ) }
+    }
+
     fun reportViewport(activity: Activity, sessionId: String, generation: Long, revision: Long, callback: (Result<RearOperationResult>) -> Unit) {
         val report = runCatching { RearViewportReporter.capture(activity, revision) }.getOrElse {
             dispatchResult(callback, Result.failure(it)); return
         }
+        reportViewport(sessionId, generation, report, callback)
+    }
+
+    /** Explicit-orientation viewport report; no legacy display-rotation inference is used. */
+    fun reportViewport(
+        activity: Activity,
+        sessionId: String,
+        generation: Long,
+        region: RearRegion,
+        container: QuarterTurnSceneContainer,
+        revision: Long,
+        callback: (Result<RearOperationResult>) -> Unit
+    ) {
+        val report = runCatching { RearViewportReporter.capture(activity, revision, region.toSceneRegion(), container) }
+            .getOrElse { dispatchResult(callback, Result.failure(it)); return }
         reportViewport(sessionId, generation, report, callback)
     }
 
@@ -465,7 +659,12 @@ class RearClient private constructor(
         dataHandlers.clear()
         closedDataIds.clear()
         synchronized(dataLock) { pendingData.clear() }
-        val binding = transition.attemptId?.let { id -> activeBinding?.takeIf { it.attemptId == id } }
+        pendingCastResults.keys.toList().forEach { id ->
+            val gate = pendingCastGates[id] ?: return@forEach
+            val epochForRequest = epoch ?: return@forEach
+            if (gate.isOpenFor(epochForRequest)) failCastRequest(id, epochForRequest, "SDK", RearSdkErrorCode.CLIENT_CLOSED)
+        }
+        val binding = transition.attemptId?.let { id -> activeBinding.current()?.takeIf { it.attemptId == id } }
         ClientCloseSequence(
             operations = operationQueue,
             unbind = { if (transition.wasBound && binding != null) unbindService(binding) },
@@ -484,8 +683,8 @@ class RearClient private constructor(
         operationQueue.submit(epoch, { action(epoch) }, callback)
     }
 
-    private fun <T> dispatchResult(callback: (Result<T>) -> Unit, result: Result<T>) {
-        resultDispatcher.dispatch(callback, result)
+    private fun <T> dispatchResult(callback: (Result<T>) -> Unit, result: Result<T>, isCurrent: () -> Boolean = { true }) {
+        resultDispatcher.dispatch(callback, result, isCurrent)
     }
 
     companion object {
@@ -495,6 +694,7 @@ class RearClient private constructor(
         const val ACTIVATION_REQUEST_CODE = 0x524D
         const val DATA_CONSENT_REQUEST_CODE = 0x524E
         const val NOTIFICATION_CONSENT_REQUEST_CODE = 0x524F
+        const val CAST_REQUEST_CODE = 0x5250
 
         /** For local host-debug variants; production callers should use the default constructor. */
         @JvmStatic fun forHostPackage(
@@ -584,13 +784,151 @@ data class RearSceneRequest(
     val keepVisible: Boolean = true,
     val requiredCapabilities: Set<CapabilityRequirement> = emptySet()
 ) {
-    internal fun toJson() = JSONObject().put("component", component.flattenToString()).put("region", region.name)
+    internal fun toJson(contentRotation: Int? = null) = JSONObject().put("component", component.flattenToString()).put("region", region.name)
         .put("keepVisible", keepVisible).put("requiredCapabilities", JSONArray().apply {
-            requiredCapabilities.forEach { put(JSONObject().put("name", it.name).put("minimumVersion", it.minimumVersion)) }
-        })
+            (requiredCapabilities + if (contentRotation != null) setOf(CapabilityRequirement("rear.scene.orientation", 1)) else emptySet())
+                .forEach { put(JSONObject().put("name", it.name).put("minimumVersion", it.minimumVersion)) }
+        }).apply { if (contentRotation != null) {
+            require(contentRotation in 0..3) { "contentRotation must be a quarter-turn in 0..3" }
+            put("contentRotation", contentRotation)
+        } }
+}
+
+/** Placement supplied only by the host for the exact approved Scene launch ticket. */
+data class RearSceneLaunchPlacement(val region: RearRegion, val contentRotation: Int?)
+
+object RearSceneLaunchMetadata {
+    const val EXTRA_REGION = "remrss_scene_region"
+    const val EXTRA_EXPLICIT_ROTATION = "remrss_scene_explicit_rotation"
+    const val EXTRA_CONTENT_ROTATION = "remrss_scene_content_rotation"
+
+    /** Legacy launches have no placement extras and retain the old SAFE/default viewport semantics. */
+    @JvmStatic fun read(intent: Intent): RearSceneLaunchPlacement? {
+        if (!intent.hasExtra(EXTRA_REGION) && !intent.hasExtra(EXTRA_EXPLICIT_ROTATION) && !intent.hasExtra(EXTRA_CONTENT_ROTATION)) return null
+        val region = when (intent.getStringExtra(EXTRA_REGION)) {
+            "CAMERA_SAFE" -> RearRegion.CAMERA_SAFE
+            "FULL" -> RearRegion.FULL
+            else -> throw IllegalArgumentException("E_INVALID_STATE: Scene launch region")
+        }
+        val explicit = intent.getBooleanExtra(EXTRA_EXPLICIT_ROTATION, false)
+        val turn = intent.getIntExtra(EXTRA_CONTENT_ROTATION, 0)
+        require(turn in 0..3 && (explicit || turn == 0)) { "E_INVALID_STATE: Scene launch content rotation" }
+        return RearSceneLaunchPlacement(region, if (explicit) turn else null)
+    }
 }
 
 enum class RearRegion { CAMERA_SAFE, FULL }
+
+enum class RearCastMode { VIRTUAL, DIRECT_PHYSICAL }
+enum class RearCastPresentationKind { MANAGED_VIEWPORT, SYSTEM_MANAGED }
+
+enum class RearCastProgressStage { PREPARING, WAITING_CONFIRMATION, CONFIRMED, COMMIT_ACCEPTED, READY, FAILED }
+
+/** Public Cast request progress; phase/code contain only stable stage diagnostics, never target identity. */
+data class RearCastProgress(
+    val stage: RearCastProgressStage,
+    val phase: String? = null,
+    val errorCode: String? = null
+)
+
+/** The Cast request addresses only the task containing its initiating foreground Activity. */
+data class RearCastRequest(
+    val mode: RearCastMode,
+    /** Null preserves the target app's saved region. */
+    val region: RearRegion? = null,
+    /** Null preserves the app's saved presentation orientation; 0..3 explicitly sets quarter turns. */
+    val contentRotation: Int? = null,
+    val requestedDensityDpi: Int? = null
+) {
+    init {
+        require(contentRotation == null || contentRotation in 0..3) { "contentRotation must be a quarter-turn in 0..3" }
+        require(requestedDensityDpi == null || requestedDensityDpi in 72..1000) { "requestedDensityDpi must be 72..1000" }
+        require(mode != RearCastMode.DIRECT_PHYSICAL || (region == null && contentRotation == null && requestedDensityDpi == null)) {
+            "Direct physical projection does not control region, content rotation or density"
+        }
+    }
+
+    internal fun toJson() = JSONObject()
+        .put("selector", "CURRENT_FOREGROUND").put("mode", mode.name)
+        .apply {
+            region?.let { put("region", if (it == RearRegion.FULL) "FULL" else "SAFE") }
+            contentRotation?.let { put("contentRotation", it) }
+            requestedDensityDpi?.let { put("requestedDensityDpi", it) }
+        }
+}
+
+/** Opaque owner-scoped handle created only after the host verifies real output and input readiness. */
+data class RearCastSessionHandle(val sessionId: String, val generation: Long) {
+    init { require(sessionId.isNotBlank() && generation > 0L) }
+}
+
+data class RearCastSessionSnapshot(
+    val handle: RearCastSessionHandle,
+    val state: String,
+    val mode: RearCastMode,
+    val region: RearRegion,
+    val contentRotation: Int,
+    val presentationKind: RearCastPresentationKind,
+    val failureCode: String? = null,
+    val appliedViewport: RearCastAppliedViewport? = null
+) {
+    companion object {
+        fun fromJson(json: String): RearCastSessionSnapshot {
+            val root = JSONObject(json)
+            if (!root.optBoolean("success", false)) throw IllegalStateException(root.optString("error", "E_SERVICE_UNAVAILABLE"))
+            return RearCastSessionSnapshot(
+                RearCastSessionHandle(root.getString("sessionId"), root.getLong("generation")),
+                root.getString("state"), RearCastMode.valueOf(root.getString("mode")),
+                if (root.getString("region") == "FULL") RearRegion.FULL else RearRegion.CAMERA_SAFE,
+                root.getInt("contentRotation"), RearCastPresentationKind.valueOf(root.getString("presentationKind")),
+                root.optString("failureCode").takeUnless(String::isEmpty),
+                root.optJSONObject("viewport")?.let(RearCastAppliedViewport::fromJson)
+            )
+        }
+    }
+}
+
+/** Coordinates are actual applied viewport pixels; the input matrix retains rotation cross-terms. */
+data class RearCastAppliedViewport(
+    val revision: Long,
+    val rearDisplayId: Int,
+    val region: RearRegion,
+    val densityDpi: Int,
+    val leftPx: Int,
+    val topPx: Int,
+    val widthPx: Int,
+    val heightPx: Int,
+    val bufferWidthPx: Int,
+    val bufferHeightPx: Int,
+    val displayRotation: Int,
+    val contentRotation: Int,
+    val windowLeftPx: Int,
+    val windowTopPx: Int,
+    val windowWidthPx: Int,
+    val windowHeightPx: Int,
+    val inputScaleX: Float,
+    val inputSkewX: Float,
+    val inputTranslateX: Float,
+    val inputSkewY: Float,
+    val inputScaleY: Float,
+    val inputTranslateY: Float
+) {
+    companion object {
+        fun fromJson(json: JSONObject) = RearCastAppliedViewport(
+            json.getLong("revision"), json.getInt("rearDisplayId"),
+            if (json.getString("region") == "FULL") RearRegion.FULL else RearRegion.CAMERA_SAFE,
+            json.getInt("densityDpi"), json.getInt("leftPx"), json.getInt("topPx"),
+            json.getInt("widthPx"), json.getInt("heightPx"), json.getInt("bufferWidthPx"), json.getInt("bufferHeightPx"),
+            json.getInt("displayRotation"), json.getInt("contentRotation"),
+            json.getInt("windowLeftPx"), json.getInt("windowTopPx"),
+            json.getInt("windowWidthPx"), json.getInt("windowHeightPx"), json.getDouble("inputScaleX").toFloat(),
+            json.getDouble("inputSkewX").toFloat(), json.getDouble("inputTranslateX").toFloat(),
+            json.getDouble("inputSkewY").toFloat(), json.getDouble("inputScaleY").toFloat(), json.getDouble("inputTranslateY").toFloat()
+        )
+    }
+}
+
+private fun RearRegion.toSceneRegion() = if (this == RearRegion.FULL) SceneRegion.FULL else SceneRegion.SAFE
 
 /** Applies the window-level half of a requested Scene keep-visible lease. */
 object RearSceneWindowPolicy {
@@ -797,7 +1135,10 @@ data class RearWindowReport(
     val renderBufferPx: Pair<Int, Int>?,
     val displayRotation: Int,
     val contentRotation: Int,
-    val inputTransform: FloatArray
+    val inputTransform: FloatArray,
+    val region: SceneRegion = SceneRegion.SAFE,
+    val cutoutKnowledge: CutoutKnowledge = CutoutKnowledge.UNKNOWN,
+    val cutoutBoundsPx: List<PixelRect> = emptyList(),
 ) {
     internal fun toJson() = JSONObject().put("component", component.flattenToString()).put("taskId", taskId).put("viewport", JSONObject().apply {
         put("revision", revision).put("displayId", displayId)
@@ -808,6 +1149,8 @@ data class RearWindowReport(
         put("windowPx", size(windowPx)).put("windowDp", JSONObject().put("width", windowDp.first).put("height", windowDp.second))
         put("densityDpi", densityDpi).put("renderBufferPx", size(renderBufferPx))
         put("displayRotation", displayRotation).put("contentRotation", contentRotation)
+        put("region", region.name).put("cutoutKnowledge", cutoutKnowledge.name)
+        put("cutoutBoundsPx", JSONArray().apply { cutoutBoundsPx.forEach { put(JSONObject().put("left", it.left).put("top", it.top).put("right", it.right).put("bottom", it.bottom)) } })
         put("inputTransform", JSONObject().put("scaleX", inputTransform[0]).put("skewX", inputTransform[1]).put("translateX", inputTransform[2])
             .put("skewY", inputTransform[3]).put("scaleY", inputTransform[4]).put("translateY", inputTransform[5]))
     })
@@ -815,8 +1158,28 @@ data class RearWindowReport(
 
 object RearViewportReporter {
     /** Uses the actual target window and display at first layout; no guessed display ID or copied physical DPI. */
-    fun capture(activity: Activity, revision: Long): RearWindowReport {
+    fun capture(activity: Activity, revision: Long): RearWindowReport = captureLegacy(activity, revision)
+
+    /** Report only after the caller's native scene container has completed the matching measured layout. */
+    fun capture(activity: Activity, revision: Long, region: SceneRegion, container: QuarterTurnSceneContainer): RearWindowReport {
+        require(container.hasAppliedContentLayout) { "E_SCENE_CONTENT_NOT_APPLIED" }
+        val report = captureMeasured(activity, revision, region, container.contentRotation, preserveLegacyTransform = false)
+        val location = IntArray(2).also(container::getLocationOnScreen)
+        require(location[0] == report.contentBoundsPx[0] && location[1] == report.contentBoundsPx[1] &&
+            container.width == report.contentBoundsPx[2] - report.contentBoundsPx[0] &&
+            container.height == report.contentBoundsPx[3] - report.contentBoundsPx[1]) { "E_SCENE_CONTENT_VIEWPORT_MISMATCH" }
+        return report
+    }
+
+    private fun captureLegacy(activity: Activity, revision: Long): RearWindowReport {
+        @Suppress("DEPRECATION") val display = if (android.os.Build.VERSION.SDK_INT >= 30) activity.display ?: activity.windowManager.defaultDisplay
+        else activity.windowManager.defaultDisplay
+        return captureMeasured(activity, revision, SceneRegion.SAFE, display.rotation, preserveLegacyTransform = true)
+    }
+
+    private fun captureMeasured(activity: Activity, revision: Long, region: SceneRegion, contentRotation: Int, preserveLegacyTransform: Boolean): RearWindowReport {
         require(revision > 0) { "revision must be positive" }
+        require(contentRotation in 0..3) { "contentRotation must be a quarter-turn in 0..3" }
         val decor = activity.window.decorView
         val width = decor.width
         val height = decor.height
@@ -826,28 +1189,46 @@ object RearViewportReporter {
         val metrics = activity.resources.displayMetrics
         val densityDpi = metrics.densityDpi
         val windowXy = IntArray(2).also(decor::getLocationOnScreen)
-        val safeInsets = cameraSafeInsets(activity)
-        val safeLeft = safeInsets[0]
-        val safeTop = safeInsets[1]
-        val safeRight = safeInsets[2]
-        val safeBottom = safeInsets[3]
-        val cutout = if (android.os.Build.VERSION.SDK_INT >= 28) decor.rootWindowInsets?.displayCutout else null
-        if (cutout == null) android.util.Log.w("RearViewportReporter", "ROM did not report a verifiable display-cutout safe area")
+        val rootInsets = decor.rootWindowInsets
+        val cutout = if (android.os.Build.VERSION.SDK_INT >= 28) rootInsets?.displayCutout else null
+        val cutoutInsets = if (android.os.Build.VERSION.SDK_INT < 28 || rootInsets == null) null else PixelInsets(
+            cutout?.safeInsetLeft?.coerceIn(0, width) ?: 0,
+            cutout?.safeInsetTop?.coerceIn(0, height) ?: 0,
+            cutout?.safeInsetRight?.coerceIn(0, width) ?: 0,
+            cutout?.safeInsetBottom?.coerceIn(0, height) ?: 0,
+        )
+        if (cutoutInsets == null) android.util.Log.w("RearViewportReporter", "ROM did not report a verifiable display-cutout safe area")
         val modeSize = runCatching {
             if (android.os.Build.VERSION.SDK_INT >= 23) display.mode.let { it.physicalWidth to it.physicalHeight }
             else null
         }.getOrNull()
-        val contentBounds = SceneContentGeometry.safeBounds(
-            windowXy[0], windowXy[1], width, height, safeLeft, safeTop, safeRight, safeBottom
+        val displaySize = Point().also(display::getRealSize)
+        val cutoutBounds = cutout?.boundingRects.orEmpty().map { PixelRect(it.left, it.top, it.right, it.bottom) }
+            .map { PixelRect(it.left - windowXy[0], it.top - windowXy[1], it.right - windowXy[0], it.bottom - windowXy[1]) }
+        val geometry = SceneViewportGeometry.fromWindow(
+            displayBounds = PixelRect(0, 0, displaySize.x, displaySize.y),
+            windowBounds = PixelRect(windowXy[0], windowXy[1], windowXy[0] + width, windowXy[1] + height),
+            cutoutInsets = cutoutInsets,
+            cutoutBoundsInWindow = cutoutBounds,
+            cutoutKnowledge = when { cutoutInsets == null -> CutoutKnowledge.UNKNOWN; cutout != null -> CutoutKnowledge.KNOWN_PRESENT; else -> CutoutKnowledge.KNOWN_NONE },
+            displayRotation = display.rotation,
+            contentRotation = contentRotation,
+            effectiveDensityDpi = densityDpi,
+            physicalModeWidthPx = modeSize?.first,
+            physicalModeHeightPx = modeSize?.second,
         )
+        val contentBounds = geometry.contentBounds(region)
+        require(!contentBounds.isEmpty) { "E_SCENE_CONTENT_REGION_EMPTY" }
+        val legacyInsets = cameraSafeInsets(activity)
         return RearWindowReport(
             component = ComponentName(activity, activity.javaClass), taskId = activity.taskId,
             revision = revision, displayId = display.displayId, physicalDisplayPx = modeSize,
-            contentBoundsPx = contentBounds, windowPx = width to height,
+            contentBoundsPx = intArrayOf(contentBounds.left, contentBounds.top, contentBounds.right, contentBounds.bottom), windowPx = width to height,
             windowDp = (width * 160f / densityDpi) to (height * 160f / densityDpi),
             densityDpi = densityDpi, renderBufferPx = null,
-            displayRotation = display.rotation, contentRotation = display.rotation,
-            inputTransform = SceneContentGeometry.inputTransform(safeLeft, safeTop)
+            displayRotation = display.rotation, contentRotation = contentRotation,
+            inputTransform = if (preserveLegacyTransform) SceneContentGeometry.inputTransform(legacyInsets[0], legacyInsets[1]) else geometry.windowInputMatrix(region),
+            region = region, cutoutKnowledge = geometry.cutoutKnowledge, cutoutBoundsPx = cutoutBounds
         )
     }
 
@@ -870,11 +1251,13 @@ object RearViewportReporter {
 internal object SceneContentGeometry {
     fun safeBounds(x: Int, y: Int, width: Int, height: Int, left: Int, top: Int, right: Int, bottom: Int): IntArray {
         require(width > 0 && height > 0)
-        val safeLeft = left.coerceIn(0, width)
-        val safeTop = top.coerceIn(0, height)
-        val safeRight = right.coerceIn(0, width - safeLeft)
-        val safeBottom = bottom.coerceIn(0, height - safeTop)
-        return intArrayOf(x + safeLeft, y + safeTop, x + width - safeRight, y + height - safeBottom)
+        val window = PixelRect(x, y, x + width, y + height)
+        val safe = SceneViewportGeometry.fromWindow(
+            displayBounds = window, windowBounds = window,
+            cutoutInsets = PixelInsets(left.coerceAtLeast(0), top.coerceAtLeast(0), right.coerceAtLeast(0), bottom.coerceAtLeast(0)),
+            displayRotation = 0, effectiveDensityDpi = 1
+        ).safeBounds
+        return intArrayOf(safe.left, safe.top, safe.right, safe.bottom)
     }
 
     fun inputTransform(safeLeft: Int, safeTop: Int) = floatArrayOf(

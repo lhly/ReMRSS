@@ -62,4 +62,10 @@ public final class RearCastViewport {
         return physicalWidth + "," + physicalHeight + "," + rotation + "," + density + ":"
                 + left + "," + top + "," + right + "," + bottom;
     }
+    /** Physical safe-area identity, intentionally independent of render density/buffer choice. */
+    public boolean samePhysicalArea(RearCastViewport other) {
+        return other != null && physicalWidth == other.physicalWidth && physicalHeight == other.physicalHeight
+                && rotation == other.rotation && left == other.left && top == other.top
+                && right == other.right && bottom == other.bottom;
+    }
 }

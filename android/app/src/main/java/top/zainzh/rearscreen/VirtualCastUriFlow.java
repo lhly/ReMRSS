@@ -29,8 +29,13 @@ final class VirtualCastUriFlow {
                 Log.i(TAG, "cast_dispatch mode=virtual action=return state=" + before.optString("state", "unknown"));
                 return stop(context, remote, uri, before);
             }
-            if ("running".equals(before.optString("state")) || "starting".equals(before.optString("state"))) {
+            if ("starting".equals(before.optString("state"))) {
                 Log.i(TAG, "cast_gate mode=virtual stage=session state=" + before.optString("state") + " result=busy");
+                toast(context, "虚拟背屏已在投放，请先停止当前投放");
+                return true;
+            }
+            if ("running".equals(before.optString("state"))) {
+                Log.i(TAG, "cast_gate mode=virtual stage=session result=busy");
                 toast(context, "虚拟背屏已在投放，请先停止当前投放");
                 return true;
             }
@@ -116,6 +121,7 @@ final class VirtualCastUriFlow {
             return true; // Never silently fall through into the physical rear path on failure.
         }
     }
+
     private static String awaitForeground(Context context, ITaskService remote) throws Exception {
         CurrentMainTaskSelector.Result result = CurrentMainTaskSelector.await(
                 displayId -> remote.getDisplayCastOccupancy(displayId), context.getPackageName(), 4000, 100);
@@ -130,6 +136,12 @@ final class VirtualCastUriFlow {
             long ownerGeneration = keeperOwnsTask ? RearScreenKeeperService.physicalCastOwnerGeneration() : 0L;
             if (physicalTask == null)
                 physicalTask = LegacyDisplayOccupancy.physicalProjectionTask(context, remote, RearDisplay.requireId());
+            if (LegacyDisplayOccupancy.hasControlledPhysicalProjectionRecord(context)) {
+                // This receiver is exported; query parameters cannot authorize teardown of a
+                // controlled physical owner. Recovery is available only through its private,
+                // generation-bound Keeper notification action.
+                throw new IllegalStateException("直接投放恢复请使用 ReMRSS 通知中的“返回主屏”操作");
+            }
             if (physicalTask != null) {
                 String[] parts = physicalTask.split(":", 2);
                 int taskId = parts.length == 2 ? Integer.parseInt(parts[1]) : -1;
@@ -140,6 +152,8 @@ final class VirtualCastUriFlow {
                                 context, taskId, RearDisplay.requireId()));
                 return stopDirect(context, remote, uri, physicalTask, keeperOwnsTask, launcherDisabled, ownerGeneration);
             }
+            if (LegacyDisplayOccupancy.hasPhysicalProjection(context, remote, RearDisplay.requireId()))
+                throw new IllegalStateException("无法确认直接投放归属，请稍后重试");
             String rear = remote.getForegroundAppOnDisplay(RearDisplay.requireId());
             if (rear != null && !rear.startsWith("com.xiaomi.subscreencenter:") && !rear.startsWith(context.getPackageName() + ":")) return false;
             Log.i(TAG, "return_noop");

@@ -24,14 +24,23 @@ class OwnedNotificationQueueTest {
         val pending = CopyOnWriteArrayList<Pending>()
         val cancelled = CopyOnWriteArrayList<Pair<Int, NotificationEndReason>>()
         val suspended = CopyOnWriteArrayList<Int>()
-        var deferNext = false
+        data class DeferredGate(val entered: CountDownLatch, val release: CountDownLatch)
+        val deferredGates = CopyOnWriteArrayList<DeferredGate>()
         @Volatile var deferredCount = 0
+        @Volatile var presentCalls = 0
         override fun present(
             item: OwnedNotificationItem,
             onDisplayed: () -> Unit,
             onEnded: (NotificationEndReason) -> Unit,
         ): PresentationResult {
-            if (deferNext) { deferNext = false; deferredCount++; return PresentationResult.Deferred }
+            presentCalls++
+            val gate = deferredGates.firstOrNull()?.also { deferredGates.remove(it) }
+            if (gate != null) {
+                gate.entered.countDown()
+                check(gate.release.await(3, TimeUnit.SECONDS)) { "deferred render was not released" }
+                deferredCount++
+                return PresentationResult.Deferred
+            }
             val handle = pending.size
             pending += Pending(item, onDisplayed, onEnded, handle)
             return PresentationResult.Started(handle)
@@ -197,6 +206,7 @@ class OwnedNotificationQueueTest {
         val queue = OwnedNotificationQueue(renderer, { _, request ->
             NotificationPolicyResult.Allowed(if (hideText) request.copy(text = "private") else request)
         }, { it.isCurrent() }, { 100L })
+        var deferredGatesForCleanup: List<FakePresentation.DeferredGate> = emptyList()
         try {
             val owner = owner("sample.privacy", 21)
             val events = CopyOnWriteArrayList<NotificationEvent>()
@@ -209,14 +219,36 @@ class OwnedNotificationQueueTest {
             await { renderer.cancelled.size == 1 }
             assertEquals(1, renderer.cancelled.size)
 
-            renderer.deferNext = true
+            val gates = List(3) { FakePresentation.DeferredGate(CountDownLatch(1), CountDownLatch(1)) }
+            deferredGatesForCleanup = gates
+            renderer.deferredGates.addAll(gates)
             val queuedOwner = owner("sample.deferred", 22)
             val accepted = queue.publish(queuedOwner, NotificationRequest("deferred", "retry"))
             assertEquals(NotificationSubmitStatus.ACCEPTED, accepted.status)
-            await { renderer.deferredCount == 1 }
+
+            // Repeated notifications during one render coalesce into one retry.
+            assertTrue("renderer entered first controlled Deferred attempt", gates[0].entered.await(2, TimeUnit.SECONDS))
             queue.presentationAvailable()
-            await { renderer.pending.size == 2 }
-        } finally { queue.close() }
+            queue.presentationAvailable()
+            gates[0].release.countDown()
+
+            // A distinct availability during the retry's Deferred attempt earns its own retry.
+            assertTrue("renderer entered second controlled Deferred attempt", gates[1].entered.await(2, TimeUnit.SECONDS))
+            queue.presentationAvailable()
+            gates[1].release.countDown()
+
+            // The third Deferred has no new signal and must not self-retry or spin.
+            assertTrue("renderer entered final unsignaled Deferred attempt", gates[2].entered.await(2, TimeUnit.SECONDS))
+            gates[2].release.countDown()
+            await { renderer.deferredCount == 3 }
+            Thread.sleep(150)
+            assertEquals("the privacy render plus three controlled deferred attempts are the only renderer calls", 4, renderer.presentCalls)
+            assertEquals("no unsignaled Deferred attempt is presented", 1, renderer.pending.size)
+        } finally {
+            renderer.deferredGates.forEach { it.release.countDown() }
+            deferredGatesForCleanup.forEach { it.release.countDown() }
+            queue.close()
+        }
     }
 
     @Test fun reconnectDoesNotResetIdentityRateLimit() {

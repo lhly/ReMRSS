@@ -116,6 +116,10 @@ android {
         }
     }
 
+    // Compatibility APK uses the exact Release-only stubs and manifest removals. It must not
+    // inherit Debug-only .remodule sources or expose their legacy settings Activity.
+    sourceSets.getByName("compatibility").manifest.srcFile("src/release/AndroidManifest.xml")
+
 }
 
 /** The virtual display input reader is packaged as an extracted executable for each Android ABI. */
@@ -163,6 +167,10 @@ val prepareLegalAssets = tasks.register<PrepareLegalAssets>("prepareLegalAssets"
     outputDirectory.set(layout.buildDirectory.dir("generated/legalAssets"))
 }
 androidComponents.onVariants { variant ->
+    variant.sources.kotlin?.addStaticSourceDirectory(file("../../scene-geometry/src/main/kotlin").absolutePath)
+    if (variant.buildType == "compatibility") {
+        variant.sources.kotlin?.addStaticSourceDirectory(file("src/release/kotlin").absolutePath)
+    }
     variant.sources.assets?.addGeneratedSourceDirectory(prepareLegalAssets) { it.outputDirectory }
     variant.sources.jniLibs?.addGeneratedSourceDirectory(inputReader) { it.outputDirectory }
     variant.packaging.jniLibs.useLegacyPackaging.set(true)

@@ -41,6 +41,10 @@ public final class RearDisplay {
         } catch (Exception e) { trustedId = -1; trustedUnique = ""; lastRead = 0; }
     }
     public static boolean isRear(int display) { return display > 0 && display == id(); }
+    /** App-internal facade for the exact OEM launcher identity check used by admission gates. */
+    public static boolean isValidatedRearLauncherForAdmission(String flattenedComponent, int userId) {
+        return RearSystemBridge.isValidatedRearLauncher(flattenedComponent, userId);
+    }
     public static int requireId() {
         int id = id();
         if (id < 1) throw new IllegalStateException("REAR_DISPLAY_UNAVAILABLE: " + reason);
