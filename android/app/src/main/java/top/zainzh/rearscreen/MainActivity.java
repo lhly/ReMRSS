@@ -111,15 +111,13 @@ public class MainActivity extends androidx.activity.ComponentActivity {
                 if (!nativeUi.navigateBack()) finish();
             }
         });
+        // Reuse existing authorization only. The connection button owns interactive setup.
         bindTaskService();
 
         // 保存实例
         currentInstance = this;
 
         Shizuku.addRequestPermissionResultListener(requestPermissionResultListener);
-        
-        // 自动检查并请求Shizuku权限
-        checkAndRequestShizukuPermission();
         
         // 处理通知Intent
         handleIncomingIntent(getIntent());
@@ -231,24 +229,6 @@ public class MainActivity extends androidx.activity.ComponentActivity {
         }).start();
     }
     
-    private void checkAndRequestShizukuPermission() {
-        if (TaskServiceManager.isRoot(this)) {
-            bindTaskService(); TaskServiceManager.startSelected(this); return;
-        }
-        try {
-            if (Shizuku.pingBinder()) {
-                if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                    Shizuku.requestPermission(0);
-                } else {
-                    bindTaskService();
-                }
-            } else {
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to check Shizuku permission", e);
-        }
-    }
-    
     @Override
     protected void onDestroy() {
         taskServiceReleased = true;
@@ -329,7 +309,14 @@ public class MainActivity extends androidx.activity.ComponentActivity {
                 switch (call.method) {
                     case "requestShizukuPermission": {
                         try {
-                            Shizuku.requestPermission(0);
+                            if (Shizuku.pingBinder()
+                                    && Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                                if (!Shizuku.shouldShowRequestPermissionRationale()) Shizuku.requestPermission(0);
+                                else if (!PermissionChecks.openSettings(this, PermissionChecks.Item.SHIZUKU)) {
+                                    result.error("SETTINGS", getString(R.string.ui_permission_settings_unavailable), null);
+                                    break;
+                                }
+                            }
                             result.success(null);
                         } catch (Exception e) {
                             result.error("ERROR", e.getMessage(), null);
@@ -819,12 +806,7 @@ public class MainActivity extends androidx.activity.ComponentActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        
-        if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            } else {
-            }
-        }
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE && nativeUi != null) nativeUi.refreshStatus();
     }
     
     /**

@@ -51,7 +51,7 @@ final class SettingsController {
     private String diagnosticsReport;
     private ReleaseUpdateChecker.Result updateResult;
     private int page;
-    private boolean destroyed, resumed, restoringServices, permissionPrompted;
+    private boolean destroyed, resumed, restoringServices;
     private boolean checkingDisplay, displayRead, remoteBusy;
     private String lastStatus = "";
     private int currentDpi, rotation;
@@ -415,6 +415,10 @@ final class SettingsController {
                     new String[]{s("go_to_settings"), s("cancel")}, new Runnable[]{() -> action("openNotificationListenerSettings"), null});
             return;
         }
+        if (enabled && needsPrivilegeToEnable(method) && offerConnectionIfNeeded()) {
+            updateHome();
+            return;
+        }
         boolean previous = preferences.getBoolean(key);
         String other = enabled && key.equals("keep_screen_on_enabled") ? "always_wakeup_enabled"
                 : enabled && key.equals("always_wakeup_enabled") ? "keep_screen_on_enabled" : null;
@@ -442,6 +446,31 @@ final class SettingsController {
 
     boolean listenerGranted() {
         return PermissionChecks.listenerGranted(activity);
+    }
+
+    private static boolean needsPrivilegeToEnable(String method) {
+        switch (method) {
+            case "setAlwaysWakeUpEnabled":
+            case "toggleChargingService":
+            case "toggleNotificationService":
+                return true;
+            default:
+                // Preferences for an existing session can be configured before starting it.
+                return false;
+        }
+    }
+
+    /** Called only by user actions that start a feature, not by restoration or cleanup. */
+    private boolean offerConnectionIfNeeded() {
+        if (TaskServiceManager.canConnect(activity)) return false;
+        refreshStatus();
+        if (TaskServiceManager.state(activity) == PrivilegeBackend.State.SWITCHING) {
+            toast(s("privilege_switching"));
+            return true;
+        }
+        modal.show(s("permission_required"), s(connectionSummary),
+                new String[]{s(connectionAction), s("cancel")}, new Runnable[]{this::connect, null});
+        return true;
     }
 
     void refreshStatus() {
@@ -479,13 +508,6 @@ final class SettingsController {
             if (preferences.getBoolean("charging_animation_enabled")) actionQuiet("toggleChargingService", argument("enabled", true));
             if (preferences.getBoolean("always_wakeup_enabled")) actionQuiet("setAlwaysWakeUpEnabled", argument("enabled", true));
             if (preferences.getBoolean("notification_service_enabled") && listenerGranted()) actionQuiet("startNotificationService", null);
-        }
-        if (authorized && !permissionPrompted) {
-            permissionPrompted = true;
-            if (!preferences.getBoolean("native_notification_prompted")) {
-                preferences.putBoolean("native_notification_prompted", true);
-                actionQuiet("requestNotificationPermission", null);
-            }
         }
         updateHome();
     }
@@ -592,7 +614,7 @@ final class SettingsController {
 
     private void showDpi() {
         numberDialog("dpi", s("dpi_settings"), s("dpi_range"), currentDpi > 0 ? currentDpi : 300, 1, Integer.MAX_VALUE, value -> {
-            if (remoteBusy) return;
+            if (remoteBusy || offerConnectionIfNeeded()) return;
             remoteBusy = true; updateHome(); toast(s("saving"));
             activity.runAction("setRearDpi", argument("dpi", value), (result, error) -> {
                 remoteBusy = false;
@@ -604,7 +626,7 @@ final class SettingsController {
                 } else toast(error == null ? s("dpi_set_failed") : error);
             });
         }, () -> {
-            if (remoteBusy) return;
+            if (remoteBusy || offerConnectionIfNeeded()) return;
             remoteBusy = true; updateHome(); toast(s("saving"));
             activity.runAction("resetRearDpi", null, (result, error) -> {
                 remoteBusy = false;
@@ -617,7 +639,7 @@ final class SettingsController {
     }
 
     private void setRotation(int target) {
-        if (remoteBusy || checkingDisplay) return;
+        if (remoteBusy || checkingDisplay || offerConnectionIfNeeded()) return;
         remoteBusy = true; updateHome();
         Map<String, Object> arguments = argument("displayId", RearDisplay.id()); arguments.put("rotation", target);
         activity.runAction("setDisplayRotation", arguments, (value, error) -> {

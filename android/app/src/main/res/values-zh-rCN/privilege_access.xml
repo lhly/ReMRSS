@@ -17,7 +17,7 @@
     <string name="privilege_switch_failed">旧控制服务尚未完成清理，暂时无法切换。请稍后重试。</string>
     <string name="privilege_service_unavailable">控制服务尚未就绪，请打开 ReMRSS 检查当前权限来源并连接。</string>
     <string name="privilege_not_connected">控制服务未连接</string>
-    <string name="privilege_permission_help">背屏控制使用当前选择的权限来源；Root 模式需要在 root 管理器中授权此应用。</string>
+    <string name="privilege_permission_help">选择 Root 后，背屏切换、截图、录屏、通知和充电动画都使用 Root。需要连接时，在 Root 管理器中允许 ReMRSS。</string>
     <string name="privilege_tutorial_root">也可以使用 Root 模式：在首页连接状态卡选择“权限来源 → Root”，点击“授权并连接”，并在 root 管理器中允许当前安装的 ReMRSS。正式版与调试版需要分别授权。Root 不可用时可手动切回 Shizuku；进行中的投屏、录屏或截图结束后才能切换。</string>
     <string name="privilege_root_permission">Root 权限</string>
 </resources>

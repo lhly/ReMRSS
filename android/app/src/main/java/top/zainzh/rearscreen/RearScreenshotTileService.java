@@ -41,6 +41,7 @@ public class RearScreenshotTileService extends TileService {
                 return;
             }
             try {
+                if (TilePermissionPrompt.needsConnection(this)) return;
                 Intent intent = new Intent(this, UriCommandService.class)
                         .setData(Uri.parse(BuildConfig.URI_SCHEME + "://screenshot"))
                         .putExtra("fromQuickSettings", true);

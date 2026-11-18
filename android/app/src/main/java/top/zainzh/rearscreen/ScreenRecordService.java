@@ -16,7 +16,6 @@
 package top.zainzh.rearscreen;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -34,6 +33,7 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -44,6 +44,8 @@ import android.widget.LinearLayout;
 import android.widget.ImageView;
 import android.widget.Toast;
 import androidx.core.app.NotificationCompat;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 背屏录屏服务
@@ -62,7 +64,9 @@ public class ScreenRecordService extends Service {
     private View floatingView;
     private View recordButton;
     private ImageView closeButton;
-    private boolean isRecording = false;
+    private volatile boolean isRecording;
+    // Finish stop/cleanup before releasing the privileged connection, even if the overlay is gone.
+    private final ExecutorService recorder = Executors.newSingleThreadExecutor();
     private String currentVideoPath;
     private int recordPid = -1; // 录屏进程ID
     private Handler wakeupHandler = new Handler(android.os.Looper.getMainLooper());
@@ -96,31 +100,31 @@ public class ScreenRecordService extends Service {
         Log.d(TAG, "═══════════════════════════════════════");
         Log.d(TAG, "📹 ScreenRecordService onCreate");
         
-        // 创建通知渠道
-        createNotificationChannel();
-        
-        // 绑定TaskService
-        bindTaskService();
-        
         // 启动前台通知
+        RearScreenKeeperService.createServiceNotification(this); // Ensure the shared channel exists on a fresh install.
         startForeground(NOTIFICATION_ID, buildNotification());
         Log.d(TAG, "✓ 前台Service已启动");
-        
-        // 显示悬浮窗
-        try {
-            showFloatingWindow();
-        } catch (Exception e) {
-            Log.e(TAG, "❌ 显示悬浮窗失败", e);
-            e.printStackTrace();
-            Toast.makeText(this, "显示悬浮窗失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
-        }
-        
-        Log.d(TAG, "═══════════════════════════════════════");
     }
     
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY; // 被杀后自动重启
+        if (floatingView != null) return START_STICKY;
+        // Permission can be revoked between the tile click and service creation, or before a restart.
+        if (Settings.canDrawOverlays(this)) {
+            try {
+                showFloatingWindow();
+                if (floatingView != null) {
+                    bindTaskService();
+                    return START_STICKY;
+                }
+            } catch (RuntimeException error) {
+                floatingView = null;
+                Log.w(TAG, "Recording controls unavailable", error);
+            }
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
+        return START_NOT_STICKY;
     }
     
     @Override
@@ -130,10 +134,6 @@ public class ScreenRecordService extends Service {
     
     private void bindTaskService() {
         if (!taskServiceReleased) TaskServiceManager.acquire(this, taskServiceConnection);
-    }
-    
-    private void createNotificationChannel() {
-        // 不创建新通道，使用ReMRSS内核服务的通道（已经存在）
     }
     
     private Notification buildNotification() {
@@ -259,7 +259,7 @@ public class ScreenRecordService extends Service {
                 // 录制时隐藏关闭按钮
                 closeButton.setVisibility(View.GONE);
             } else {
-                stopRecordingInternal(recordButton, closeButton);
+                stopRecordingInternal(closeButton);
                 updateRecordButtonState(recordButton, false);
                 // 注意：关闭按钮会在停止录制完成后才显示（在stopRecordingInternal的Toast回调中）
             }
@@ -380,7 +380,7 @@ public class ScreenRecordService extends Service {
         
         // 等待连接（最多3秒）
         int attempts = 0;
-        while (taskService == null && attempts < 30) {
+        while (taskService == null && !taskServiceReleased && attempts < 30) {
             try {
                 Thread.sleep(100);
             } catch (InterruptedException e) {
@@ -404,6 +404,7 @@ public class ScreenRecordService extends Service {
     private final Runnable wakeupRearScreenRunnable = new Runnable() {
         @Override
         public void run() {
+            if (taskServiceReleased) return;
             if (isRecording && taskService != null) {
                 try {
                     // 向当前背屏发送WAKEUP唤醒信号
@@ -446,7 +447,8 @@ public class ScreenRecordService extends Service {
      * 开始录制
      */
     private void startRecording() {
-        new Thread(() -> {
+        recorder.execute(() -> {
+            if (taskServiceReleased || recordPid > 0 || isRecording) return;
             // 确保TaskService已连接
             if (!ensureTaskServiceConnected()) {
                 Log.e(TAG, "TaskService未连接");
@@ -455,6 +457,7 @@ public class ScreenRecordService extends Service {
                 });
                 return;
             }
+            if (taskServiceReleased) return;
             
             // 启动录制前先发送一次keycode wakeup到背屏
             try {
@@ -587,6 +590,7 @@ public class ScreenRecordService extends Service {
                 
                 // 更新通知和Toast
                 new Handler(Looper.getMainLooper()).post(() -> {
+                    if (taskServiceReleased) return;
                     Notification notification = buildNotification();
                     NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
                     if (nm != null) {
@@ -606,96 +610,56 @@ public class ScreenRecordService extends Service {
                     Toast.makeText(this, "录屏失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
                 });
             }
-        }).start();
+        });
     }
     
     /**
      * 停止录制（带按钮引用，用于更新状态）
      */
-    private void stopRecordingInternal(final View recordButton, final View closeButton) {
-        if (!isRecording) {
+    private void stopRecordingInternal(final View closeButton) {
+        recorder.execute(() -> finishRecording(closeButton));
+    }
+
+    private void finishRecording(final View closeButton) {
+        if (recordPid <= 0) return;
+        if (!ensureTaskServiceConnected()) {
+            Log.e(TAG, "Cannot stop recording: control service disconnected");
+            new Handler(Looper.getMainLooper()).post(() ->
+                    Toast.makeText(this, "服务未就绪，无法停止录制", Toast.LENGTH_SHORT).show());
             return;
         }
-        
-        new Thread(() -> {
-            // 确保TaskService连接（主动重连）
-            if (!ensureTaskServiceConnected()) {
-                Log.e(TAG, "❌ 停止录制失败：TaskService未连接");
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    Toast.makeText(this, "服务未就绪，无法停止录制", Toast.LENGTH_SHORT).show();
-                });
-                return;
-            }
-            
-            try {
-                if (recordPid > 0) {
-                    Log.d(TAG, "→ 停止录屏进程 (PID=" + recordPid + ")");
-                    
-                    // 发送SIGINT信号停止录制（优雅停止）
-                    String killCmd = PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 2);
-                    boolean killed = taskService.executeShellCommand(killCmd);
-                    
-                    if (killed) {
-                        Log.d(TAG, "✓ SIGINT信号已发送");
-                    } else {
-                        Log.w(TAG, "⚠ SIGINT失败，尝试SIGTERM");
-                        taskService.executeShellCommand(PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 15));
-                    }
-                    
-                    Thread.sleep(1000); // 等待进程优雅退出并保存文件
-                    
-                    isRecording = false;
-                    recordPid = -1;
-                    
-                    // 停止背屏持续唤醒
-                    stopRearScreenWakeup();
-                    
-                    // 验证文件是否存在
-                    String checkFile = "ls -lh " + currentVideoPath;
-                    String fileInfo = taskService.executeShellCommandWithResult(checkFile);
-                    Log.d(TAG, "文件信息: " + fileInfo);
-                    
-                    // 刷新媒体库
-                    String refreshCmd = "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + currentVideoPath;
-                    taskService.executeShellCommand(refreshCmd);
-                    Log.d(TAG, "✓ 媒体库已刷新");
-                    
-                    // 更新通知和Toast
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        Notification notification = buildNotification();
-                        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                        if (nm != null) {
-                            nm.notify(NOTIFICATION_ID, notification);
-                        }
-                        
-                        if (fileInfo != null && !fileInfo.contains("No such file")) {
-                            Toast.makeText(this, "录屏已保存到Movies文件夹", Toast.LENGTH_LONG).show();
-                        } else {
-                            Toast.makeText(this, "录屏可能失败，请检查Movies文件夹", Toast.LENGTH_LONG).show();
-                        }
-                        
-                        // 显示关闭按钮
-                        if (closeButton != null) {
-                            closeButton.setVisibility(View.VISIBLE);
-                        }
-                    });
-                    
-                    Log.d(TAG, "✅ 录屏已停止并保存: " + currentVideoPath);
+        ITaskService remote = taskService;
+        if (remote == null) return;
+
+        try {
+            boolean stopped = remote.executeShellCommand(
+                    PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 2));
+            if (!stopped) remote.executeShellCommand(
+                    PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 15));
+
+            Thread.sleep(1000); // Allow screenrecord to finish writing the video.
+            isRecording = false;
+            recordPid = -1;
+            stopRearScreenWakeup();
+
+            String fileInfo = remote.executeShellCommandWithResult("ls -lh " + currentVideoPath);
+            remote.executeShellCommand(
+                    "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + currentVideoPath);
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (!taskServiceReleased) {
+                    NotificationManager manager = getSystemService(NotificationManager.class);
+                    if (manager != null) manager.notify(NOTIFICATION_ID, buildNotification());
+                    if (closeButton != null) closeButton.setVisibility(View.VISIBLE);
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "停止录屏失败", e);
-                e.printStackTrace();
-            }
-        }).start();
+                String message = fileInfo != null && !fileInfo.contains("No such file")
+                        ? "录屏已保存到Movies文件夹" : "录屏可能失败，请检查Movies文件夹";
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            });
+        } catch (Exception error) {
+            Log.e(TAG, "停止录屏失败", error);
+        }
     }
-    
-    /**
-     * 停止录制（兼容方法）
-     */
-    private void stopRecording() {
-        stopRecordingInternal(null, null);
-    }
-    
+
     @Override
     public void onDestroy() {
         taskServiceReleased = true;
@@ -704,10 +668,15 @@ public class ScreenRecordService extends Service {
         // 停止背屏持续唤醒
         stopRearScreenWakeup();
         
-        // 停止录制
-        if (isRecording) {
-            stopRecording();
-        }
+        recorder.execute(() -> {
+            try {
+                finishRecording(null);
+            } finally {
+                TaskServiceManager.release(taskServiceConnection);
+                taskService = null;
+            }
+        });
+        recorder.shutdown();
         
         // 移除悬浮窗
         if (floatingView != null && windowManager != null) {
@@ -718,10 +687,6 @@ public class ScreenRecordService extends Service {
                 Log.e(TAG, "移除悬浮窗失败", e);
             }
         }
-        
-        // 解绑TaskService
-        TaskServiceManager.release(taskServiceConnection);
-        taskService = null;
         
         instance = null;
         Log.d(TAG, "⚠ Service已销毁");

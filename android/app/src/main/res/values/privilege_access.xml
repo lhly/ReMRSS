@@ -17,7 +17,7 @@
     <string name="privilege_switch_failed">The previous control service could not finish cleanup. Try again later.</string>
     <string name="privilege_service_unavailable">The control service is not ready. Open ReMRSS to check the selected privilege source and connect.</string>
     <string name="privilege_not_connected">Control service disconnected</string>
-    <string name="privilege_permission_help">Rear screen control uses the selected privilege source. Root mode requires permission for this app in your root manager.</string>
+    <string name="privilege_permission_help">In Root mode, switching displays, screenshots, recording, rear notifications and charging animations use Root. When you connect, allow ReMRSS in your root manager.</string>
     <string name="privilege_tutorial_root">Alternatively, select Privilege source → Root on the home connection card, tap the authorization button, and allow the installed ReMRSS app in your root manager. Release and debug apps need separate authorization. You can switch back to Shizuku manually. End active casting, recording and screenshots before switching.</string>
     <string name="privilege_root_permission">Root access</string>
 </resources>

@@ -1,7 +1,6 @@
 package top.zainzh.rearscreen;
 
 import android.app.Instrumentation;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
@@ -21,6 +20,9 @@ import org.junit.Test;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
@@ -62,10 +64,7 @@ public class RecordingOverlayTest {
         appop = matcher.find() ? matcher.group(1) : "default";
         shell("appops set " + context.getPackageName() + " SYSTEM_ALERT_WINDOW allow");
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        if (Build.VERSION.SDK_INT >= 26 && manager.getNotificationChannel("rear_screen_keeper") == null) {
-            manager.createNotificationChannel(new NotificationChannel("rear_screen_keeper", "ReMRSS", NotificationManager.IMPORTANCE_LOW));
-            createdChannel = true;
-        }
+        createdChannel = manager.getNotificationChannel("rear_screen_keeper") == null;
         MainActivity activity = (MainActivity) instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         instrumentation.runOnMainSync(() -> {
             Intent intent = new Intent(activity, ScreenRecordService.class);
@@ -74,6 +73,8 @@ public class RecordingOverlayTest {
         waitFor(() -> field(null, "instance") != null && field(field(null, "instance"), "floatingView") != null);
         service = (ScreenRecordService) field(null, "instance"); panel = (View) field(service, "floatingView");
         waitFor(() -> panel.isAttachedToWindow() && panel.getWidth() > 0);
+        assertNotNull("Recording needs its shared channel even on the first launch",
+                manager.getNotificationChannel("rear_screen_keeper"));
         instrumentation.waitForIdleSync();
     }
     @After public void cleanup() throws Exception {
@@ -137,6 +138,44 @@ public class RecordingOverlayTest {
             assertEquals(service.getString(R.string.ui_recording_close), close.getContentDescription()); close.performClick();
         });
         waitFor(() -> !ScreenRecordService.isRunning()); assertFalse(panel.isAttachedToWindow());
+    }
+
+    @Test public void stoppingOverlayFinalizesInFlightRecordingBeforeDisconnecting() throws Exception {
+        String output = "/storage/emulated/0/Movies/ReMRSS_20261118_120000.mp4";
+        int pid = 4242;
+        String stopCommand = PrivilegedShellArguments.stopRecording(pid, output, 2);
+        CountDownLatch signalled = new CountDownLatch(1);
+        CountDownLatch scanned = new CountDownLatch(1);
+        ITaskService remote = (ITaskService) Proxy.newProxyInstance(ITaskService.class.getClassLoader(),
+                new Class<?>[]{ITaskService.class}, (mock, method, args) -> {
+                    if (method.getName().equals("executeShellCommandWithResult")) return output;
+                    if (!method.getName().equals("executeShellCommand")) throw new AssertionError(method.getName());
+                    if (stopCommand.equals(args[0])) signalled.countDown();
+                    if (("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + output)
+                            .equals(args[0])) scanned.countDown();
+                    return true;
+                });
+        instrumentation.runOnMainSync(() -> {
+            setField("taskService", remote);
+            setField("recordPid", pid);
+            setField("currentVideoPath", output);
+            setField("isRecording", true);
+            context.stopService(new Intent(context, ScreenRecordService.class));
+        });
+        assertTrue("Closing the overlay must signal the recording process", signalled.await(5, TimeUnit.SECONDS));
+        assertTrue("Stopping must index the saved video", scanned.await(5, TimeUnit.SECONDS));
+        waitFor(() -> !ScreenRecordService.isRunning());
+        assertFalse(panel.isAttachedToWindow());
+    }
+
+    private void setField(String name, Object value) {
+        try {
+            Field field = ScreenRecordService.class.getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(service, value);
+        } catch (ReflectiveOperationException error) {
+            throw new AssertionError(error);
+        }
     }
     void inject(long down, long time, int action, float x, float y) {
         MotionEvent event = MotionEvent.obtain(down, time, action, x, y, 0); event.setSource(InputDevice.SOURCE_TOUCHSCREEN);

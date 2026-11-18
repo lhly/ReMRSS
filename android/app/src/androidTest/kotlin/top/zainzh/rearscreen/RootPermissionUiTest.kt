@@ -1,6 +1,9 @@
 package top.zainzh.rearscreen
 
+import android.Manifest
+import android.app.Instrumentation
 import android.content.Intent
+import android.content.pm.PackageManager
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
@@ -9,6 +12,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TestRule
 import org.junit.runners.model.Statement
+import java.util.concurrent.atomic.AtomicInteger
 
 /** UI coverage deliberately never requests su, so this also runs on a non-root emulator. */
 class RootPermissionUiTest {
@@ -18,7 +22,7 @@ class RootPermissionUiTest {
         object : Statement() {
             override fun evaluate() {
                 context.getSharedPreferences(PrivilegeMode.PREFERENCES, 0).edit()
-                    .putString("mode", "ROOT").putBoolean("root_approved", false).commit()
+                    .putString("mode", "ROOT").putBoolean("root_approved", true).commit()
                 val callback = androidx.test.runner.lifecycle.ActivityLifecycleCallback { activity, stage ->
                     if (stage == androidx.test.runner.lifecycle.Stage.CREATED && InstrumentationRegistry.getArguments().getString("orientation") == "landscape")
                         activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -66,15 +70,60 @@ class RootPermissionUiTest {
         val navTop = compose.onNodeWithContentDescription(NativeStrings.get(context, "screen_title")).fetchSemanticsNode().boundsInRoot.top
         assertTrue("Connection action is obscured by navigation", bottom <= navTop)
         capture("root-home")
-        assertFalse(context.getSharedPreferences(PrivilegeMode.PREFERENCES, 0).getBoolean("root_approved", false))
+        assertTrue(context.getSharedPreferences(PrivilegeMode.PREFERENCES, 0).getBoolean("root_approved", false))
+    }
+
+    @Test fun notificationPostingIsRequestedOnlyFromItsOwnAction() {
+        assertEquals(PackageManager.PERMISSION_DENIED, context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS))
+        val requests = AtomicInteger()
+        val monitor = object : Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                if (intent.getStringArrayExtra("android.content.pm.extra.REQUEST_PERMISSIONS_NAMES")
+                        ?.contains(Manifest.permission.POST_NOTIFICATIONS) != true) return null
+                requests.incrementAndGet()
+                return Instrumentation.ActivityResult(0, null)
+            }
+        }
+        instrumentation.addMonitor(monitor)
+        try {
+            compose.runOnIdle {
+                // Simulate a previously authorized backend entering BINDING. No su or Shizuku
+                // process is needed to exercise the real settings lifecycle and permission API.
+                val manager = TaskServiceManager::class.java.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
+                val state = TaskServiceManager::class.java.getDeclaredField("state").apply { isAccessible = true }
+                val settings = MainActivity::class.java.getDeclaredField("nativeUi").apply { isAccessible = true }
+                    .get(compose.activity) as SettingsController
+                val before = state.get(manager)
+                try {
+                    state.set(manager, PrivilegeBackend.State.BINDING)
+                    settings.refreshStatus()
+                } finally {
+                    state.set(manager, before)
+                }
+            }
+            compose.waitForIdle()
+            assertEquals(0, requests.get())
+
+            compose.onNodeWithContentDescription(NativeStrings.get(context, "notifications_title")).performClick()
+            val label = hasText(NativeStrings.get(context, "notification_permission"))
+            compose.onNodeWithTag("notifications_list").performScrollToNode(label)
+            compose.onNode(label).performClick()
+            compose.waitUntil(5_000) { requests.get() == 1 }
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
     }
 
     @Test fun rootPermissionPageExplainsTheSelectedSource() {
         compose.runOnIdle { compose.activity.startActivity(Intent(compose.activity, PermissionChecksActivity::class.java)) }
         compose.onNodeWithText(context.getString(R.string.privilege_permission_help)).assertExists()
+        compose.onNodeWithTag("permission_status_SHIZUKU").assertTextEquals(context.getString(R.string.privilege_not_connected))
         compose.onNodeWithTag("permission_action_SHIZUKU").assertTextEquals(context.getString(R.string.privilege_root_connect))
         compose.onNodeWithText(context.getString(R.string.ui_permission_open_shizuku)).assertDoesNotExist()
         capture("root-permissions")
+        val rootNote = hasText(context.getString(R.string.ui_permissions_root_background_note))
+        compose.onNodeWithTag("permissions_scroll").performScrollToNode(rootNote)
+        compose.onNode(rootNote).assertIsDisplayed()
         compose.onNodeWithTag("permissions_back").performClick()
     }
 }

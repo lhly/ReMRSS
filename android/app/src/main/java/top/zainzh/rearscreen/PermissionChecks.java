@@ -34,7 +34,7 @@ final class PermissionChecks {
         }
     }
 
-    enum State { GRANTED, DENIED, NOT_RUNNING, UNKNOWN, MANUAL, NOT_REQUIRED }
+    enum State { GRANTED, DENIED, NOT_CONNECTED, NOT_RUNNING, UNKNOWN, MANUAL, NOT_REQUIRED }
 
     static State read(Context context, Item item) {
         try {
@@ -43,8 +43,9 @@ final class PermissionChecks {
                     if (TaskServiceManager.isRoot(context)) {
                         PrivilegeBackend.State current = TaskServiceManager.state(context);
                         if (current == PrivilegeBackend.State.READY) return State.GRANTED;
-                        if (current == PrivilegeBackend.State.DENIED || current == PrivilegeBackend.State.NEEDS_AUTHORIZATION
-                                || current == PrivilegeBackend.State.DISCONNECTED) return State.DENIED;
+                        if (current == PrivilegeBackend.State.DENIED) return State.DENIED;
+                        if (current == PrivilegeBackend.State.NEEDS_AUTHORIZATION
+                                || current == PrivilegeBackend.State.DISCONNECTED) return State.NOT_CONNECTED;
                         if (current == PrivilegeBackend.State.UNAVAILABLE) return State.NOT_RUNNING;
                         return State.UNKNOWN;
                     }
@@ -111,6 +112,7 @@ final class PermissionChecks {
         switch (state) {
             case GRANTED: return item == Item.BATTERY ? R.string.ui_permission_exempt : R.string.ui_permission_granted;
             case DENIED: return item == Item.BATTERY ? R.string.ui_permission_not_exempt : R.string.ui_permission_denied;
+            case NOT_CONNECTED: return R.string.privilege_not_connected;
             case NOT_RUNNING: return R.string.ui_permission_not_running;
             case MANUAL: return R.string.ui_permission_manual;
             case NOT_REQUIRED: return R.string.ui_permission_not_required;

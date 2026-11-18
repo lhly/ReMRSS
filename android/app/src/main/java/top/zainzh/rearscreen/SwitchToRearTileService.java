@@ -152,10 +152,7 @@ public class SwitchToRearTileService extends TileService {
             return;
         }
         try {
-            if (!TaskServiceManager.canConnect(this)) {
-                showTemporaryFeedback(getString(R.string.privilege_service_unavailable));
-                return;
-            }
+            if (TilePermissionPrompt.needsConnection(this)) return;
             LegacyDisplayOccupancy.ControlledPhysicalProjectionIdentity controlledOwner =
                     LegacyDisplayOccupancy.controlledPhysicalProjectionForRecovery(this, RearDisplay.requireId());
             LegacyDisplayOccupancy.PhysicalReplacementJournal replacement =

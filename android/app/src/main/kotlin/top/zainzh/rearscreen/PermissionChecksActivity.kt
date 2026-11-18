@@ -59,7 +59,11 @@ class PermissionChecksActivity : ComponentActivity() {
                             }
                         }
                     }
-                    item { Text(getString(R.string.ui_permissions_background_note), fontSize = 13.sp, color = AppPalette.secondary()) }
+                    item {
+                        val note = if (TaskServiceManager.isRoot(this@PermissionChecksActivity))
+                            R.string.ui_permissions_root_background_note else R.string.ui_permissions_background_note
+                        Text(getString(note), fontSize = 13.sp, color = AppPalette.secondary())
+                    }
                 }
             }
         }

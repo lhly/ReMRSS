@@ -3,7 +3,6 @@ package top.zainzh.rearscreen;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -106,13 +105,21 @@ public final class TaskServiceManager {
 
     static PrivilegeBackend.State state(Context context) {
         INSTANCE.initialize(context);
-        if (INSTANCE.state == PrivilegeBackend.State.SWITCHING) return INSTANCE.state;
-        if (INSTANCE.mode == PrivilegeMode.SHIZUKU && INSTANCE.backend.availability() != PrivilegeBackend.State.READY)
-            return INSTANCE.backend.availability();
-        if (INSTANCE.state == PrivilegeBackend.State.AUTHORIZING
-                || INSTANCE.state == PrivilegeBackend.State.BINDING) return INSTANCE.state;
+        PrivilegeBackend.State current = INSTANCE.state;
+        if (current == PrivilegeBackend.State.SWITCHING) return current;
+        boolean shizuku = INSTANCE.mode == PrivilegeMode.SHIZUKU;
+        if (shizuku) {
+            PrivilegeBackend.State available = INSTANCE.backend.availability();
+            if (available != PrivilegeBackend.State.READY) return available;
+        }
+        if (current == PrivilegeBackend.State.AUTHORIZING || current == PrivilegeBackend.State.BINDING) return current;
         if (INSTANCE.binder != null && INSTANCE.binder.isBinderAlive()) return PrivilegeBackend.State.READY;
-        return INSTANCE.mode == PrivilegeMode.ROOT ? INSTANCE.state : INSTANCE.backend.availability();
+        if (shizuku) return PrivilegeBackend.State.READY;
+        // A still-authorized root shell can rebind after the last owner leaves.
+        // A past grant stored in app preferences cannot prove the current manager grant.
+        if (current == PrivilegeBackend.State.DISCONNECTED || current == PrivilegeBackend.State.NEEDS_AUTHORIZATION)
+            return INSTANCE.backend.availability();
+        return current;
     }
     static boolean canConnect(Context context) {
         PrivilegeBackend.State value = state(context);
@@ -125,10 +132,6 @@ public final class TaskServiceManager {
 
     static void requestConnection(Context context) {
         INSTANCE.onMain(() -> { INSTANCE.initialize(context); INSTANCE.failures = 0; INSTANCE.connect(true); });
-    }
-    static void startSelected(Context context) {
-        if (isRoot(context) && context.getSharedPreferences(PrivilegeMode.PREFERENCES, Context.MODE_PRIVATE)
-                .getBoolean("root_approved", false)) requestConnection(context);
     }
 
     static void switchMode(Context context, PrivilegeMode next, Consumer<String> completion) {
@@ -249,8 +252,6 @@ public final class TaskServiceManager {
                 lastConnectionEvent = available.name().toLowerCase(java.util.Locale.ROOT);
                 return;
             }
-            if (mode == PrivilegeMode.ROOT) context.getSharedPreferences(PrivilegeMode.PREFERENCES, Context.MODE_PRIVATE)
-                    .edit().putBoolean("root_approved", true).apply();
             bindRemote();
     }
 

@@ -18,10 +18,11 @@ STUBS = {
  f'{PACKAGE}/RearDisplay.java': 'package top.zainzh.rearscreen; public class RearDisplay {static void attach(ITaskService s){} static int requireId(){return 1;} static int id(){return 1;} }',
 'android/content/ComponentName.java': '''package android.content; public class ComponentName { public ComponentName(String p,String c){} }''',
 'android/content/Context.java': '''package android.content; public class Context {
- public static final java.util.List<Intent> started=new java.util.ArrayList<>();
+ public static final java.util.List<Intent> started=new java.util.ArrayList<>(),stopped=new java.util.ArrayList<>();
  public static final int MODE_PRIVATE=0; public String getPackageName(){return "test.mrss";}
  public Context getApplicationContext(){return this;} private static final java.util.Map<String,SharedPreferences> prefs=new java.util.HashMap<>(); public SharedPreferences getSharedPreferences(String n,int m){return prefs.computeIfAbsent(n,k->new SharedPreferences());}
  public ComponentName startForegroundService(Intent i){started.add(i);return null;} public ComponentName startService(Intent i){started.add(i);return null;}
+ public boolean stopService(Intent i){stopped.add(i);return true;}
  public android.content.pm.PackageManager getPackageManager(){return new android.content.pm.PackageManager();}
  public String getString(int id,Object... args){return "连接超时";}
 }''',
@@ -32,6 +33,8 @@ STUBS = {
  public Editor edit(){return new Editor();} public class Editor { public Editor putString(String k,String v){values.put(k,v);return this;} public Editor putBoolean(String k,boolean v){values.put(k,v);return this;} public void apply(){} }
 }''',
 'org/json/JSONObject.java': '''package org.json; public class JSONObject { private String text; public JSONObject(String s){text=s;} public String optString(String k,String fallback){return text.contains("running")?"running":fallback;} }''',
+f'{PACKAGE}/MainActivity.java': 'package top.zainzh.rearscreen; class MainActivity {static final String EXTRA_NAVIGATION_TARGET="native_navigation_target";}',
+'android/provider/Settings.java': 'package android.provider; public class Settings {public static final String ACTION_MANAGE_OVERLAY_PERMISSION="android.settings.action.MANAGE_OVERLAY_PERMISSION"; public static boolean overlay;public static int checks;public static boolean canDrawOverlays(android.content.Context c){checks++;return overlay;} }',
 f'{PACKAGE}/ScreenRecordService.java': '''package top.zainzh.rearscreen; class ScreenRecordService {static boolean running; static boolean isRunning(){return running;}}''',
 f'{PACKAGE}/RootBackend.java': '''package top.zainzh.rearscreen; import android.content.*; public class RootBackend implements PrivilegeBackend {
  static int requests,unbinds; static boolean allowed=true,cached=false,delay=false; static Prepared pending;
@@ -41,9 +44,9 @@ f'{PACKAGE}/RootBackend.java': '''package top.zainzh.rearscreen; import android.
  public void bind(ServiceConnection c){binds.add(c);}public void unbind(ServiceConnection c){unbinds++;}
  static void ready(int index,android.os.IBinder b){binds.get(index).onServiceConnected(new ComponentName("test","root"),b);}
 }''',
-'android/content/Intent.java': '''package android.content; public class Intent { public static final String ACTION_VIEW="android.intent.action.VIEW"; public static final int FLAG_ACTIVITY_NEW_TASK=0x10000000,FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS=0x00800000; public Class<?> target; public android.net.Uri data; public String action; public int activityFlags; private java.util.Map<String,Boolean> flags=new java.util.HashMap<>(); public Intent(Context c,Class<?> t){target=t;} public Intent setAction(String a){action=a;return this;} public Intent addFlags(int f){activityFlags|=f;return this;} public Intent setData(android.net.Uri u){data=u;return this;} public Intent putExtra(String n,String v){return this;} public Intent putExtra(String n,boolean v){flags.put(n,v);return this;} public boolean getBooleanExtra(String n,boolean d){return flags.getOrDefault(n,d);} }''',
+'android/content/Intent.java': '''package android.content; public class Intent { public static final String ACTION_VIEW="android.intent.action.VIEW"; public static final int FLAG_ACTIVITY_NEW_TASK=0x10000000,FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS=0x00800000; public Class<?> target; public android.net.Uri data; public String action; public int activityFlags; private java.util.Map<String,Boolean> flags=new java.util.HashMap<>(); public Intent(Context c,Class<?> t){target=t;} public Intent(String a,android.net.Uri u){action=a;data=u;} public Intent putExtra(String n,int v){return this;} public Intent setAction(String a){action=a;return this;} public Intent addFlags(int f){activityFlags|=f;return this;} public Intent setData(android.net.Uri u){data=u;return this;} public Intent putExtra(String n,String v){return this;} public Intent putExtra(String n,boolean v){flags.put(n,v);return this;} public boolean getBooleanExtra(String n,boolean d){return flags.getOrDefault(n,d);} }''',
 'android/app/PendingIntent.java': '''package android.app; public class PendingIntent { public static final int FLAG_UPDATE_CURRENT=1,FLAG_IMMUTABLE=2; public static int lastFlags; public android.content.Intent intent; public static PendingIntent getActivity(android.content.Context c,int request,android.content.Intent i,int flags){PendingIntent p=new PendingIntent();p.intent=i;lastFlags=flags;return p;} }''',
-'android/net/Uri.java': '''package android.net; public class Uri { private String value; public static Uri parse(String s){Uri u=new Uri();u.value=s;return u;} public String toString(){return value;} }''',
+'android/net/Uri.java': '''package android.net; public class Uri { private String value; public static Uri parse(String s){Uri u=new Uri();u.value=s;return u;} public static Uri fromParts(String scheme,String ssp,String fragment){return parse(scheme+":"+ssp);} public String toString(){return value;} }''',
 f'{PACKAGE}/BuildConfig.java': '''package top.zainzh.rearscreen; public class BuildConfig { public static boolean INPUT_PROXY_PROTOTYPE=false; public static boolean VIRTUAL_CAST_ENABLED=false; public static final boolean DEBUG=true; public static final String URI_SCHEME="mrss-debug"; public static final String APPLICATION_ID="test.mrss"; }''',
 f'{PACKAGE}/UriCommandService.java': '''package top.zainzh.rearscreen; public class UriCommandService {}''',
 f'{PACKAGE}/UriReceiverActivity.java': '''package top.zainzh.rearscreen; public class UriReceiverActivity {}''',
@@ -65,10 +68,10 @@ f'{PACKAGE}/RearCastMode.java': '''package top.zainzh.rearscreen; public class R
  public static void drain(){while(true){Job next=null;synchronized(jobs){for(Job j:jobs)if(j.at<=SystemClock.now&&(next==null||j.at<next.at))next=j;if(next!=null)jobs.remove(next);}if(next==null)return;next.r.run();}}
 }''',
 'android/os/Build.java': '''package android.os; public class Build { public static class VERSION { public static int SDK_INT=37; } public static class VERSION_CODES { public static final int O=26,Q=29; } }''',
-'android/util/Log.java': '''package android.util; public class Log { public static int i(String t,String m){return 0;} public static int w(String t,String m){return 0;} public static int w(String t,String m,Throwable e){return 0;} public static int e(String t,String m,Throwable e){return 0;} }''',
-'android/service/quicksettings/Tile.java': '''package android.service.quicksettings; public class Tile { public static final int STATE_INACTIVE=1; public String subtitle; public void setState(int n){} public void setSubtitle(String s){subtitle=s;} public void setStateDescription(String s){} public void updateTile(){} }''',
-'android/service/quicksettings/TileService.java': '''package android.service.quicksettings; public class TileService extends android.content.Context { public static int pendingStarts,intentStarts; private final Tile tile=new Tile(); public Tile getQsTile(){return tile;} public void startActivityAndCollapse(android.app.PendingIntent p){pendingStarts++;started.add(p.intent);} public void startActivityAndCollapse(android.content.Intent i){intentStarts++;started.add(i);} public void onStartListening(){} public void onStopListening(){} public void onDestroy(){} public void onClick(){} }''',
-'android/widget/Toast.java': '''package android.widget; public class Toast { public static final int LENGTH_LONG=1,LENGTH_SHORT=0; public static Toast makeText(android.content.Context c,String s,int n){return new Toast();} public void show(){} }''',
+'android/util/Log.java': '''package android.util; public class Log { public static int i(String t,String m){return 0;} public static int d(String t,String m){return 0;} public static int w(String t,String m){return 0;} public static int w(String t,String m,Throwable e){return 0;} public static int e(String t,String m,Throwable e){return 0;} }''',
+'android/service/quicksettings/Tile.java': '''package android.service.quicksettings; public class Tile { public static final int STATE_INACTIVE=1,STATE_ACTIVE=2; public String subtitle; public void setState(int n){} public void setSubtitle(String s){subtitle=s;} public void setStateDescription(String s){} public void updateTile(){} }''',
+'android/service/quicksettings/TileService.java': '''package android.service.quicksettings; public class TileService extends android.content.Context { public static int pendingStarts,intentStarts; private final Tile tile=new Tile(); public Tile getQsTile(){return tile;} public boolean isLocked(){return false;} public void unlockAndRun(Runnable r){r.run();} public void startActivityAndCollapse(android.app.PendingIntent p){pendingStarts++;started.add(p.intent);} public void startActivityAndCollapse(android.content.Intent i){intentStarts++;started.add(i);} public void onStartListening(){} public void onStopListening(){} public void onDestroy(){} public void onClick(){} }''',
+'android/widget/Toast.java': '''package android.widget; public class Toast { public static final int LENGTH_LONG=1,LENGTH_SHORT=0; public static Toast makeText(android.content.Context c,int s,int n){return new Toast();} public static Toast makeText(android.content.Context c,String s,int n){return new Toast();} public void show(){} }''',
 'rikka/shizuku/Shizuku.java': '''package rikka.shizuku; import android.content.*; import android.os.*; import java.util.*; public class Shizuku {
  public interface OnBinderReceivedListener{void onBinderReceived();} public interface OnBinderDeadListener{void onBinderDead();} public interface OnRequestPermissionResultListener{void onRequestPermissionResult(int q,int r);}
  public static class UserServiceArgs { public UserServiceArgs(ComponentName c){} public UserServiceArgs daemon(boolean b){return this;} public UserServiceArgs processNameSuffix(String s){return this;} public UserServiceArgs debuggable(boolean b){return this;} public UserServiceArgs version(int v){return this;} }
@@ -123,7 +126,7 @@ f'{PACKAGE}/RearDisplayCastOccupancy.java': '''package top.zainzh.rearscreen; fi
 }''',
 f'{PACKAGE}/RearAnimationManager.java': '''package top.zainzh.rearscreen; final class RearAnimationManager {static void runDisplayAction(Runnable action){action.run();}static void projectionStarted(android.content.Context c){}static void projectionStarted(android.content.Context c,int task,String pkg){}}''',
 f'{PACKAGE}/platform/RearCapabilityCore.java': '''package top.zainzh.rearscreen.platform; public final class RearCapabilityCore {public static boolean hasActiveSceneSessions(){return false;}}''',
-f'{PACKAGE}/R.java': '''package top.zainzh.rearscreen; public class R { public static class string { public static int toast_please_switch_back=1,toast_cast_to_rear=2,privilege_service_unavailable=3,privilege_not_connected=4; } }''',
+f'{PACKAGE}/R.java': '''package top.zainzh.rearscreen; public class R { public static class string { public static int toast_please_switch_back=1,toast_cast_to_rear=2,privilege_service_unavailable=3,privilege_not_connected=4,privilege_switching=5,ui_permission_settings_unavailable=6,rear_screenshot_failed=7; } }''',
 }
 HARNESS = '''package top.zainzh.rearscreen;
 import android.content.*; import android.os.*; import rikka.shizuku.Shizuku;
@@ -177,6 +180,15 @@ public class ConnectionRegressionTest {
     for(int i=0;i<3;i++){Handler.advance(5000);Handler.advance(3000);}
     check(RootBackend.binds.size()==3&&TaskServiceManager.state(context)==PrivilegeBackend.State.ERROR,"unbounded root retry");
     acquire(a);Handler.advance(100000);check(RootBackend.binds.size()==3,"acquire bypassed retry limit");TaskServiceManager.release(a);break;
+   case "root_history_not_a_grant":
+    PrivilegeMode.ROOT.save(context);
+    context.getSharedPreferences(PrivilegeMode.PREFERENCES,0).edit().putBoolean("root_approved",true).apply();
+    check(!TaskServiceManager.canConnect(context),"historical root grant was mistaken for a live shell");
+    acquire(a);Handler.advance(10000);
+    check(RootBackend.requests==0&&RootBackend.binds.isEmpty()&&!TaskServiceManager.canConnect(context),"startup requested or bound root using history");
+    TaskServiceManager.requestConnection(context);RootBackend.ready(0,service);
+    check(RootBackend.requests==1&&a.ready==1,"explicit root connection did not work");
+    TaskServiceManager.release(a);break;
    case "root_denied_no_loop":
     PrivilegeMode.ROOT.save(context);RootBackend.allowed=false;acquire(a);
     check(RootBackend.requests==0,"acquire requested su");TaskServiceManager.requestConnection(context);
@@ -192,7 +204,10 @@ public class ConnectionRegressionTest {
     PrivilegeMode.ROOT.save(context);RootBackend.delay=true;acquire(a);TaskServiceManager.requestConnection(context);TaskServiceManager.release(a);
     RootBackend.pending.complete(PrivilegeBackend.State.READY);check(RootBackend.binds.isEmpty(),"cancelled grant bound root");break;
    case "root_shared_release":
-    PrivilegeMode.ROOT.save(context);RootBackend.cached=true;acquire(a);acquire(b);RootBackend.ready(0,service);
+    PrivilegeMode.ROOT.save(context);RootBackend.cached=true;
+    check(TaskServiceManager.canConnect(context),"existing root session does not look reusable before the first acquire");
+    acquire(a);acquire(b);RootBackend.ready(0,service);
+    check(RootBackend.requests==0,"live root session requested permission again");
     TaskServiceManager.release(a);check(RootBackend.unbinds==0&&b.ready==1,"released other root owner");
     TaskServiceManager.release(b);check(RootBackend.unbinds==1&&Shizuku.binds.isEmpty(),"wrong root unbind");break;
    case "shared_release":
@@ -218,6 +233,28 @@ public class ConnectionRegressionTest {
     acquire(a);Shizuku.ready(0,service);service.die();TaskServiceManager.release(a);Handler.advance(10000);check(Shizuku.binds.size()==1,"reconnected released owner");break;
    case "dead_on_connect":
     acquire(a);service.failLink=true;Shizuku.ready(0,service);check(a.ready==0,"dead binder delivered");Handler.advance(1000);Shizuku.ready(1,new TaskService());check(a.ready==1,"link failure not recovered");TaskServiceManager.release(a);break;
+   case "record_tile_stop_first":
+    Shizuku.permission=-1;ScreenRecordService.running=true;
+    new RearScreenRecordTileService().onClick();
+    check(Context.stopped.size()==1&&Context.stopped.get(0).target==ScreenRecordService.class,"revoked permission blocked stopping the recorder");
+    check(Context.started.isEmpty()&&android.provider.Settings.checks==0,"stop tried to enter a permission flow");break;
+   case "record_tile_overlay_then_start":
+    RearScreenRecordTileService record=new RearScreenRecordTileService();
+    record.onStartListening();check(Context.started.isEmpty()&&android.provider.Settings.checks==0,"opening Quick Settings checked the overlay");
+    record.onClick();check(Context.started.size()==1&&android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION.equals(Context.started.get(0).action)
+      &&android.service.quicksettings.TileService.pendingStarts==1,"missing overlay did not open Android settings");
+    android.provider.Settings.overlay=true;check(Context.started.size()==1,"grant replayed the recording action");
+    record.onClick();check(Context.started.size()==2&&Context.started.get(1).target==ScreenRecordService.class,"allowed recording did not start");
+    break;
+   case "screenshot_tile_ungranted_shizuku":
+    Shizuku.permission=-1;
+    RearScreenshotTileService screenshot=new RearScreenshotTileService();screenshot.onStartListening();
+    check(Context.started.isEmpty(),"opening Quick Settings launched a permission entry");
+    screenshot.onClick();check(Context.started.size()==1&&Context.started.get(0).target==MainActivity.class&&Shizuku.binds.isEmpty(),
+      "missing Shizuku permission kicked off capture rather than opening guidance");
+    Shizuku.permission=0;SystemClock.now+=600;
+    screenshot.onClick();check(Context.started.size()==2&&Context.started.get(1).target==UriCommandService.class,"granted capture did not reach the worker");
+    break;
    default:
     SwitchToRearTileService tile=new SwitchToRearTileService();tile.onStartListening();
     try {
@@ -235,7 +272,8 @@ public class ConnectionRegressionTest {
        else check(android.service.quicksettings.TileService.intentStarts==1,"old Android did not use Activity overload");break;
       case "tile_prototype_permission_denied":
        BuildConfig.VIRTUAL_CAST_ENABLED=true;Shizuku.permission=-1;tile.onClick();
-       check(Context.started.isEmpty()&&service.moves==0,"prototype bypassed permission gate");break;
+       check(Context.started.size()==1&&Context.started.get(0).target==MainActivity.class
+        &&service.moves==0,"ungranted switching did not open connection guidance only");break;
       case "tile_no_controlled_owner_or_journal":
        check(LegacyDisplayOccupancy.controlledPhysicalProjectionForRecovery(context,RearDisplay.requireId())==null,
         "fixture unexpectedly has a controlled owner");
@@ -294,7 +332,7 @@ class ConnectionTests(unittest.TestCase):
         path.write_text(HARNESS)
         sources = list(folder.rglob('*.java'))
         sources += [ROOT / 'android/app/src/main/java' / PACKAGE / name for name in
-                    ['TaskServiceManager.java', 'SwitchToRearTileService.java', 'CurrentMainTaskSelector.java', 'PrivilegeMode.java', 'PrivilegeBackend.java', 'ShizukuBackend.java', 'PrivilegeOperations.java']]
+                    ['TaskServiceManager.java', 'SwitchToRearTileService.java', 'RearScreenshotTileService.java', 'RearScreenRecordTileService.java', 'TilePermissionPrompt.java', 'CurrentMainTaskSelector.java', 'PrivilegeMode.java', 'PrivilegeBackend.java', 'ShizukuBackend.java', 'PrivilegeOperations.java']]
         subprocess.run([cls.javac, '--release', '11', '-d', str(cls.classes), *map(str, sources)], check=True)
 
     @classmethod
@@ -308,13 +346,14 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('PASS ' + name, result.stdout)
 
-for scenario in ['switch_timeout_cancel', 'switch_old_callbacks', 'switch_active_command', 'switch_active_session', 'root_retry_limit', 'root_denied_no_loop', 'root_authorization_wait', 'root_cancel_authorization', 'root_shared_release', 'shared_release', 'callback_release', 'release_pending', 'bind_timeout', 'server_restart',
+for scenario in ['switch_timeout_cancel', 'switch_old_callbacks', 'switch_active_command', 'switch_active_session', 'root_retry_limit', 'root_history_not_a_grant', 'root_denied_no_loop', 'root_authorization_wait', 'root_cancel_authorization', 'root_shared_release', 'shared_release', 'callback_release', 'release_pending', 'bind_timeout', 'server_restart',
                  'permission_granted', 'release_after_death', 'dead_on_connect',
                  'tile_delayed_ready', 'tile_duplicate_click', 'tile_close_pending',
                  'tile_timeout', 'tile_other_owner', 'tile_destroy_pending',
                  'tile_failed_move', 'tile_visible_owner', 'tile_occupancy_query_failed', 'tile_active_physical_owner',
                  'tile_close_during_occupancy', 'tile_close_during_target', 'tile_no_controlled_owner_or_journal', 'tile_prototype_serial_route',
-                 'tile_prototype_serial_route_pre34', 'tile_prototype_permission_denied']:
+                 'tile_prototype_serial_route_pre34', 'tile_prototype_permission_denied',
+                 'record_tile_stop_first', 'record_tile_overlay_then_start', 'screenshot_tile_ungranted_shizuku']:
     setattr(ConnectionTests, 'test_' + scenario, lambda self, name=scenario: self.run_scenario(name))
 
 if __name__ == '__main__':
