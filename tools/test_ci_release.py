@@ -26,7 +26,7 @@ class ReleaseChecks(unittest.TestCase):
         publish_env = publish_step.split('        env:\n', 1)[1].split('        run:\n', 1)[0]
         self.assertIn('          GH_REPO: ${{ github.repository }}', publish_env)
 
-    def test_rc2_sdk_bundle_is_checksummed_and_published(self):
+    def test_android_sdk_and_mod_kit_are_checksummed_and_published(self):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / '.github/workflows/release.yml').read_text(encoding='utf-8')
         self.assertIn('sdk_name: ${{ steps.sdk.outputs.sdk_name }}', workflow)
@@ -44,8 +44,13 @@ class ReleaseChecks(unittest.TestCase):
         release_job = workflow.split('\n  release:\n', 1)[1].split('\n  update-version:\n', 1)[0]
         publish_step = release_job.split('      - name: Publish APK and checksum file\n', 1)[1].split('\n      - name:', 1)[0]
         self.assertIn('SDK_NAME: ${{ needs.build.outputs.sdk_name }}', publish_step)
-        self.assertIn('"$SDK_NAME" SHA256SUMS LICENSE NOTICE --clobber', publish_step)
-        self.assertIn('"$APK_NAME" "$SDK_NAME" SHA256SUMS LICENSE NOTICE', publish_step)
+        self.assertIn('mod_kit_name: ${{ steps.mod_kit.outputs.mod_kit_name }}', workflow)
+        self.assertIn('python3 tools/package_mod_kit.py --output-dir dist', workflow)
+        self.assertIn('(cd dist && sha256sum "$mod_kit_name" >> SHA256SUMS)', workflow)
+        self.assertIn('MOD_KIT_NAME: ${{ needs.build.outputs.mod_kit_name }}', publish_step)
+        release_assets = '"$RELEASE_TAG" "$APK_NAME" "$SDK_NAME" "$MOD_KIT_NAME" SHA256SUMS LICENSE NOTICE'
+        self.assertIn(f'gh release upload {release_assets} --clobber', publish_step)
+        self.assertIn(f'gh release create {release_assets}', publish_step)
 
     def test_sdk_checksum_uses_names_relative_to_release_directory(self):
         root = Path(__file__).resolve().parents[1]

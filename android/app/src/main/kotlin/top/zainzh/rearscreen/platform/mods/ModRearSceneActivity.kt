@@ -87,6 +87,7 @@ class ModRearSceneActivity : ComponentActivity() {
     private var message by mutableStateOf("正在加载 Mod…")
     private var error by mutableStateOf("")
     private var hostData by mutableStateOf(JSONObject())
+    private var rearViewport by mutableStateOf<RearViewportSnapshot?>(null)
     private var cameraSafeInsets by mutableStateOf(CameraSafeInsets.Zero)
     private var cutoutReported by mutableStateOf<Boolean?>(null)
     private var launch: SceneLaunchContext? = null
@@ -140,11 +141,12 @@ class ModRearSceneActivity : ComponentActivity() {
                     is SceneEvent.Ready -> {
                         // READY proves the measured window, not that Core has made
                         // the rear display visible. Visibility arrives separately.
+                        refreshRearViewportBinding()
                         sceneReady = windowReported
                         message = ""
                         reconcileScenePresentation()
                     }
-                    is SceneEvent.ViewportChanged -> Unit
+                    is SceneEvent.ViewportChanged -> refreshRearViewportBinding()
                     is SceneEvent.VisibilityChanged,
                     is SceneEvent.Suspended,
                     SceneEvent.Restored -> reconcileScenePresentation()
@@ -241,16 +243,20 @@ class ModRearSceneActivity : ComponentActivity() {
                     if (error.isNotEmpty()) Text(error, color = AppPalette.destructive())
                     else if (activePackage == null || current == null) Text(message, color = AppPalette.secondary())
                     else if(activePackage.rearScene==null) Text("此 Mod 未声明背屏场景",color=AppPalette.secondary())
-                    else ModNativeScene(activePackage, activePackage.rearScene, current.state, current.config, hostData, true,
-                        onBack = { finish() },
-                        onEvent = { type ->
-                            if (!broker.submitUserEvent(activePackage.id, type, castSource = castSource)) {
-                                Toast.makeText(this@ModRearSceneActivity, "操作暂未提交：输入队列已满或场景正在切换，请稍后重试", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        visible = isSceneContentVisible(),
-                        onRegisteredAction = ::invokeRegisteredAction,
-                        onSaveConfig = { config, complete -> broker.saveConfig(activePackage.id, config, mainExecutor, complete) })
+                    else {
+                        val bindings = withModRearInfo(this@ModRearSceneActivity, activePackage, hostData, true,
+                            rear = true, owner = route.owner, viewport = rearViewport)
+                        ModNativeScene(activePackage, activePackage.rearScene, current.state, current.config, bindings, true,
+                            onBack = { finish() },
+                            onEvent = { type ->
+                                if (!broker.submitUserEvent(activePackage.id, type, castSource = castSource)) {
+                                    Toast.makeText(this@ModRearSceneActivity, "操作暂未提交：输入队列已满或场景正在切换，请稍后重试", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            visible = isSceneContentVisible(),
+                            onRegisteredAction = ::invokeRegisteredAction,
+                            onSaveConfig = { config, complete -> broker.saveConfig(activePackage.id, config, mainExecutor, complete) })
+                    }
                 }
             }
             val pendingEffect = effectRequest
@@ -888,8 +894,15 @@ class ModRearSceneActivity : ComponentActivity() {
         }
     }
 
+    private fun refreshRearViewportBinding() {
+        if (pkg?.let(ModRearInfoBindings::declared) != true) return
+        // Queued events are invalidation signals, never the source of geometry.
+        rearViewport = launch?.let(core::queryModRearViewport)
+    }
+
     private fun completeWindowReady(route: SceneLaunchContext) {
         windowReported = true
+        refreshRearViewportBinding()
         sceneReady = true
         message = ""
         core.displaySessions.attachSceneObserver(route.owner, route.sessionId, generation, observer)

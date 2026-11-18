@@ -1,0 +1,129 @@
+{
+  "scene": "settings",
+  "root": {
+    "type": "layout.column",
+    "gap": 6,
+    "children": [
+      {
+        "type": "ui.text",
+        "value": "背屏设备",
+        "style": "title"
+      },
+      {
+        "type": "ui.text",
+        "value": "本机预览不读取实测数据",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.info.status",
+          "equals": "PREVIEW"
+        }
+      },
+      {
+        "type": "ui.text",
+        "value": "请在 Mod 管理中授予背屏信息权限",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.info.status",
+          "equals": "NOT_GRANTED"
+        }
+      },
+      {
+        "type": "ui.text",
+        "value": "正在读取设备信息…",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.info.status",
+          "equals": "PENDING"
+        }
+      },
+      {
+        "type": "ui.text",
+        "value": "未检测到可识别的背屏",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.info.status",
+          "equals": "DISPLAY_UNAVAILABLE"
+        }
+      },
+      {
+        "type": "ui.text",
+        "value": "已检测到背屏，但当前读不到设备参数",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.info.status",
+          "equals": "INFO_UNAVAILABLE"
+        }
+      },
+      {
+        "type": "layout.row",
+        "gap": 4,
+        "verticalAlignment": "center",
+        "children": [
+          {
+            "type": "ui.text",
+            "value": "逻辑宽 / 高 · px",
+            "style": "caption",
+            "visibleWhen": {
+              "bind": "data.rear.info.status",
+              "equals": "AVAILABLE"
+            }
+          },
+          {
+            "type": "ui.text",
+            "value": {
+              "bind": "data.rear.info.logicalDisplayPx.width"
+            },
+            "format": "text",
+            "visibleWhen": {
+              "bind": "data.rear.info.status",
+              "equals": "AVAILABLE"
+            }
+          },
+          {
+            "type": "ui.text",
+            "value": {
+              "bind": "data.rear.info.logicalDisplayPx.height"
+            },
+            "format": "text",
+            "visibleWhen": {
+              "bind": "data.rear.info.status",
+              "equals": "AVAILABLE"
+            }
+          }
+        ]
+      },
+      {
+        "type": "layout.row",
+        "gap": 4,
+        "verticalAlignment": "center",
+        "children": [
+          {
+            "type": "ui.text",
+            "value": "面板状态",
+            "style": "caption",
+            "visibleWhen": {
+              "bind": "data.rear.info.status",
+              "equals": "AVAILABLE"
+            }
+          },
+          {
+            "type": "ui.text",
+            "value": {
+              "bind": "data.rear.info.state"
+            },
+            "format": "text",
+            "visibleWhen": {
+              "bind": "data.rear.info.status",
+              "equals": "AVAILABLE"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

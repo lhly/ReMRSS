@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -23,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,6 +32,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -138,8 +141,11 @@ private fun PreviewBody(pkg: VerifiedModPackage, initial: ModPersistedModel, hos
     var rotation by rememberSaveable(pkg.id) { mutableStateOf(0) }
     var safeArea by rememberSaveable(pkg.id) { mutableStateOf(true) }
     var blackCover by rememberSaveable(pkg.id) { mutableStateOf(false) }
+    var temporaryCover by rememberSaveable(pkg.id) { mutableStateOf(0) }
+    val overlays = listOf("无", "通知示例", "充电示例")
     var config by remember(pkg.id) { mutableStateOf(JSONObject(initial.config.toString())) }
     var previewMessage by rememberSaveable(pkg.id) { mutableStateOf("") }
+    val previewState = rememberSaveableStateHolder()
     val presets = listOf(PreviewSize(400, 400), PreviewSize(360, 640), PreviewSize(640, 360), PreviewSize(347, 212, dp = true))
     val scales = listOf(1f, 1.3f, 1.6f, 2f)
     val rotations = listOf(0, 90, 180, 270)
@@ -154,6 +160,7 @@ private fun PreviewBody(pkg: VerifiedModPackage, initial: ModPersistedModel, hos
             AppRow("主题", themeNames[dark], action = { dark = (dark + 1) % themeNames.size })
             AppRow("字号", "${(scales[scale] * 100).toInt()}%", action = { scale = (scale + 1) % scales.size })
             AppRow("旋转", "${rotations[rotation]}°", action = { rotation = (rotation + 1) % rotations.size })
+            if (rear) AppRow("模拟临时覆盖", overlays[temporaryCover], action = { temporaryCover = (temporaryCover + 1) % overlays.size })
             AppToggle("模拟纯黑遮挡", "检查黑态下内容是否被完全覆盖", blackCover) { blackCover = it }
         }
     }
@@ -189,16 +196,23 @@ private fun PreviewBody(pkg: VerifiedModPackage, initial: ModPersistedModel, hos
             ) {
                 top.zainzh.rearscreen.AppTheme {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        if (safeArea) {
-                            Box(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 20.dp)
-                                .border(1.dp, AppPalette.accent().copy(alpha = .7f), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
-                                renderPreview(pkg, initial, rear, config, hostData,
-                                    onMessage = { previewMessage = it }, onConfig = { config = it })
+                        val cover = if (rear) temporaryCover else 0
+                        if (blackCover) {
+                            Box(Modifier.fillMaxSize().background(Color.Black))
+                        } else if (cover != 0) {
+                            PreviewTemporaryCover(charging = cover == 2, useSafeArea = safeArea)
+                        } else {
+                            previewState.SaveableStateProvider(if (rear) "rear" else "settings") {
+                                val surface = if (safeArea) Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 20.dp)
+                                    .border(1.dp, AppPalette.accent().copy(alpha = .7f), RoundedCornerShape(10.dp))
+                                else Modifier.fillMaxSize()
+                                Box(surface, contentAlignment = Alignment.Center) {
+                                    renderPreview(pkg, initial, rear, config, hostData,
+                                        onMessage = { previewMessage = it }, onConfig = { config = it })
+                                }
                             }
-                        } else renderPreview(pkg, initial, rear, config, hostData,
-                            onMessage = { previewMessage = it }, onConfig = { config = it })
-                        if (rotation != 0) Text("${rotations[rotation]}°", Modifier.align(Alignment.TopEnd).padding(8.dp), color = AppPalette.secondary())
-                        if (blackCover) Box(Modifier.fillMaxSize().background(Color.Black))
+                        }
+                        if (!blackCover && rotation != 0) Text("${rotations[rotation]}°", Modifier.align(Alignment.TopEnd).padding(8.dp), color = AppPalette.secondary())
           }
                     }
                 }
@@ -219,9 +233,30 @@ private fun renderPreview(
     onMessage: (String) -> Unit,
     onConfig: (JSONObject) -> Unit,
 ) {
-    ModNativeScene(pkg, if (rear) requireNotNull(pkg.rearScene) else pkg.settingsScene, initial.state, config, data, rear,
+    ModNativeScene(pkg, if (rear) requireNotNull(pkg.rearScene) else pkg.settingsScene, initial.state, config, ModRearInfoBindings.withPreviewData(pkg, data), rear,
         onEvent = { onMessage("本机预览不会执行事件") },
         onSaveConfig = { next, done -> onConfig(JSONObject(next.toString())); done(true, null); onMessage("已更新本次预览配置") })
+}
+
+/** Fixed preview samples: no system notification access, power observation or overlay lease. */
+@androidx.compose.runtime.Composable
+private fun PreviewTemporaryCover(charging: Boolean, useSafeArea: Boolean) {
+    Box(Modifier.fillMaxSize().background(AppPalette.background())) {
+        if (charging) {
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(0.72f)
+                .background(colorResource(top.zainzh.rearscreen.R.color.remrss_charging_liquid)))
+        }
+        Column(Modifier.fillMaxSize().padding(if (useSafeArea) 20.dp else 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            if (charging) {
+                Text("72%", color = Color.Black)
+                Text("正在充电 · 示例", color = Color.Black)
+            } else {
+                Text("通知示例", color = AppPalette.text())
+                Text("关闭覆盖后返回 Mod", color = AppPalette.secondary())
+            }
+        }
+    }
 }
 
 private data class PreviewSize(val width: Int, val height: Int, val dp: Boolean = false)

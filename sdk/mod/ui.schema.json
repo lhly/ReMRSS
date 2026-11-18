@@ -28,8 +28,47 @@
       ],
       "properties": {
         "bind": {
-          "type": "string",
-          "pattern": "^(state|config|data)\\.[A-Za-z][A-Za-z0-9_.]*$"
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(state|config)\\.[A-Za-z][A-Za-z0-9_.]*$"
+            },
+            {
+              "enum": [
+                "data.battery.charging",
+                "data.battery.level",
+                "data.battery.scale",
+                "data.rear.info.densityDpi",
+                "data.rear.info.logicalDisplayPx.height",
+                "data.rear.info.logicalDisplayPx.width",
+                "data.rear.info.physicalModePx.height",
+                "data.rear.info.physicalModePx.width",
+                "data.rear.info.rotation",
+                "data.rear.info.state",
+                "data.rear.info.status",
+                "data.rear.viewport.contentBoundsPx.bottom",
+                "data.rear.viewport.contentBoundsPx.height",
+                "data.rear.viewport.contentBoundsPx.left",
+                "data.rear.viewport.contentBoundsPx.right",
+                "data.rear.viewport.contentBoundsPx.top",
+                "data.rear.viewport.contentBoundsPx.width",
+                "data.rear.viewport.contentRotation",
+                "data.rear.viewport.cutoutKnowledge",
+                "data.rear.viewport.densityDpi",
+                "data.rear.viewport.displayRotation",
+                "data.rear.viewport.region",
+                "data.rear.viewport.revision",
+                "data.rear.viewport.status",
+                "data.rear.viewport.windowDp.height",
+                "data.rear.viewport.windowDp.width",
+                "data.rear.viewport.windowPx.height",
+                "data.rear.viewport.windowPx.width",
+                "data.systemMetrics.cpu.utilizationPercent",
+                "data.systemMetrics.memory.availableBytes",
+                "data.systemMetrics.memory.totalBytes"
+              ]
+            }
+          ]
         }
       }
     },

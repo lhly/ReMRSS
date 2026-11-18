@@ -20,6 +20,9 @@ import top.zainzh.rearscreen.platform.actions.PlatformRegisteredActionRegistry
 import top.zainzh.rearscreen.platform.actions.RegisteredActionActivation
 import top.zainzh.rearscreen.platform.actions.RegisteredActionActivationAuthority
 import top.zainzh.rearscreen.platform.actions.RegisteredActionRef
+import top.zainzh.rearscreen.platform.mods.ModPackageStore
+import top.zainzh.rearscreen.platform.mods.ModRearInfoBindings
+import top.zainzh.rearscreen.platform.mods.VerifiedModPackage
 import top.zainzh.rearscreen.platform.notifications.AndroidOwnedNotificationPresentation
 import top.zainzh.rearscreen.platform.notifications.NotificationAuthorizationStore
 import top.zainzh.rearscreen.platform.notifications.NotificationEndReason
@@ -102,6 +105,20 @@ class RearCapabilityCore private constructor(context: Context) {
 
     /** Returns an owner only for an installed, enabled, author-trusted Mod. */
     internal fun modDataOwner(modId: String): SessionOwner? = modData.ownerForMod(modId)
+
+    /** Read-only and backend-neutral: does not acquire a connection or a display lease. */
+    internal fun readRearDeviceInfo(): RearDeviceInfo = readRearDeviceInfo(appContext)
+
+    internal fun canReadModRearInfo(mod: VerifiedModPackage, owner: SessionOwner?): Boolean {
+        val installed = ModPackageStore.installed(appContext, mod.id) ?: return false
+        return installed.enabled && installed.authorFingerprint == mod.authorFingerprint &&
+            installed.versionCode == mod.versionCode && ModRearInfoBindings.CAPABILITY in installed.grantedCapabilities &&
+            ModPackageStore.isAuthorTrusted(appContext, installed.authorFingerprint) &&
+            (owner == null || modData.ownerForMod(mod.id) == owner)
+    }
+
+    internal fun queryModRearViewport(route: SceneLaunchContext): RearViewportSnapshot? =
+        sceneViewportTransitions?.queryCommittedSceneWindow(route.owner, route.sessionId, route.generation)?.viewport
 
     /** Owner exists only while the exact installed Mod is enabled, trusted and granted this capability. */
     internal fun modNotificationOwner(modId: String): NotificationOwner? {

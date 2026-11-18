@@ -1,0 +1,146 @@
+{
+  "scene": "rear",
+  "root": {
+    "type": "layout.column",
+    "gap": 6,
+    "children": [
+      {
+        "type": "ui.text",
+        "value": "当前场景视口",
+        "style": "title"
+      },
+      {
+        "type": "ui.text",
+        "value": "本机预览不读取实测数据",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.viewport.status",
+          "equals": "PREVIEW"
+        }
+      },
+      {
+        "type": "ui.text",
+        "value": "未授予背屏信息权限",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.viewport.status",
+          "equals": "NOT_GRANTED"
+        }
+      },
+      {
+        "type": "ui.text",
+        "value": "正在确认读取权限…",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.viewport.status",
+          "equals": "PENDING"
+        }
+      },
+      {
+        "type": "ui.text",
+        "value": "正在等待实测视口…",
+        "style": "caption",
+        "tone": "secondary",
+        "visibleWhen": {
+          "bind": "data.rear.viewport.status",
+          "equals": "NOT_READY"
+        }
+      },
+      {
+        "type": "layout.row",
+        "gap": 4,
+        "verticalAlignment": "center",
+        "children": [
+          {
+            "type": "ui.text",
+            "value": "内容宽 / 高 · px",
+            "style": "caption",
+            "visibleWhen": {
+              "bind": "data.rear.viewport.status",
+              "equals": "READY"
+            }
+          },
+          {
+            "type": "ui.text",
+            "value": {
+              "bind": "data.rear.viewport.contentBoundsPx.width"
+            },
+            "format": "text",
+            "visibleWhen": {
+              "bind": "data.rear.viewport.status",
+              "equals": "READY"
+            }
+          },
+          {
+            "type": "ui.text",
+            "value": {
+              "bind": "data.rear.viewport.contentBoundsPx.height"
+            },
+            "format": "text",
+            "visibleWhen": {
+              "bind": "data.rear.viewport.status",
+              "equals": "READY"
+            }
+          }
+        ]
+      },
+      {
+        "type": "layout.row",
+        "gap": 4,
+        "verticalAlignment": "center",
+        "children": [
+          {
+            "type": "ui.text",
+            "value": "区域",
+            "style": "caption",
+            "visibleWhen": {
+              "bind": "data.rear.viewport.status",
+              "equals": "READY"
+            }
+          },
+          {
+            "type": "ui.text",
+            "value": {
+              "bind": "data.rear.viewport.region"
+            },
+            "format": "text",
+            "visibleWhen": {
+              "bind": "data.rear.viewport.status",
+              "equals": "READY"
+            }
+          }
+        ]
+      },
+      {
+        "type": "layout.row",
+        "gap": 4,
+        "verticalAlignment": "center",
+        "children": [
+          {
+            "type": "ui.text",
+            "value": "方向 · 四分之一圈",
+            "style": "caption",
+            "visibleWhen": {
+              "bind": "data.rear.viewport.status",
+              "equals": "READY"
+            }
+          },
+          {
+            "type": "ui.text",
+            "value": {
+              "bind": "data.rear.viewport.contentRotation"
+            },
+            "format": "text",
+            "visibleWhen": {
+              "bind": "data.rear.viewport.status",
+              "equals": "READY"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

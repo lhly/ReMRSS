@@ -4,6 +4,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONObject
 import org.json.JSONArray
 import top.zainzh.rearscreen.platform.RearCapabilityCore
@@ -72,6 +75,9 @@ data class InstalledMod(
 )
 
 object ModPackageStore {
+    private val rearInfoRevision = MutableStateFlow(0L)
+    internal val rearInfoChanges = rearInfoRevision.asStateFlow()
+
     private fun db(context: Context, storage: ModPackageStoreTestSession.Storage? = null) = storage?.database ?: ModDatabase.shared(context)
     private fun root(context: Context, storage: ModPackageStoreTestSession.Storage? = null) = storage?.packageRoot ?: File(context.noBackupFilesDir, "platform-mods")
 
@@ -302,6 +308,7 @@ object ModPackageStore {
             if (pkg.requiredCapabilities.any { it.name==capability }) database.execSQL("UPDATE installed_mods SET enabled=0 WHERE mod_id=?",arrayOf(id))
             if (storage == null) closeDataSessions(context, id)
         }
+        if (granted && storage == null && capability == ModRearInfoBindings.CAPABILITY) rearInfoRevision.update { it + 1 }
         return list(context, storage).first { it.id == id }
     }
 
@@ -418,6 +425,7 @@ object ModPackageStore {
         FileOutputStream(file).use { it.write(bytes); it.fd.sync() }
     }
     private fun closeDataSessions(context: Context, id: String) {
+        rearInfoRevision.update { it + 1 }
         runCatching { RearCapabilityCore.get(context).closeModDataSessionsForMod(id) }
     }
 }

@@ -14,6 +14,7 @@ import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import dev.remrss.platform.sdk.RearClient
 import dev.remrss.platform.sdk.RearSceneWindowPolicy
@@ -25,6 +26,7 @@ import dev.remrss.platform.sdk.RearSceneLaunchMetadata
 import dev.remrss.platform.sdk.RearSceneLaunchPlacement
 import dev.remrss.scene.geometry.QuarterTurnSceneContainer
 import java.io.Closeable
+import kotlin.math.roundToInt
 
 /** A minimal client-owned Activity. Its lease/revision state lives in Application across recreation. */
 class RearSceneActivity : Activity() {
@@ -65,15 +67,51 @@ class RearSceneActivity : Activity() {
         RearSceneWindowPolicy.applySceneLease(this, requested = false, leaseActive = false, windowActuallyVisible = false)
         scoreView = TextView(this).apply { textSize = 44f; gravity = Gravity.CENTER }
         statusView = TextView(this).apply { textSize = 14f; gravity = Gravity.CENTER }
-        sceneLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
-        sceneLayout.addView(TextView(this).apply { text = "Scoreboard · Rear scene"; textSize = 20f; gravity = Gravity.CENTER })
-        sceneLayout.addView(scoreView, LinearLayout.LayoutParams(-1, 160))
-        sceneLayout.addView(Button(this).apply { text = "+1 on rear"; setOnClickListener { sample.addPoint() } })
-        sceneLayout.addView(Button(this).apply { text = "Close rear scene"; setOnClickListener {
-            sample.lease?.let { lease -> sample.client.closeScene(lease.sessionId) }
-            finishAndRemoveTask()
-        } })
-        sceneLayout.addView(statusView, LinearLayout.LayoutParams(-1, -2))
+        // The tested safe viewport is only ~212 dp tall. Let status and large text scroll,
+        // keeping both actions in a separate row inside the camera-safe padding.
+        val match = ViewGroup.LayoutParams.MATCH_PARENT
+        val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+        val scoreboard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(TextView(this@RearSceneActivity).apply {
+                text = "Scoreboard · Rear scene"
+                textSize = 20f
+                gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(match, wrap))
+            addView(scoreView, LinearLayout.LayoutParams(match, wrap))
+            addView(statusView, LinearLayout.LayoutParams(match, wrap))
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(scoreboard, FrameLayout.LayoutParams(match, wrap))
+        }
+        val density = resources.displayMetrics.density
+        val buttonHeight = (48 * density).roundToInt()
+        val actionGap = (8 * density).roundToInt()
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(this@RearSceneActivity).apply {
+                text = "+1"
+                contentDescription = "+1 on rear"
+                minimumHeight = buttonHeight
+                setOnClickListener { sample.addPoint() }
+            }, LinearLayout.LayoutParams(0, wrap, 1f).apply { marginEnd = actionGap })
+            addView(Button(this@RearSceneActivity).apply {
+                text = "Close"
+                contentDescription = "Close rear scene"
+                minimumHeight = buttonHeight
+                setOnClickListener {
+                    sample.lease?.let { lease -> sample.client.closeScene(lease.sessionId) }
+                    finishAndRemoveTask()
+                }
+            }, LinearLayout.LayoutParams(0, wrap, 1f))
+        }
+        sceneLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(scroll, LinearLayout.LayoutParams(match, 0, 1f))
+            addView(actions, LinearLayout.LayoutParams(match, wrap))
+        }
         blackCover = View(this).apply {
             setBackgroundColor(android.graphics.Color.BLACK)
             visibility = View.VISIBLE

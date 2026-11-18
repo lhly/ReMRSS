@@ -19,4 +19,4 @@ cp background.png midnight-grid/assets/rear-wallpaper/six-apps.png
 ./bin/remrss check midnight-grid.zip
 ```
 
-在 ReMRSS 的 **自定义背屏 → 导入签名壁纸模板** 选这个 ZIP，不需要运行或启用 Mod。导入仅改变编辑草稿中的背景及布局，不能带入包名、Intent、脚本或预设授权。用户仍需选择应用和作品，并确认备份及替换。[用户操作](../../../docs/rear-wallpaper-shortcuts.md)
+在 ReMRSS 的 **自定义背屏 → 导入签名壁纸模板** 选这个 ZIP，不需要运行或启用 Mod。导入仅改变编辑草稿中的背景及布局，不能带入包名、Intent、脚本或预设授权。用户仍需选择应用和作品，并确认备份及替换。

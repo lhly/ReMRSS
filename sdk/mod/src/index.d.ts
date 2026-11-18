@@ -1,6 +1,6 @@
 /** Capability names that the current host actually implements. A known future
  * capability is intentionally not part of this authoring contract yet. */
-export type CapabilityName = 'rear.scene' | 'rear.scene.keep_visible' | 'rear.region' | 'rear.scene.orientation' | 'rear.cast.virtual' | 'rear.cast.direct_physical' | 'rear.notification' | 'data.battery' | 'data.systemMetrics' | 'model.local' | 'ui.native' | 'ui.dialog' | 'action.invoke' | 'schedule.visible' | 'clock.snapshot';
+export type CapabilityName = 'rear.info' | 'rear.scene' | 'rear.scene.keep_visible' | 'rear.region' | 'rear.scene.orientation' | 'rear.cast.virtual' | 'rear.cast.direct_physical' | 'rear.notification' | 'data.battery' | 'data.systemMetrics' | 'model.local' | 'ui.native' | 'ui.dialog' | 'action.invoke' | 'schedule.visible' | 'clock.snapshot';
 export interface CapabilityRequirement { name: CapabilityName; minimumVersion: 1 }
 export interface CapabilityDeclaration { required: CapabilityRequirement[]; optional: CapabilityRequirement[] }
 
@@ -81,8 +81,24 @@ export interface ModReducer<S = Record<string, unknown>, C = Record<string, unkn
   }): { state: S | null; config: C };
 }
 
+export type RearInfoStatus = 'PREVIEW' | 'PENDING' | 'NOT_GRANTED' | 'DISPLAY_UNAVAILABLE' | 'INFO_UNAVAILABLE' | 'AVAILABLE';
+export type RearViewportStatus = 'PREVIEW' | 'PENDING' | 'NOT_GRANTED' | 'NOT_APPLICABLE' | 'NOT_READY' | 'READY';
+export type RearInfoBindingPath =
+  'data.rear.info.status' | 'data.rear.info.state' |
+  'data.rear.info.densityDpi' | 'data.rear.info.rotation' |
+  'data.rear.info.physicalModePx.width' | 'data.rear.info.physicalModePx.height' |
+  'data.rear.info.logicalDisplayPx.width' | 'data.rear.info.logicalDisplayPx.height' |
+  'data.rear.viewport.status' | 'data.rear.viewport.revision' |
+  'data.rear.viewport.region' | 'data.rear.viewport.densityDpi' |
+  'data.rear.viewport.displayRotation' | 'data.rear.viewport.contentRotation' |
+  'data.rear.viewport.windowPx.width' | 'data.rear.viewport.windowPx.height' |
+  'data.rear.viewport.windowDp.width' | 'data.rear.viewport.windowDp.height' |
+  'data.rear.viewport.contentBoundsPx.left' | 'data.rear.viewport.contentBoundsPx.top' |
+  'data.rear.viewport.contentBoundsPx.right' | 'data.rear.viewport.contentBoundsPx.bottom' |
+  'data.rear.viewport.contentBoundsPx.width' | 'data.rear.viewport.contentBoundsPx.height' |
+  'data.rear.viewport.cutoutKnowledge';
 export type BindingPath = `state.${string}` | `config.${string}` | 'data.battery.level' | 'data.battery.scale' | 'data.battery.charging' |
-  'data.systemMetrics.cpu.utilizationPercent' | 'data.systemMetrics.memory.availableBytes' | 'data.systemMetrics.memory.totalBytes';
+  'data.systemMetrics.cpu.utilizationPercent' | 'data.systemMetrics.memory.availableBytes' | 'data.systemMetrics.memory.totalBytes' | RearInfoBindingPath;
 export type BoundValue = { bind: BindingPath };
 export type UiValue = string | number | boolean | BoundValue;
 export type RegisteredActionRef = { id: string; version: 1 };

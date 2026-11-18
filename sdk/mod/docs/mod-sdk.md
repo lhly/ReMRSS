@@ -7,7 +7,7 @@
 安装 Python 3.10+ 与 OpenSSL。只有编写 reducer 并运行逻辑测试时才需要 Node.js 18+。
 
 ```sh
-./bin/remrss create hello-panel --template info --author "作者名字"
+./bin/remrss create hello-panel --template rear-info --author "作者名字"
 ./bin/remrss check hello-panel
 ./bin/remrss preview hello-panel
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private.pem
@@ -15,11 +15,11 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private
 ./bin/remrss check hello-panel.zip
 ```
 
-这些命令以源码仓库的 `sdk/mod/` 目录为工作目录；在仓库根目录开发时，先进入该目录再运行 `./bin/remrss`。
+在解压后的 Mod kit 目录运行这些命令；若已有源码，也可在 `sdk/mod/` 运行。
 
 `pack` 会签名并重新验签 ZIP。作者私钥只保存在你自己的密钥管理器中；它既不放入包，也不交给 ReMRSS 维护者。导入时先验证公钥指纹和全部载荷，再单独展示作者信任与每项能力授权。新 Mod 默认停用；启用、撤权、卸载与更新由设置页控制。
 
-`preview` 检查 UI 声明与本地资源，不生成视觉截图。要看实际 Android 画面：打包 ZIP、在 ReMRSS 的 Mod 管理页导入并审核，随后打开该 Mod 卡片的“本机预览”。预览复用宿主 Compose/Miuix renderer，可切换设置/背屏场景、尺寸、安全区、主题、字号、旋转和纯黑遮挡；不申请后屏、显示租约或运行 reducer。按钮事件只提示不会执行，设置保存只改变当前预览状态。
+`preview` 检查 UI 声明与本地资源，不生成视觉截图。要看实际 Android 画面：打包 ZIP、在 ReMRSS 的 Mod 管理页导入并审核，随后打开该 Mod 卡片的“本机预览”。预览复用宿主 Compose/Miuix renderer，可切换设置/背屏场景、尺寸、安全区、主题、字号、旋转、纯黑遮挡及通知/充电示例覆盖；不申请后屏、显示租约或运行 reducer。按钮事件只提示不会执行，设置保存只改变当前预览状态。
 
 ## 包协议与作者身份
 
@@ -27,20 +27,40 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private
 
 作者身份由公钥 DER 的 SHA-256 指纹确定。维护者私钥不能代表作者签包。同一个 Mod ID 一经安装会永久绑定其作者指纹；不同作者不能接管。更新需要更高 `versionCode`，同作者更新保留逻辑会话身份和数据。旧 `.remodule` / schema 1 不兼容此协议。
 
-作者声明的能力、宿主识别的声明、用户实际授权是三件事：未知能力或高于宿主支持版本的 `minimumVersion` 会在打包/导入时拒绝；必需能力须逐项授权，可选能力默认关闭；撤权不会改写模型。当前CLI与host开放 `rear.scene@1`、`rear.scene.keep_visible@1`、`rear.region@1`、`rear.scene.orientation@1`、`rear.cast.virtual@1`、`rear.cast.direct_physical@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1` 与宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`、`action.invoke@1`、`clock.snapshot@1` 与 `schedule.visible@1`。数据能力仅提供通过授权的可见原生 UI 绑定：`data.battery` 有 `data.battery.level`、`.scale`、`.charging`；`data.systemMetrics` 有 CPU 利用率百分比和内存可用/总字节数绑定。provider按需共享低频采集，页面不可见时停止订阅；数据不会默认周期性传入 JavaScript。GPU 当前标为不支持，不提供伪值。投放方式是否可用，以宿主当前 capability/state 为准；声明能力不代表用户已授权或预留了背屏。`rear.scene` 只有在用户已授权后才能从设置页的真实“显示到背屏”点击触发；一次点击签发单次短期激活票据。`cast.start` 同样只接受有效用户手势：Host 先显示任务选择器，用户选择准确主屏任务并二次确认后才提交。Reducer 不能自行签发票据、开场景或调用 Android 服务。
+作者声明的能力、宿主识别的声明、用户实际授权是三件事：未知能力或高于宿主支持版本的 `minimumVersion` 会在打包/导入时拒绝；必需能力须逐项授权，可选能力默认关闭；撤权不会改写模型。宿主和 CLI 支持 `rear.info@1`、`rear.scene@1`、`rear.scene.keep_visible@1`、`rear.region@1`、`rear.scene.orientation@1`、`rear.cast.virtual@1`、`rear.cast.direct_physical@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1` 与宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`、`action.invoke@1`、`clock.snapshot@1` 与 `schedule.visible@1`。数据能力仅提供通过授权的可见原生 UI 绑定：`data.battery` 有 `data.battery.level`、`.scale`、`.charging`；`data.systemMetrics` 有 CPU 利用率百分比和内存可用/总字节数绑定。provider按需共享低频采集，页面不可见时停止订阅；数据不会默认周期性传入 JavaScript。GPU 当前标为不支持，不提供伪值。投放方式是否可用，以宿主当前 capability/state 为准；声明能力不代表用户已授权或预留了背屏。`rear.scene` 只有在用户已授权后才能从设置页的真实“显示到背屏”点击触发；一次点击签发单次短期激活票据。`cast.start` 同样只接受有效用户手势：Host 先显示任务选择器，用户选择准确主屏任务并二次确认后才提交。Reducer 不能自行签发票据、开场景或调用 Android 服务。
+
+## 读取背屏与当前场景
+
+在 manifest 的 `capabilities.optional` 声明 `{"name":"rear.info","minimumVersion":1}`。用 `visibleWhen` 根据状态显示可读值，例如在背屏场景添加：
+
+```json
+{"type":"ui.number","value":{"bind":"data.rear.viewport.contentBoundsPx.width"},"visibleWhen":{"bind":"data.rear.viewport.status","equals":"READY"}}
+```
+
+| 绑定 | 什么时候可读 | 含义 |
+| --- | --- | --- |
+| `data.rear.info.status` | 可见的设置页或本 Mod 背屏场景 | `PENDING` 正在求值；`NOT_GRANTED` 未获此项授权；`DISPLAY_UNAVAILABLE` 未识别到背屏；`INFO_UNAVAILABLE` 已识别但当前读不到参数；`AVAILABLE` 可读。 |
+| `data.rear.info.*` | `AVAILABLE` | `physicalModePx.{width,height}` 为物理模式，ROM 不提供时为空；`logicalDisplayPx.{width,height}` 为逻辑显示尺寸；另有 `densityDpi`、`rotation` 和 `state`。 |
+| `data.rear.viewport.status` | 可见的设置页或本 Mod 背屏场景 | `PENDING` 正在确认权限；`NOT_GRANTED` 未获授权；`NOT_APPLICABLE` 是设置页；`NOT_READY` 尚无 Core 已接受的实测；`READY` 有当前场景测量。 |
+| `data.rear.viewport.*` | `READY` | `revision` 为本场景测量修订号；`windowPx.{width,height}`、`windowDp.{width,height}` 为窗口尺寸；`contentBoundsPx.{left,top,right,bottom}` 为显示局部像素坐标的内容矩形，`width`/`height` 为该矩形的实际宽高；另有 `region`（`SAFE`/`FULL`）、`densityDpi`、`displayRotation`、`contentRotation`、`cutoutKnowledge`。 |
+
+两个 `status` 在本机预览都为 `PREVIEW`，不提供实测值。面板状态 `state` 为 `ON`、`OFF`、`DOZE`、`DOZE_SUSPEND`、`VR` 或 `UNKNOWN`；它不是某个场景正在显示的证明。旋转值均为四分之一圈（0–3）；物理旋转和内容旋转相互独立。开孔状态为 `UNKNOWN`、`KNOWN_NONE` 或 `KNOWN_PRESENT`；未知不等于没有开孔，`SAFE` 也不会补造 ROM 未提供的安全区。视口来自当前场景实际测量，不是屏幕规格、其他窗口、预览尺寸或 Cast 视口。
+
+这些字段只能用于原生 UI，不能写入设置、作为脚本输入或请求唤醒/保持显示；隐藏后停止监听。没有授予可选的 `rear.info@1` 时，已授权的 `rear.scene@1` 仍按原条件可用。RC5 及更早的宿主拒绝声明此新能力的 ZIP；使用 1.3.0 kit 的其他现有模板未获得这项新前置条件。Android SDK 的 `queryRearInfo` 和 Scene callbacks 保持 0.5.0 契约。
 
 ## 两种 Mod：声明式与 reducer
 
 - `blank`：真正空 state 的空白原生页面。
 - `info`：无脚本电量信息示例。UI `data.*` binding 只读对应宿主数据源；不加载 VM。
+- `rear-info`：无脚本背屏设备与实测视口，默认将 `rear.info@1` 声明为可选。
 - `counter`：通用状态事务与事件测试示例，不含记分牌规则，也不依赖 host 特判。
 - `notification`：独立自有通知示例，按钮发布、更新同一通知 ID、取消自己的通知，并区分进入队列与真实显示。
 
-四个模板的默认 manifest 都声明必需的 `rear.scene@1`，让其rear场景在用户授权后可投放；`rear.scene.keep_visible@1` 为可选能力，声明不是授权。
+五个模板的默认 manifest 都声明必需的 `rear.scene@1`，让其背屏场景在用户授权后可投放；`rear.scene.keep_visible@1` 为可选能力，声明不是授权。
 
 UI 文件 `settings.ui.json` 和 `rear.ui.json` 都是有界 JSON 节点树，在设置/背屏共用 Kotlin Compose 与 Miuix renderer。可用容器为 `layout.column`、`layout.row`、`layout.box`；显示节点包括 `ui.text`、`ui.number`、`ui.list`、`ui.icon`、`ui.deadlineText`、`ui.image`、`ui.divider`、`ui.progress`、`ui.button` 与 `ui.confirm`。设置节点有 `settings.row/input/action/number/toggle/select/save/discard`。列表只绑定 schema 声明的标量数组，显示 1..32 项；条件用 `visibleWhen: {bind, equals}`，格式与语义 tone/字号/图标/布局对齐均使用宿主白名单。`ui.deadlineText`绑定 elapsedRealtime 毫秒截止值，仅可见时原生刷新，不运行 JS 或保持常亮。`layout.row` 先扣除子项间距，再将可用宽度平均分配为有界单元；嵌套列、文本和铺满宽度的控件会在各自单元内换行和测量，不会裁掉后续兄弟。按钮可发命名 reducer event，或在真实原生点击时调用宿主核验的登记动作引用；不传任意宿主函数、Intent 或 `hostAction`。
 
-Binding 使用 `{"bind":"state.some.field"}`、`config.*` 或声明能力后可用的 `data.*`，不允许表达式、路径遍历或任意代码。配置编辑是草稿；只有点击“保存设置”才一起提交，取消不会改模型。state/config 都按 manifest JSON schema 做有界递归校验；拒绝额外字段、超深结构、超大数组/字符串和超出数值范围的提交。常用上限见 `sdk/mod/README.md`。
+Binding 使用 `{"bind":"state.some.field"}`、`config.*` 或声明能力后可用的 `data.*`，不允许表达式、路径遍历或任意代码。配置编辑是草稿；只有点击“保存设置”才一起提交，取消不会改模型。state/config 都按 manifest JSON schema 做有界递归校验；拒绝额外字段、超深结构、超大数组/字符串和超出数值范围的提交。常用上限见 [Mod kit README](../README.md)。
 
 设置动作picker字段要在 `configSchema.properties` 中声明为**非 required 的可选字段**；只有 picker 保存后才会出现值。格式固定为：
 
