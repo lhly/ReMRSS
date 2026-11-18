@@ -27,6 +27,9 @@ migrate_working_dir/
 /build/
 /android/build/
 /dist/
+/sdk/mod/dist/
+/tools/device-guard-fixture/.gradle/
+/tools/device-guard-fixture/device/build/
 
 # Legacy Flutter caches left by earlier local builds
 .dart_tool/

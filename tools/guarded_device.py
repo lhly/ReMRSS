@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run one selected Android instrumentation test through a private ADB server."""
+"""Run one selected Android instrumentation test through a private ADB server.
+
+Phone use requires explicit user task authorization; the caller must review the
+selected test's side effects and recovery. Package cleanup does not restore
+other device state or constrain commands issued by the instrumentation itself.
+"""
 from __future__ import annotations
 
 import argparse
@@ -27,11 +32,7 @@ class GuardError(RuntimeError):
     pass
 
 
-def read_session(path: Path) -> dict[str, Any]:
-    try:
-        session = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise GuardError(f"无法读取设备session: {exc}") from exc
+def validate_session(session: Any) -> dict[str, Any]:
     if (not isinstance(session, dict) or isinstance(session.get("schema_version"), bool) or
             session.get("schema_version") != 1):
         raise GuardError("session必须使用schema_version=1")
@@ -66,6 +67,14 @@ def read_session(path: Path) -> dict[str, Any]:
     elif target.get("expected_serial") != PHONE_DEVICE:
         raise GuardError(f"真机目标必须固定expected_serial={PHONE_DEVICE}")
     return session
+
+
+def read_session(path: Path) -> dict[str, Any]:
+    try:
+        session = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GuardError(f"无法读取设备session: {exc}") from exc
+    return validate_session(session)
 
 
 def find_adb(explicit: str | None) -> str:
@@ -323,16 +332,24 @@ def parse_instrumentation_output(output: str, selector: str) -> int:
     return summary_count
 
 
-def confirm_after_install_failure(adb: str, session: dict[str, Any], package: str, original_error: Exception) -> bool:
+def confirm_after_install_failure(adb: str, session: dict[str, Any], package: str, original_error: BaseException) -> bool:
     try:
         return package_installed(adb, session, package)
     except Exception as query_error:
-        raise GuardError(f"安装失败: {original_error}\n无法确认是否需要清理 {package}: {query_error}") from original_error
+        raise GuardError(f"安装失败: {original_error}\n设备包状态未知，无法确认是否需要清理 {package}: {query_error}") from original_error
 
 
-def run_instrument(adb: str, session: dict[str, Any], app_apk: Path, test_apk: Path, runner: str, selector: str, aapt: str, timeout: float) -> None:
-    if session["target"]["kind"] != "emulator":
-        raise GuardError("instrumentation只允许root专用emulator；真机不安装debug/test APK")
+def run_instrument(adb: str, session: dict[str, Any], app_apk: Path, test_apk: Path, runner: str, selector: str, aapt: str, timeout: float, *, allow_phone_debug_tests: bool = False) -> None:
+    target = session.get("target") if isinstance(session, dict) else None
+    kind = target.get("kind") if isinstance(target, dict) else None
+    if allow_phone_debug_tests and kind != "phone":
+        raise GuardError("--allow-phone-debug-tests仅适用于phone目标")
+    if kind == "phone" and not allow_phone_debug_tests:
+        raise GuardError("真机instrumentation默认关闭；仅在显式授权时使用--allow-phone-debug-tests")
+    if kind not in {"emulator", "phone"}:
+        raise GuardError("instrumentation目标类型无效")
+    if kind == "phone":
+        validate_session(session)
     validate_test_selector(selector)
     app_package, _ = apk_metadata(aapt, app_apk)
     test_package, declarations = apk_metadata(aapt, test_apk)
@@ -343,7 +360,7 @@ def run_instrument(adb: str, session: dict[str, Any], app_apk: Path, test_apk: P
     runner_component = normalize_runner(runner, test_package, declarations, app_package)
 
     installed: list[str] = []
-    operation_error: Exception | None = None
+    operation_error: BaseException | None = None
     try:
         validate_identity(adb, session)
         for package in (app_package, test_package):
@@ -355,9 +372,14 @@ def run_instrument(adb: str, session: dict[str, Any], app_apk: Path, test_apk: P
             if not reported_success(install_output):
                 raise GuardError(f"应用APK安装未成功: {install_output}")
             installed.append(app_package)
-        except Exception as exc:
-            if confirm_after_install_failure(adb, session, app_package, exc):
-                installed.append(app_package)
+        except BaseException as exc:
+            try:
+                if confirm_after_install_failure(adb, session, app_package, exc):
+                    installed.append(app_package)
+            except Exception as query_error:
+                if isinstance(exc, Exception):
+                    raise
+                print(f"安装中断；{app_package}状态未知，无法确认/清理。由设备操作负责人核对设备并恢复：{query_error}", file=sys.stderr)
             raise
         validate_identity(adb, session)
         try:
@@ -365,9 +387,14 @@ def run_instrument(adb: str, session: dict[str, Any], app_apk: Path, test_apk: P
             if not reported_success(install_output):
                 raise GuardError(f"test APK安装未成功: {install_output}")
             installed.append(test_package)
-        except Exception as exc:
-            if confirm_after_install_failure(adb, session, test_package, exc):
-                installed.append(test_package)
+        except BaseException as exc:
+            try:
+                if confirm_after_install_failure(adb, session, test_package, exc):
+                    installed.append(test_package)
+            except Exception as query_error:
+                if isinstance(exc, Exception):
+                    raise
+                print(f"安装中断；{test_package}状态未知，无法确认/清理。由设备操作负责人核对设备并恢复：{query_error}", file=sys.stderr)
             raise
         validate_identity(adb, session)
         output = adb_call(
@@ -378,7 +405,7 @@ def run_instrument(adb: str, session: dict[str, Any], app_apk: Path, test_apk: P
         )
         print(output)
         parse_instrumentation_output(output, selector)
-    except Exception as exc:
+    except BaseException as exc:
         operation_error = exc
 
     cleanup_errors: list[str] = []
@@ -391,7 +418,10 @@ def run_instrument(adb: str, session: dict[str, Any], app_apk: Path, test_apk: P
         except Exception as exc:
             cleanup_errors.append(f"{package}: {exc}")
     if operation_error and cleanup_errors:
-        raise GuardError(f"测试失败: {operation_error}\n本轮新增包清理也失败: {'; '.join(cleanup_errors)}") from operation_error
+        message = f"中断/测试失败: {operation_error}\n本轮新增包清理也失败: {'; '.join(cleanup_errors)}"
+        if isinstance(operation_error, Exception):
+            raise GuardError(message) from operation_error
+        print(message, file=sys.stderr)
     if operation_error:
         raise operation_error
     if cleanup_errors:
@@ -404,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     verify = commands.add_parser("verify", help="只读核验session目标；不安装、运行或清理包")
     verify.add_argument("--session", type=Path, required=True, help="root私有设备session JSON")
     verify.add_argument("--adb", help="本机ADB可执行文件路径；未给时从ANDROID_HOME查找")
-    instrument = commands.add_parser("instrument", help="在root专用模拟器执行单个选定debug instrumentation测试")
+    instrument = commands.add_parser("instrument", help="在root专用模拟器或显式授权的固定真机执行单个debug instrumentation测试；清理仅移除本轮新增APK")
     instrument.add_argument("--session", type=Path, required=True, help="root私有设备session JSON")
     instrument.add_argument("--adb", help="本机ADB可执行文件路径；未给时从ANDROID_HOME查找")
     instrument.add_argument("--aapt", help="本机aapt可执行文件路径；未给时从ANDROID_HOME查找")
@@ -413,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     instrument.add_argument("--runner", required=True, help="APK manifest中声明的Instrumentation Java类")
     instrument.add_argument("--class", dest="selector", required=True, help="一个本项目测试类，可选追加#method")
     instrument.add_argument("--timeout", type=float, default=180.0)
+    instrument.add_argument("--allow-phone-debug-tests", action="store_true", help="显式允许在已核验的固定真机安装/运行本项目debug与test APK；默认拒绝")
     args = parser.parse_args(argv)
     try:
         session = read_session(args.session)
@@ -425,7 +456,8 @@ def main(argv: list[str] | None = None) -> int:
             raise GuardError("timeout必须大于0")
         validate_test_selector(args.selector)
         aapt = aapt_path(args.aapt)
-        run_instrument(adb, session, args.app_apk, args.test_apk, args.runner, args.selector, aapt, args.timeout)
+        run_instrument(adb, session, args.app_apk, args.test_apk, args.runner, args.selector, aapt, args.timeout,
+                       allow_phone_debug_tests=args.allow_phone_debug_tests)
     except (GuardError, OSError, subprocess.SubprocessError) as exc:
         print(f"设备入口拒绝/失败: {exc}", file=sys.stderr)
         return 2
