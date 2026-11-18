@@ -1,13 +1,13 @@
-## ReMRSS Mod SDK kit 1.2.0
+## ReMRSS Mod SDK kit 1.3.0
 
-**RC5 作者入口（kit 1.2.0，接口版本不变）**：在本目录运行以下命令，在本机创建、检查、预览并打包 Mod；然后在 ReMRSS 导入 ZIP、审核作者与能力授权，再从 Mod 卡片打开本机预览或启用。Mod 用 JSON 声明原生场景；只有需要自定义业务规则时才附带 `main.js`。无脚本包不会启动 JavaScript runtime。下面的命令就是从空模板到可导入 ZIP 的完整起点。
+**RC6 作者入口**：解压 `remrss-mod-kit-1.3.0.zip`，在解压目录运行以下命令（无需宿主源码或 Android 构建环境），在本机创建、检查、预览并打包 Mod；然后在 ReMRSS 导入 ZIP、审核作者与能力授权，再从 Mod 卡片打开本机预览或启用。Mod 用 JSON 声明原生场景；只有需要自定义业务规则时才附带 `main.js`。无脚本包不会启动 JavaScript runtime。下面的命令就是从空模板到可导入 ZIP 的完整起点。
 
 ## 快速开始
 
 需要 Python 3.10+、OpenSSL（只用于作者密钥签名/验证）；含 reducer 的开发测试还需要 Node.js 18+。Node 只跑作者本机的确定性规则测试，不进入 Android 包，也不替代宿主 QuickJS。
 
 ```sh
-./bin/remrss create sample-panel --template info --author "Your name"
+./bin/remrss create sample-panel --template rear-info --author "Your name"
 ./bin/remrss check sample-panel
 ./bin/remrss test sample-panel
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private.pem
@@ -23,8 +23,12 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private
 
 请在自己的密钥管理器中保存私钥；不要提交、发给宿主维护者或放入 ZIP。`pack` 从私钥导出公钥，仅写入 `author.pub`，生成 `manifest.sig` 后再执行完整包验签回读。
 
-模板：`blank` 是真正空 state、且不启动 VM 的声明式页面；`info` 是复用宿主电量来源的无脚本面板；`counter` 是中性的通用 reducer 演练，不含计分牌规则或宿主专用业务分支；保存“每次增减”后，它通过 `host.configChanged` 原子更新用于界面显示的派生状态，不需要再点一次“重新计算”；`notification` 是带发布、更新、取消按钮和真实结果状态的独立通知示例。四个模板都声明必需的 `rear.scene@1`，使其默认 rear scene 在用户授权后可投放；`rear.scene.keep_visible@1` 是可选声明，`notification` 的 `rear.notification@1` 也默认可选。声明从不代表用户已授权，用户仍会在导入时逐项选择。
+模板：`blank` 是真正空 state、且不启动 VM 的声明式页面；`info` 是复用宿主电量来源的无脚本面板；`rear-info` 是背屏设备数据和实测视口的无脚本面板；`counter` 是中性的通用 reducer 演练，不含计分牌规则或宿主专用业务分支；保存“每次增减”后，它通过 `host.configChanged` 原子更新用于界面显示的派生状态，不需要再点一次“重新计算”；`notification` 是带发布、更新、取消按钮和真实结果状态的独立通知示例。五个模板都声明必需的 `rear.scene@1`，使其默认 rear scene 在用户授权后可投放；`rear.scene.keep_visible@1` 是可选声明，`notification` 的 `rear.notification@1` 也默认可选。声明从不代表用户已授权，用户仍会在导入时逐项选择。
 
+
+导入 ZIP 后选择是否授予背屏信息，启用面板。打开设置可看设备数据；点击“显示到背屏”后，面板只展示自己的窗口。要更新这个面板，用原作者密钥、相同 Mod ID、递增的 `versionCode` 和新 `version` 重新打包，再从 Mod 管理导入。只改界面不用增 `dataVersion`。
+
+[按场景查阅 `rear.info@1` 字段、状态和兼容条件](docs/mod-sdk.md#读取背屏与当前场景)。
 
 ## 保存配置并更新派生状态
 
@@ -86,7 +90,7 @@ ZIP 条目仅含 `manifest.json`、`manifest.sig`、`author.pub` 及 manifest �
 }
 ```
 
-`minimumVersion` 与 core `CapabilityRequirement(name, minimumVersion)` 同形；当前 CLI 开放 `rear.scene@1`、`rear.scene.keep_visible@1`、`rear.region@1`、`rear.scene.orientation@1`、`rear.cast.virtual@1`、`rear.cast.direct_physical@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1`、`action.invoke@1`、`clock.snapshot@1`、`schedule.visible@1`，以及宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`。设备能力、后端连接、作者信任和用户逐项授权由宿主分别判断；声明不等于授权。数据能力的绑定路径、订阅边界和其他作者操作见[作者快速上手](docs/mod-sdk.md#包协议与作者身份)。
+`minimumVersion` 与 core `CapabilityRequirement(name, minimumVersion)` 同形；当前 CLI 开放 `rear.info@1`、`rear.scene@1`、`rear.scene.keep_visible@1`、`rear.region@1`、`rear.scene.orientation@1`、`rear.cast.virtual@1`、`rear.cast.direct_physical@1`、`rear.notification@1`、`data.battery@1`、`data.systemMetrics@1`、`action.invoke@1`、`clock.snapshot@1`、`schedule.visible@1`，以及宿主管理的 `model.local@1`、`ui.native@1`、`ui.dialog@1`。设备能力、后端连接、作者信任和用户逐项授权由宿主分别判断；声明不等于授权。数据能力的绑定路径、订阅边界和其他作者操作见[作者快速上手](docs/mod-sdk.md#包协议与作者身份)。
 
 ### RC5 Scene 与 Cast 接入
 

@@ -6,7 +6,6 @@ import android.app.ActivityOptions
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.hardware.display.DisplayManager
 import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
@@ -184,32 +183,7 @@ class RemoteRearPlatformService : Service() {
                 CapabilityState("rear.notification", 1, CapabilityAvailability.AVAILABLE,
                     core.isSdkNotificationPublisherGranted(owner))
             ))
-            val displayId = runCatching { top.zainzh.rearscreen.RearDisplay.id() }.getOrDefault(-1)
-            val displayManager = getSystemService(DISPLAY_SERVICE) as? DisplayManager
-            val display = displayManager?.getDisplay(displayId)?.takeIf { displayId > 0 && it.isValid }
-            val displayInfo = display?.let { value ->
-                val metrics = android.util.DisplayMetrics()
-                @Suppress("DEPRECATION") value.getRealMetrics(metrics)
-                // Display.Mode is the mode's physical raster; getRealMetrics is the current
-                // logical display size and may reflect wm size overrides. Never conflate them.
-                val mode = runCatching { value.mode }.getOrNull()
-                val dimensions = runCatching {
-                    RearDisplayDimensions(
-                        mode?.physicalWidth?.takeIf { it > 0 }, mode?.physicalHeight?.takeIf { it > 0 },
-                        metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, value.rotation
-                    )
-                }.getOrNull()
-                if (dimensions == null) null else JSONObject().put("displayId", value.displayId)
-                    .put("dimensions", dimensions?.toJson() ?: JSONObject.NULL)
-                    .put("state", when (value.state) {
-                        android.view.Display.STATE_ON -> "ON"
-                        android.view.Display.STATE_OFF -> "OFF"
-                        android.view.Display.STATE_DOZE -> "DOZE"
-                        android.view.Display.STATE_DOZE_SUSPEND -> "DOZE_SUSPEND"
-                        android.view.Display.STATE_VR -> "VR"
-                        else -> "UNKNOWN"
-                    })
-            }
+            val displayInfo = core.readRearDeviceInfo().toDisplayJson()
             return JSONObject().put("contract", capabilities.platformContract)
                 .put("deviceAvailable", capabilities.deviceAvailable)
                 .put("backendConnected", capabilities.backendConnected)

@@ -36,7 +36,7 @@ object ModPackageReader {
     private const val opaqueActionIdPattern = "^[a-f0-9]{48}$"
     private val versionPattern = Regex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
     private val capabilities = mapOf(
-        "rear.scene" to 1, "rear.scene.keep_visible" to 1, "rear.region" to 1, "rear.scene.orientation" to 1,
+        ModRearInfoBindings.CAPABILITY to 1, "rear.scene" to 1, "rear.scene.keep_visible" to 1, "rear.region" to 1, "rear.scene.orientation" to 1,
         "rear.cast.virtual" to 1, "rear.cast.direct_physical" to 1,
         "data.battery" to 1, "data.systemMetrics" to 1,
         "model.local" to 1, "ui.native" to 1, "ui.dialog" to 1, "action.invoke" to 1, "schedule.visible" to 1, "clock.snapshot" to 1,
@@ -463,13 +463,18 @@ object ModPackageReader {
             "config" -> require(ModJsonSchema.hasPath(manifest.configSchema, field)) { "config binding 未在 schema 声明：$path" }
             "data" -> {
                 val source = field.substringBefore('.')
-                val requiredCapability = when (source) { "battery" -> "data.battery"; "systemMetrics" -> "data.systemMetrics"; else -> null }
+                val requiredCapability = when (source) {
+                    "battery" -> "data.battery"
+                    "systemMetrics" -> "data.systemMetrics"
+                    "rear" -> ModRearInfoBindings.CAPABILITY
+                    else -> null
+                }
                 require(requiredCapability != null && requiredCapability in caps) { "data binding 未声明数据能力：$path" }
                 val supportedPath = when (field) {
                     "battery.level", "battery.scale", "battery.charging",
                     "systemMetrics.cpu.utilizationPercent",
                     "systemMetrics.memory.availableBytes", "systemMetrics.memory.totalBytes" -> true
-                    else -> false
+                    else -> field in ModRearInfoBindings.paths
                 }
                 require(supportedPath) { "宿主未提供此数据字段：$path" }
             }

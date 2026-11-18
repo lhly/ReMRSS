@@ -14,13 +14,40 @@ MAX_UI = 64 * 1024
 TOKEN = re.compile(r"^[a-z][A-Za-z0-9._-]{0,63}$")
 SCHEMA_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 CAPABILITY_NAMES = {
-    "rear.scene": 1, "rear.scene.keep_visible": 1, "rear.region": 1, "rear.scene.orientation": 1,
+    "rear.info": 1, "rear.scene": 1, "rear.scene.keep_visible": 1, "rear.region": 1, "rear.scene.orientation": 1,
     "rear.cast.virtual": 1, "rear.cast.direct_physical": 1,
     "data.battery": 1, "data.systemMetrics": 1,
     "model.local": 1, "ui.native": 1, "ui.dialog": 1, "action.invoke": 1, "schedule.visible": 1, "clock.snapshot": 1,
     "rear.notification": 1,
 }
 DATA_BINDINGS = {
+    "rear.info": {
+        "rear.info.status",
+        "rear.info.state",
+        "rear.info.densityDpi",
+        "rear.info.rotation",
+        "rear.info.physicalModePx.width",
+        "rear.info.physicalModePx.height",
+        "rear.info.logicalDisplayPx.width",
+        "rear.info.logicalDisplayPx.height",
+        "rear.viewport.status",
+        "rear.viewport.revision",
+        "rear.viewport.region",
+        "rear.viewport.densityDpi",
+        "rear.viewport.displayRotation",
+        "rear.viewport.contentRotation",
+        "rear.viewport.windowPx.width",
+        "rear.viewport.windowPx.height",
+        "rear.viewport.windowDp.width",
+        "rear.viewport.windowDp.height",
+        "rear.viewport.contentBoundsPx.left",
+        "rear.viewport.contentBoundsPx.top",
+        "rear.viewport.contentBoundsPx.right",
+        "rear.viewport.contentBoundsPx.bottom",
+        "rear.viewport.contentBoundsPx.width",
+        "rear.viewport.contentBoundsPx.height",
+        "rear.viewport.cutoutKnowledge",
+    },
     "data.battery": {"battery.level", "battery.scale", "battery.charging"},
     "data.systemMetrics": {
         "systemMetrics.cpu.utilizationPercent",
@@ -28,6 +55,7 @@ DATA_BINDINGS = {
         "systemMetrics.memory.totalBytes",
     },
 }
+DATA_SOURCE_CAPABILITIES = {"battery": "data.battery", "systemMetrics": "data.systemMetrics", "rear": "rear.info"}
 MOD_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 KNOWN_NODES = {"layout.column", "layout.row", "layout.box", "ui.text", "ui.number", "ui.list", "ui.icon", "ui.deadlineText", "ui.image", "ui.divider", "ui.progress", "ui.button", "settings.row", "settings.input", "settings.action", "settings.number", "settings.toggle", "settings.select", "settings.save", "settings.discard", "ui.confirm"}
@@ -202,7 +230,7 @@ def validate_ui(value, state_schema, config_schema, capabilities, runtime_kind):
                 if ns == "config" and not schema_has_path(config_schema, first): fail(f"绑定路径未在 configSchema 声明：{path}")
                 if ns == "data":
                     source=first.split(".",1)[0]
-                    required={"battery":"data.battery", "systemMetrics":"data.systemMetrics"}.get(source)
+                    required=DATA_SOURCE_CAPABILITIES.get(source)
                     if required is None or required not in capabilities: fail(f"数据绑定 {path} 未声明对应能力 {required or source}")
                     if first not in DATA_BINDINGS[required]: fail(f"宿主未提供此数据字段：{path}")
             elif key=="value" and isinstance(v,(str,int,float,bool)):
@@ -223,7 +251,7 @@ def validate_ui(value, state_schema, config_schema, capabilities, runtime_kind):
             ns,field=path.split(".",1)
             if ns=="state" and not schema_has_path(state_schema,field) or ns=="config" and not schema_has_path(config_schema,field): fail(f"visibleWhen binding 未在 schema 声明：{path}")
             if ns=="data":
-                source=field.split(".",1)[0]; capability={"battery":"data.battery","systemMetrics":"data.systemMetrics"}.get(source)
+                source=field.split(".",1)[0]; capability=DATA_SOURCE_CAPABILITIES.get(source)
                 if capability not in capabilities or field not in DATA_BINDINGS.get(capability,set()): fail(f"visibleWhen 数据绑定未声明：{path}")
         if typ == "ui.list":
             path=node["items"].get("bind") if isinstance(node["items"],dict) else None
@@ -545,6 +573,8 @@ def init_project(target: Path, mod_id: str, template: str, author: str):
     optional_capabilities = [{"name":"rear.scene.keep_visible", "minimumVersion":1}]
     if template == "notification":
         optional_capabilities.append({"name":"rear.notification", "minimumVersion":1})
+    if template == "rear-info":
+        optional_capabilities.append({"name":"rear.info", "minimumVersion":1})
     if template == "info":
         required_capabilities.append({"name":"data.battery", "minimumVersion":1})
     state_schema = ({"type":"object","properties":{
@@ -780,7 +810,7 @@ def dev_reload_package(root: Path, key: Path, installed: Path, output: Path):
 def main():
     parser=argparse.ArgumentParser(prog="remrss",description="ReMRSS ZIP Mod author tools")
     sub=parser.add_subparsers(dest="cmd",required=True)
-    c=sub.add_parser("create"); c.add_argument("id"); c.add_argument("--template",choices=["blank","info","counter","notification"],default="blank"); c.add_argument("--author",default="Mod author"); c.add_argument("--out",type=Path)
+    c=sub.add_parser("create"); c.add_argument("id"); c.add_argument("--template",choices=["blank","info","counter","notification","rear-info"],default="blank"); c.add_argument("--author",default="Mod author"); c.add_argument("--out",type=Path)
     chk=sub.add_parser("check"); chk.add_argument("target",type=Path)
     tst=sub.add_parser("test"); tst.add_argument("project",type=Path)
     prv=sub.add_parser("preview"); prv.add_argument("project",type=Path)

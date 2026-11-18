@@ -232,12 +232,29 @@
       ],
       "properties": {
         "name": {
-          "type": "string",
-          "pattern": "^[a-z][A-Za-z0-9._-]{0,63}$"
+          "enum": [
+            "action.invoke",
+            "clock.snapshot",
+            "data.battery",
+            "data.systemMetrics",
+            "model.local",
+            "rear.cast.direct_physical",
+            "rear.cast.virtual",
+            "rear.info",
+            "rear.notification",
+            "rear.region",
+            "rear.scene",
+            "rear.scene.keep_visible",
+            "rear.scene.orientation",
+            "schedule.visible",
+            "ui.dialog",
+            "ui.native"
+          ]
         },
         "minimumVersion": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 1
         }
       }
     }

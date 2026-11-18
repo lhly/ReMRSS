@@ -1,5 +1,11 @@
 # ReMRSS Mod SDK changes
 
+## 1.3.0 — RC6
+
+- Add the authorized, read-only `rear.info@1` native UI bindings for display facts and the Mod's measured scene viewport.
+- Add the script-free `rear-info` template and a standalone author kit ZIP.
+- Native preview can show fixed notification and charging covers without a rear display lease.
+
 ## 1.2.0 RC4 local candidate — 2026-11-08
 
 - Add independently authorized `rear.notification@1` publish/upsert/cancel Mod Effects through the shared host-owned notification router.

@@ -382,6 +382,7 @@ class ModSettingsActivity : ComponentActivity() {
     }
 
     private fun capabilityLabel(name: String): String = when (name) {
+        ModRearInfoBindings.CAPABILITY -> "背屏信息与当前场景视口"
         "data.battery" -> "电池信息"
         "data.systemMetrics" -> "设备运行指标"
         "rear.scene" -> "背屏显示"

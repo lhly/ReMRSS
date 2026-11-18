@@ -181,7 +181,8 @@ class ModConfigActivity : ComponentActivity() {
             if (active == null || current == null) {
                 Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) { Text(if (error.isEmpty()) "正在加载设置…" else error, color = AppPalette.secondary()) }
             } else {
-                ModNativeScene(active, active.settingsScene, current.state, current.config, hostData, false,
+                val bindings = withModRearInfo(this@ModConfigActivity, active, hostData, sceneVisible)
+                ModNativeScene(active, active.settingsScene, current.state, current.config, bindings, false,
                     onBack = ::finish,
                     onEvent = {
                         if (!sceneVisible || isFinishing || isDestroyed ||
