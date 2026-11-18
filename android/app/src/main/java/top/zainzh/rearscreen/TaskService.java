@@ -31,8 +31,8 @@ public class TaskService extends ITaskService.Stub {
     private static final String TAG = "TaskService";
     private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
             BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
-    static final int USER_SERVICE_CONTRACT_VERSION = 98;
-    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 102 : USER_SERVICE_CONTRACT_VERSION;
+    static final int USER_SERVICE_CONTRACT_VERSION = 99;
+    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 103 : USER_SERVICE_CONTRACT_VERSION;
     private final Object mainTaskFocusLock = new Object();
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {
@@ -60,6 +60,49 @@ public class TaskService extends ITaskService.Stub {
     @Override public void prepareOfficialThemeHost(int task, String component, android.os.IBinder owner) { throw new UnsupportedOperationException("E_UNSUPPORTED: official themes are not part of RC1"); }
     @Override public void cancelOfficialThemeHost(android.os.IBinder owner) { throw new UnsupportedOperationException("E_UNSUPPORTED: official themes are not part of RC1"); }
 
+    private final AiRearWallpaperFiles aiWallpapers = new AiRearWallpaperFiles(new java.io.File(
+            "/storage/emulated/0/Android/data/com.android.thememanager/files/MIUI/.ai_wallpaper/maml"));
+
+    private void requireAiWallpaperCaller() {
+        // The path above is for the primary user only. Never let a profile write another user's files.
+        if (!AiRearWallpaperSupport.supported() || ownerUid >= 0 || android.os.Process.myUid() != 2000 || !isHostApplicationCaller()
+                || !android.os.UserHandle.getUserHandleForUid(android.os.Binder.getCallingUid())
+                        .equals(android.os.UserHandle.getUserHandleForUid(2000)))
+            throw new SecurityException("AI rear wallpaper requires Shizuku shell and the primary host user");
+    }
+
+    @Override public String listAiRearWallpapers(String languageTag) {
+        requireAiWallpaperCaller();
+        if (languageTag == null || languageTag.length() > 80) throw new IllegalArgumentException("Invalid locale");
+        try { return aiWallpapers.inventory(languageTag); }
+        catch (java.io.IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
+    }
+
+    @Override public String copyAiRearWallpaper(String id, boolean thumbnail, android.os.ParcelFileDescriptor destination) {
+        try (java.io.OutputStream out = new android.os.ParcelFileDescriptor.AutoCloseOutputStream(destination)) {
+            requireAiWallpaperCaller();
+            return aiWallpapers.copy(id, thumbnail, out);
+        } catch (java.io.IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
+    }
+
+    @Override public void replaceAiRearWallpaper(String id, android.os.ParcelFileDescriptor original,
+            android.os.ParcelFileDescriptor replacement) {
+        try (java.io.InputStream expected = new android.os.ParcelFileDescriptor.AutoCloseInputStream(original);
+             java.io.InputStream candidate = new android.os.ParcelFileDescriptor.AutoCloseInputStream(replacement)) {
+            requireAiWallpaperCaller();
+            aiWallpapers.replace(id, expected, candidate);
+        } catch (java.io.IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
+    }
+
+    @Override public boolean restoreAiRearWallpaper(String id, android.os.ParcelFileDescriptor applied,
+            android.os.ParcelFileDescriptor original) {
+        try (java.io.InputStream installed = new android.os.ParcelFileDescriptor.AutoCloseInputStream(applied);
+             java.io.InputStream preimage = new android.os.ParcelFileDescriptor.AutoCloseInputStream(original)) {
+            requireAiWallpaperCaller();
+            return aiWallpapers.restore(id, installed, preimage);
+        } catch (java.io.IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
+    }
+
     @Override public String getRearCastViewport() {
         if (!BuildConfig.VIRTUAL_CAST_ENABLED) throw new SecurityException("Virtual casting is unavailable");
         try { return RearCastGeometry.encode(RearCastGeometry.read()); }
@@ -72,6 +115,17 @@ public class TaskService extends ITaskService.Stub {
     @Override public String startRearVirtualCast(android.view.Surface surface, String path, int task, int host, int density, String component, android.os.IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility, int rotation, boolean full) {
         try { return virtualCast.start(surface, path, task, host, density, component, owner, gestures, viewport, compatibility, rotation, full); }
         catch (Exception e) { throw new IllegalStateException("Rear virtual cast: " + e, e); }
+    }
+    @Override public String startParkedWallpaperCast(android.view.Surface surface, String path,
+            int host, int density, String component, android.os.IBinder owner, IRearGestureListener gestures,
+            String viewport, boolean compatibility, int rotation, boolean full, ISceneTaskActionGate launchGate) {
+        requireAiWallpaperCaller();
+        if (launchGate == null)
+            throw new SecurityException("Parked wallpaper casting is unavailable");
+        try {
+            return virtualCast.startDisposableWallpaperCast(surface, path, host, density, component, owner,
+                    gestures, viewport, compatibility, rotation, full, launchGate);
+        } catch (Exception e) { throw new IllegalStateException("Parked wallpaper cast: " + e, e); }
     }
     @Override public String prepareRearVirtualCastReplacement(String previousId, long previousGeneration,
             long previousOwnerGeneration, String previousOwnerIdentity, int previousTask, int previousHost,
@@ -161,6 +215,12 @@ public class TaskService extends ITaskService.Stub {
     @Override public String getRearVirtualCastStatus() { return virtualCast.status(); }
     @Override public boolean renewRearVirtualCastLease(String id) { return virtualCast.renew(id); }
     @Override public void stopRearVirtualCast(String id) { virtualCast.stop(id); }
+    @Override public void stopParkedWallpaperCast(String id, IRearWallpaperOutputReleased receipt) {
+        requireAiWallpaperCaller();
+        if (id == null || receipt == null)
+            throw new SecurityException("Parked wallpaper cast release is unavailable");
+        virtualCast.stopWallpaper(id, receipt);
+    }
     @Override public boolean setRearCastNotificationBounds(String id, long token, int left, int top, int right, int bottom) {
         return virtualCast.notification(id, token, left, top, right, bottom);
     }
@@ -666,7 +726,7 @@ public class TaskService extends ITaskService.Stub {
                 || !oldPackage.equals(packageOfComponent(oldBase))
                 || !newPackage.equals(packageOfComponent(newBase)))
             return physicalBottomFocusResult("rejected", "invalid_replacement_authority", false);
-        if (!physicalBottomFocusCallerAllowed())
+        if (!isHostApplicationCaller())
             return physicalBottomFocusResult("rejected", "caller_rejected", false);
         if (!PhysicalReplacementBottomFocus.supportedDevice(Build.DEVICE, Build.MODEL)
                 || !RearSystemBridge.supportsPhysicalReplacementBottomFocus())
@@ -754,7 +814,7 @@ public class TaskService extends ITaskService.Stub {
         }
     }
 
-    private boolean physicalBottomFocusCallerAllowed() {
+    private boolean isHostApplicationCaller() {
         try {
             int expectedUid = RearSystemBridge.systemContext().getPackageManager()
                     .getApplicationInfo(BuildConfig.APPLICATION_ID, 0).uid;

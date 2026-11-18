@@ -393,3 +393,15 @@ fun finishMyCast() {
 关闭成功回执可以是“已接受”，不保证已归还屏幕或释放资源。这个例子一次只跟踪一笔投放：保留原句柄查询最终状态，再开始下一笔。`CLOSING` 时不要丢掉它，也不需要后台轮询。重连后只查询或关闭同一应用仍持有的有效句柄，不按 task ID 寻找投放。
 
 不提供 `region` 或 `contentRotation` 会沿用目标 app 已保存的偏好；显式 `0` 与省略不同。`DIRECT_PHYSICAL` 仅在 capability 明确 `AVAILABLE` 时可选，且该模式不能指定 region、content rotation 或 density。能力查询不预留背屏；不支持的交接、非受控占用或状态无法确认时，请求会失败，不会自动改用 `VIRTUAL`。用户同意受控替换不等于把旧句柄转交给新应用：只能查询或关闭本应用持有、且当前代次匹配的句柄。SDK client 断连不会关闭已提交的 session；需显式 `closeCastSession(handle)` 结束本应用的投放。
+
+## 打开自定义背屏编辑器
+
+RC6 在支持机型上接受 `mrss://rear-wallpaper`，可从已解锁的主屏打开 ReMRSS 的编辑器。导航不需要绑定 SDK 服务；不能替用户应用模板、选择 App、写入壁纸或启动一次锁屏投放。
+
+```kotlin
+val settings = Intent(Intent.ACTION_VIEW, Uri.parse("mrss://rear-wallpaper"))
+    .setPackage("top.zainzh.rearscreen")
+startActivity(settings)
+```
+
+不要附带参数。旧版或不支持的机型不会进入此页；[用户操作与兼容范围](../../../docs/rear-wallpaper-shortcuts.md)。

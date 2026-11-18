@@ -31,6 +31,22 @@ int main(void) {
     assert(feed(&terminal, "Q\nR 9\n") == CONTROL_IGNORE);
     assert(terminal.quit && !terminal.resume_pending && !terminal.resume_edge);
 
+    const int one_contact[] = {-1, 34, -1};
+    const int two_contacts[] = {19, -1, 34};
+    const int no_contact[] = {-1, -1, -1};
+    assert(!reader_contacts_neutral(one_contact, 3));
+    assert(!reader_contacts_neutral(two_contacts, 3));
+    assert(reader_contacts_neutral(no_contact, 3));
+    ReaderControlState pending = {.paused = 1};
+    assert(!reader_take_idle_arm(&pending, 1)); /* Observation alone never grants input. */
+    assert(feed(&pending, "R 0\n") == CONTROL_RESUME);
+    assert(!reader_take_idle_arm(&pending, 0)); /* A new DOWN consumes, not defers, this authorization. */
+    assert(!reader_take_idle_arm(&pending, 1));
+    assert(feed(&pending, "R 0\n") == CONTROL_RESUME);
+    assert(reader_take_idle_arm(&pending, 1));
+    assert(feed(&pending, "Q\nR 0\n") == CONTROL_IGNORE);
+    assert(!reader_take_idle_arm(&pending, 1));
+
     assert(reader_watchdog_timeout_ms(1000, 1000) == 4000);
     assert(reader_watchdog_timeout_ms(1000, 4999) == 1);
     assert(reader_watchdog_timeout_ms(1000, 5000) == 0);

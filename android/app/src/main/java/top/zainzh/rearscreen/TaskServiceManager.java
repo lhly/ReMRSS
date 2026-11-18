@@ -85,6 +85,14 @@ public final class TaskServiceManager {
         return connected != null && connected.isBinderAlive() ? ITaskService.Stub.asInterface(connected) : null;
     }
 
+    /** The stock tap may only use the binding held by the already prepared rear host. */
+    static ITaskService peekConnectedServiceForWallpaper() {
+        IBinder connected = INSTANCE.binder;
+        if (connected == null) return null;
+        ITaskService remote = ITaskService.Stub.asInterface(connected);
+        return isConnectedServiceCurrent(remote) ? remote : null;
+    }
+
     /** Read-only identity check used by controlled host handoffs to reject replaced service binders. */
     static boolean isConnectedServiceCurrent(ITaskService candidate) {
         if (candidate == null) return false;

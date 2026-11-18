@@ -27,6 +27,22 @@ public final class VirtualCastTerminalStatus {
         return status;
     }
 
+    /** A parked host can accept another cast only after its exact display and reader have closed. */
+    static boolean matchesReleasedParkedCast(JSONObject owned, JSONObject stopped) {
+        if (owned == null || stopped == null
+                || !exact(stopped, "id", owned.optString("id"))
+                || !exact(stopped, "state", "stopped")
+                || !Boolean.FALSE.equals(stopped.opt("outputAvailable"))
+                || !Boolean.TRUE.equals(stopped.opt("managerResourcesStopped"))) return false;
+        int host = owned.optInt("host", -1), task = owned.optInt("task", -1);
+        int display = owned.optInt("display", -1);
+        if (host <= 0 || task <= 0 || display <= 0 || host != stopped.optInt("host", -1)
+                || task != stopped.optInt("task", -1) || display != stopped.optInt("display", -1)) return false;
+        JSONObject input = stopped.optJSONObject("managerInput");
+        return input != null && exact(input, "id", owned.optString("readerId"))
+                && task == input.optInt("task", -1) && display == input.optInt("display", -1);
+    }
+
     /** Both the live cast and its actual active input reader must match the approved P→V operation. */
     static boolean matchesRunningPhysicalReplacement(JSONObject state, int rearDisplay, String rearIdentity,
             String operation, long ownerGeneration, String ownerIdentity, String session, long generation,

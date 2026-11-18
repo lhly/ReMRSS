@@ -46,6 +46,16 @@ public class UriReceiverActivity extends Activity {
         if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction())) {
             Uri uri = intent.getData();
             if (uri != null && uri.isHierarchical() && BuildConfig.URI_SCHEME.equals(uri.getScheme())) {
+                if ("rear-wallpaper".equals(uri.getHost())) {
+                    // Navigation only; do not forward parameters or make this a launch authorization.
+                    if ((BuildConfig.URI_SCHEME + "://rear-wallpaper").equals(uri.toString())
+                            && AiRearWallpaperSupport.supported()
+                            && !getSystemService(android.app.KeyguardManager.class).isDeviceLocked())
+                        startActivity(new Intent(this, AiRearWallpaperEditorActivity.class)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    finish();
+                    return;
+                }
                 try {
                     PrivilegedShellArguments.validateTargets(uri.getQueryParameter("packageName"), uri.getQueryParameter("activity"));
                 } catch (IllegalArgumentException invalid) {

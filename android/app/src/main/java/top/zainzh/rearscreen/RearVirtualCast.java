@@ -1,5 +1,8 @@
 package top.zainzh.rearscreen;
 
+import android.app.ActivityManager;
+import android.content.ComponentName;
+import android.content.Intent;
 import android.os.*;
 import android.hardware.display.DisplayManager;
 import android.view.Surface;
@@ -17,6 +20,7 @@ final class RearVirtualCast {
     static final int RECOVERY_PRESENT_HOST = 2;
     // Framework flags hidden from the public SDK. Preserve these values for the shell-owned display.
     private static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
+    private static final int VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 << 8;
     private static final int VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 10;
     private static final int VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP = 1 << 11;
     private static final int VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED = 1 << 12;
@@ -94,7 +98,7 @@ final class RearVirtualCast {
         if (!RearCastGeometry.decode(plan.toString()).renderKey().equals(RearCastGeometry.decode(viewport).renderKey()))
             throw new IllegalStateException("replacement_render_plan_changed");
         Session b = new Session(candidateSurface, reader, task, host, density, component, owner, gestures, safe,
-                plan.getInt("renderDensity"), compatibility, rotation, full, operationId, ownerGeneration, ownerIdentity);
+                plan.getInt("renderDensity"), compatibility, rotation, full, operationId, ownerGeneration, ownerIdentity, false);
         b.controlledStartActionGate = targetActionGate;
         b.expectedBaseComponent = canonicalComponent(expectedCandidateBaseComponent);
         if (a.freezeGuard == null) {
@@ -347,7 +351,25 @@ final class RearVirtualCast {
                 .put("requestedDensity", density).put("sourceDensity", source)
                 .put("compatibility", compatibility ? "source_density" : "none").toString();
     }
-    synchronized String start(Surface surface, String reader, int task, int host, int density, String component, IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility, int rotation, boolean full) throws Exception {
+    String start(Surface surface, String reader, int task, int host, int density, String component,
+            IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility, int rotation,
+            boolean full) throws Exception {
+        return start(surface, reader, task, host, density, component, owner, gestures, viewport, compatibility,
+                rotation, full, null);
+    }
+
+    String startDisposableWallpaperCast(Surface surface, String reader, int host, int density, String component,
+            IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility, int rotation,
+            boolean full, ISceneTaskActionGate launchGate) throws Exception {
+        if (launchGate == null) throw new SecurityException("Missing parked wallpaper action gate");
+        return start(surface, reader, -1, host, density, component, owner, gestures, viewport, compatibility,
+                rotation, full, launchGate);
+    }
+
+    private synchronized String start(Surface surface, String reader, int task, int host, int density,
+            String component, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean compatibility, int rotation, boolean full, ISceneTaskActionGate wallpaperLaunchGate) throws Exception {
+        boolean disposableWallpaperCast = wallpaperLaunchGate != null;
         if (!BuildConfig.VIRTUAL_CAST_ENABLED) throw new SecurityException("Virtual casting is unavailable");
         if (replacement != null || controlledStartInProgress != null) throw new IllegalStateException("replacement_in_progress");
         RearCastViewport.validateContentRotation(rotation);
@@ -361,16 +383,47 @@ final class RearVirtualCast {
         if (surface == null || !surface.isValid() || owner == null || !owner.isBinderAlive()
                 || (task < 0 ? component == null : !service.isTaskOnDisplay(task, 0)) || !service.isTaskOnDisplay(host, RearDisplay.requireId()))
             throw new IllegalStateException("Main task / rear host unavailable");
-        stop(null);
-        input.stop(null);
-        // Closing the previous session may have released its host Surface while we waited.
+        if (disposableWallpaperCast) {
+            ComponentName target = ComponentName.unflattenFromString(component);
+            int rear = RearDisplay.requireId();
+            ComponentName base = ComponentName.unflattenFromString(
+                    java.util.Objects.toString(service.getTaskBaseComponent(host, rear), ""));
+            if (!AiRearWallpaperSupport.supported() || target == null
+                    || !AiRearAppCatalog.isCastTarget(RearSystemBridge.systemContext(), target, BuildConfig.APPLICATION_ID)
+                    || !new ComponentName(BuildConfig.APPLICATION_ID,
+                            "top.zainzh.rearscreen.VirtualRearHostActivity").equals(base)
+                    || !(BuildConfig.APPLICATION_ID + ":" + host).equals(service.getForegroundAppOnDisplay(rear)))
+                throw new SecurityException("parked_wallpaper_host_or_target_mismatch");
+            if (current != null || !"stopped".equals(new JSONObject(input.status()).optString("state")))
+                throw new IllegalStateException("parked_wallpaper_cast_or_input_busy");
+            if (!wallpaperLaunchGate.isCurrent())
+                throw new IllegalStateException("parked_wallpaper_authorization_changed");
+        } else {
+            stop(null);
+            input.stop(null);
+        }
+        // Closing a legacy session may have released its host Surface while we waited.
         if (!surface.isValid() || !owner.isBinderAlive() || !service.isTaskOnDisplay(host, RearDisplay.requireId()))
             throw new IllegalStateException("Rear host changed during previous session cleanup");
         Session s = new Session(surface, reader, task, host, density, component, owner, gestures, safe,
-                plan.getInt("renderDensity"), compatibility, rotation, full, null, 0L, null);
+                plan.getInt("renderDensity"), compatibility, rotation, full, null, 0L, null, disposableWallpaperCast);
+        s.wallpaperLaunchGate = wallpaperLaunchGate;
         current = s;
         try { s.begin(true); return s.status(); }
         catch (Exception e) { CompatibilityDiagnostics.record("virtual_start_failed", root(e).toString()); s.close("start_failed: " + root(e)); throw e; }
+    }
+
+    private static Map<Integer, Integer> runningTaskDisplays() throws Exception {
+        List<?> tasks = RearDisplayCastOccupancyReader.taskInfos(
+                RearSystemBridge.service("activity_task", "android.app.IActivityTaskManager$Stub"));
+        Map<Integer, Integer> result = new HashMap<>();
+        for (Object row : tasks) {
+            if (!(row instanceof ActivityManager.RunningTaskInfo))
+                throw new IllegalStateException("parked_wallpaper_task_inventory_unavailable");
+            ActivityManager.RunningTaskInfo info = (ActivityManager.RunningTaskInfo) row;
+            result.put(info.taskId, info.getClass().getField("displayId").getInt(info));
+        }
+        return result;
     }
 
     /** Controlled empty start: unlike legacy start(), it never performs stop(null) on either owner. */
@@ -462,7 +515,7 @@ final class RearVirtualCast {
                     || !expectedRearIdentity.equals(RearDisplay.identity()))
                 throw new IllegalStateException("Controlled target/host unavailable");
             s = new Session(surface, reader, task, host, density, component, owner, gestures, safe,
-                    plan.getInt("renderDensity"), compatibility, rotation, full, operationId, ownerGeneration, ownerIdentity);
+                    plan.getInt("renderDensity"), compatibility, rotation, full, operationId, ownerGeneration, ownerIdentity, false);
             s.deferLauncherRestore = deferLauncherRestore;
             s.physicalReaderLifecycle = readerLifecycle;
             s.expectedBaseComponent = canonicalComponent(expectedBaseComponent);
@@ -505,6 +558,13 @@ final class RearVirtualCast {
         Session s = current;
         if (s != null && (id == null || s.id.equals(id))) s.close("stopped");
     }
+    void stopWallpaper(String id, IRearWallpaperOutputReleased receipt) {
+        Session s = current;
+        if (s == null || !id.equals(s.id) || !s.disposableWallpaperCast)
+            throw new IllegalStateException("parked_wallpaper_release_identity_mismatch");
+        s.close("stopped", false, receipt);
+    }
+
     String status() {
         Session s = current;
         if (s != null) return s.status();
@@ -589,6 +649,10 @@ final class RearVirtualCast {
         final long coordinatorOwnerGeneration;
         final String coordinatorOwnerIdentity;
         final boolean densityCompatibility;
+        final boolean disposableWallpaperCast;
+        ISceneTaskActionGate wallpaperLaunchGate;
+        // A separate-task launch must not dispose a pre-existing user task, even if an OEM reuses it.
+        Map<Integer, Integer> tasksBeforeWallpaperLaunch = Collections.emptyMap();
         final String physicalIdentity = RearDisplay.identity();
         final int physicalRearId = RearDisplay.requireId();
         volatile Surface surface;
@@ -644,7 +708,8 @@ final class RearVirtualCast {
         Session(Surface surface, String reader, int task, int host, int density, String component, IBinder owner,
                 IRearGestureListener gestures, RearCastViewport safe, int renderDensity, boolean compatibility,
                 int rotation, boolean full, String coordinatorOperationId, long coordinatorOwnerGeneration,
-                String coordinatorOwnerIdentity) {
+                String coordinatorOwnerIdentity, boolean disposableWallpaperCast) {
+            this.disposableWallpaperCast = disposableWallpaperCast;
             this.surface = surface; this.reader = reader; this.task = task; this.host = host; this.owner = owner;
             this.gestures = gestures;
             this.viewport = RearCastCompatibility.viewport(full ? safe.full() : safe, density, renderDensity); this.safeViewport = safe;
@@ -670,6 +735,7 @@ final class RearVirtualCast {
         }
         void begin(boolean startInput) throws Exception {
             beginning = true;
+            RearInputProxy.WallpaperTouch wallpaperTouch = null;
             try {
             ensureControlledStartCurrent("begin");
             if (coordinatorOwnerGeneration > 0L) {
@@ -681,6 +747,11 @@ final class RearVirtualCast {
                     throw new IllegalStateException("controlled_target_changed_before_move");
             }
             owner.linkToDeath(death, 0);
+            if (disposableWallpaperCast) {
+                wallpaperTouch = input.openWallpaperTouch(reader, host, this::requireWallpaperLaunchCurrent);
+                wallpaperTouch.awaitNeutral(); // No temporary display, app, or grab while a contact is down.
+                wallpaperTouch.requireCurrent();
+            }
             int width = viewport.bufferWidth, height = viewport.bufferHeight;
             iface = Class.forName("android.hardware.display.IDisplayManager");
             callbackType = Class.forName("android.hardware.display.IVirtualDisplayCallback");
@@ -706,7 +777,9 @@ final class RearVirtualCast {
             // PUBLIC | OWN_CONTENT_ONLY | SUPPORTS_TOUCH | TRUSTED | OWN_DISPLAY_GROUP | ALWAYS_UNLOCKED | OWN_FOCUS.
             // A separate display group is required for ALWAYS_UNLOCKED to survive system validation.
             // Keep the cast interactive when the main display locks; never dismiss the main keyguard.
-            builderType.getMethod("setFlags", int.class).invoke(builder, CAST_DISPLAY_FLAGS);
+            int displayFlags = CAST_DISPLAY_FLAGS | (disposableWallpaperCast
+                    ? VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL : 0);
+            builderType.getMethod("setFlags", int.class).invoke(builder, displayFlags);
             builderType.getMethod("setSurface", Surface.class).invoke(builder, surface);
             RearCastResizePolicy.Result resizePolicy = RearCastResizePolicy.build(builder, densityCompatibility);
             Object config = resizePolicy.config;
@@ -746,7 +819,8 @@ final class RearVirtualCast {
                 throw new IllegalStateException("controlled_target_changed_after_move");
             if (component != null) {
                 ensureControlledStartCurrent("before_target_launch");
-                if (!service.executeShellCommand("am start --display " + display + (launcherEntry ? " -a android.intent.action.MAIN -c android.intent.category.LAUNCHER" : "") + " -n '" + component + "'"))
+                if (disposableWallpaperCast) launchWallpaperTarget();
+                else if (!service.executeShellCommand("am start --display " + display + (launcherEntry ? " -a android.intent.action.MAIN -c android.intent.category.LAUNCHER" : "") + " -n '" + component + "'"))
                     throw new IOException("Activity launch failed");
                 long end = SystemClock.uptimeMillis() + 4000;
                 boolean found = false;
@@ -755,6 +829,8 @@ final class RearVirtualCast {
                     if (foreground != null && foreground.startsWith(packageName + ":")) {
                         task = Integer.parseInt(foreground.substring(foreground.lastIndexOf(':') + 1));
                         found = service.isTaskOnDisplay(task, display);
+                        if (found && disposableWallpaperCast && tasksBeforeWallpaperLaunch.containsKey(task))
+                            throw new IOException("parked_wallpaper_not_a_new_task");
                         if (found) break;
                     }
                     Thread.sleep(100);
@@ -773,7 +849,11 @@ final class RearVirtualCast {
                 ensureControlledStartCurrent("before_reader_start");
                 if (physicalReaderLifecycle != null && !recordReaderLifecycle("REQUESTED", "", 0L))
                     throw new IOException("physical_reader_request_receipt_rejected");
-                String inputStatus = coordinatorOwnerGeneration > 0L
+                String inputStatus;
+                if (disposableWallpaperCast) {
+                    inputStatus = input.startWallpaper(wallpaperTouch, task, owner, display, inputFeedback(),
+                            viewport, inputMenu(), contentRotation, this::reportAcceptedInteraction);
+                } else inputStatus = coordinatorOwnerGeneration > 0L
                         ? input.startControlled(reader, task, owner, display, inputFeedback(), viewport,
                             inputMenu(), contentRotation, this::reportAcceptedInteraction,
                             physicalReaderLifecycle == null ? null : (state, readerId, readerGeneration, readerTask, readerDisplay) ->
@@ -795,9 +875,48 @@ final class RearVirtualCast {
             }
             android.util.Log.i("RearVirtualCast", status());
             } finally {
+                if (wallpaperTouch != null) wallpaperTouch.close();
                 beginning = false;
                 if (closeRequested && !closed) close("controlled_start_cancelled", false);
             }
+        }
+
+        private void requireWallpaperLaunchCurrent() throws Exception {
+            if (closed || closeRequested || current != this || !owner.isBinderAlive()
+                    || !physicalIdentity.equals(RearDisplay.identity()))
+                throw new IllegalStateException("parked_wallpaper_backend_owner_changed");
+            // A virtual app can become globally focused. Only the actual rear presenter may take
+            // the physical reader, both while waiting and when the virtual app is ready.
+            RearTouchPresentationGate.Decision visible = RearTouchPresentationGate.evaluate(
+                    RearDisplayCastOccupancyReader.readTypedOnly(physicalRearId), physicalRearId, host,
+                    BuildConfig.APPLICATION_ID);
+            if (visible != RearTouchPresentationGate.Decision.ALLOW)
+                throw new IllegalStateException("parked_wallpaper_rear_" + visible.name().toLowerCase(java.util.Locale.ROOT));
+            if (!wallpaperLaunchGate.isCurrent())
+                throw new IllegalStateException("parked_wallpaper_app_request_changed");
+        }
+
+        private void launchWallpaperTarget() throws Exception {
+            android.content.Context context = RearSystemBridge.systemContext();
+            ComponentName target = ComponentName.unflattenFromString(component);
+            if (!AiRearAppCatalog.isCastTarget(context, target, BuildConfig.APPLICATION_ID)
+                    || !physicalIdentity.equals(RearDisplay.identity())
+                    || !(BuildConfig.APPLICATION_ID + ":" + host).equals(service.getForegroundAppOnDisplay(physicalRearId)))
+                throw new IllegalStateException("parked_wallpaper_launch_no_longer_eligible");
+            tasksBeforeWallpaperLaunch = runningTaskDisplays();
+            // KeyguardManager needs an attached app process for WindowManager's shared memory.
+            // Recheck the actual lock state and accepted gesture in the prepared app before launch.
+            requireWallpaperLaunchCurrent();
+            // Isolate this temporary task from the user's open app and from their Recents.
+            int flags = Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK
+                    | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
+            // No shell text from the wallpaper. A real launcher component is passed as an argv element.
+            DisplayRotationController.Result result = DisplayRotationController.runCommand(
+                    "am", "start", "--display", Integer.toString(display), "--user", "0",
+                    "-a", Intent.ACTION_MAIN, "-c", Intent.CATEGORY_LAUNCHER,
+                    "-f", "0x" + Integer.toHexString(flags), "-n", target.flattenToString());
+            if (!RearSystemBridge.commandSucceeded(result))
+                throw new IOException("parked_wallpaper_launch_refused");
         }
 
         void ensureControlledStartCurrent(String stage) throws Exception {
@@ -1282,8 +1401,38 @@ final class RearVirtualCast {
             return state == android.view.Display.STATE_OFF || state == android.view.Display.STATE_DOZE
                     || state == android.view.Display.STATE_DOZE_SUSPEND || state == android.view.Display.STATE_ON_SUSPEND;
         }
+        private void returnTasksToMain() throws Exception {
+            List<Integer> tasks = new ArrayList<>();
+            java.lang.Process p = new ProcessBuilder("am", "stack", "list").redirectErrorStream(true).start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                boolean ours = false; String line;
+                while ((line = r.readLine()) != null) {
+                    if (line.startsWith("RootTask ")) ours = line.matches(".*\\bdisplayId=" + display + "\\b.*");
+                    if (ours && line.trim().startsWith("taskId=")) {
+                        String value = line.trim().substring(7).split(":", 2)[0];
+                        tasks.add(Integer.parseInt(value));
+                    }
+                }
+            }
+            if (!p.waitFor(1000, java.util.concurrent.TimeUnit.MILLISECONDS)) p.destroyForcibly();
+            if (p.exitValue() != 0) throw new IOException("virtual_task_snapshot_incomplete");
+            for (int t : tasks) {
+                if (!service.moveTaskToDisplay(t, 0) || !service.isTaskOnDisplay(t, 0))
+                    throw new IOException("virtual_task_restore_unverified:" + t);
+            }
+        }
+        private void restoreUnexpectedReusedTasks() throws Exception {
+            for (Map.Entry<Integer, Integer> entry : runningTaskDisplays().entrySet()) {
+                if (entry.getValue() != display) continue;
+                Integer original = tasksBeforeWallpaperLaunch.get(entry.getKey());
+                if (original != null && (!service.moveTaskToDisplay(entry.getKey(), original)
+                        || !service.isTaskOnDisplay(entry.getKey(), original)))
+                    throw new IOException("parked_wallpaper_preexisting_task_not_restored");
+            }
+        }
         void close(String reason) { close(reason, true); }
-        synchronized void close(String reason, boolean restoreRearLauncher) {
+        void close(String reason, boolean restoreRearLauncher) { close(reason, restoreRearLauncher, null); }
+        synchronized void close(String reason, boolean restoreRearLauncher, IRearWallpaperOutputReleased receipt) {
             if (closed && resourcesStopped) return;
             if (beginning) { closeRequested = true; return; }
             boolean firstClose = !closed;
@@ -1309,27 +1458,26 @@ final class RearVirtualCast {
             if (display > 0 && !RearDisplay.isRear(display)) {
                 displayCleanupComplete = false;
                 try {
-                    List<Integer> tasks = new ArrayList<>();
-                    java.lang.Process p = new ProcessBuilder("am", "stack", "list").redirectErrorStream(true).start();
-                    try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                        boolean ours = false; String line;
-                        while ((line = r.readLine()) != null) {
-                            if (line.startsWith("RootTask ")) ours = line.matches(".*\\bdisplayId=" + display + "\\b.*");
-                            if (ours && line.trim().startsWith("taskId=")) {
-                                String value = line.trim().substring(7).split(":", 2)[0];
-                                tasks.add(Integer.parseInt(value));
+                    if (!disposableWallpaperCast) returnTasksToMain();
+                    if (!virtualDisplayReleased) {
+                        if (disposableWallpaperCast) restoreUnexpectedReusedTasks();
+                        // A wallpaper cast owns a disposable display, not a user's earlier tasks.
+                        iface.getMethod("releaseVirtualDisplay", callbackType).invoke(manager, callback);
+                        virtualDisplayReleased = true;
+                        if (disposableWallpaperCast && inputStopped && receipt != null) {
+                            try { receipt.onReleased(id, host); }
+                            catch (android.os.RemoteException lost) {
+                                android.util.Log.w("RearVirtualCast", "Wallpaper release callback unavailable", lost);
                             }
                         }
                     }
-                    if (!p.waitFor(1000, java.util.concurrent.TimeUnit.MILLISECONDS)) p.destroyForcibly();
-                    if (p.exitValue() != 0) throw new IOException("virtual_task_snapshot_incomplete");
-                    for (int t : tasks) {
-                        if (!service.moveTaskToDisplay(t, 0) || !service.isTaskOnDisplay(t, 0))
-                            throw new IOException("virtual_task_restore_unverified:" + t);
-                    }
-                    if (!virtualDisplayReleased) {
-                        iface.getMethod("releaseVirtualDisplay", callbackType).invoke(manager, callback);
-                        virtualDisplayReleased = true;
+                    if (disposableWallpaperCast && task > 0 && !tasksBeforeWallpaperLaunch.containsKey(task)) {
+                        long deadline = SystemClock.uptimeMillis() + 1200;
+                        while (runningTaskDisplays().containsKey(task)) {
+                            if (SystemClock.uptimeMillis() >= deadline)
+                                throw new IOException("parked_wallpaper_task_not_released");
+                            Thread.sleep(60);
+                        }
                     }
                     displayCleanupComplete = true;
                 } catch (Exception e) { android.util.Log.e("RearVirtualCast", "Task restoration", e); }
@@ -1342,7 +1490,8 @@ final class RearVirtualCast {
             if (resourcesStopped) outputAvailable = false;
             // Restore the physical rear only for this closing session, before a new start can proceed.
             try {
-                if (resourcesStopped && restoreRearLauncher && !deferLauncherRestore && physicalIdentity.equals(RearDisplay.identity())) {
+                if (resourcesStopped && restoreRearLauncher && !deferLauncherRestore && !disposableWallpaperCast
+                        && physicalIdentity.equals(RearDisplay.identity())) {
                     String foreground = service.getForegroundAppOnDisplay(RearDisplay.requireId());
                     if (foreground == null || foreground.endsWith(":" + host)
                             || foreground.startsWith("com.xiaomi.subscreencenter:") || foreground.startsWith("com.xiaomi.mirror:"))

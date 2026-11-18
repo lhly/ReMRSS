@@ -200,6 +200,12 @@
         </activity>
         <activity android:name=".ModuleSettingsActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
         <activity android:name=".DensityCompatibilityActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
+        <activity android:name=".AiRearWallpaperEditorActivity" android:exported="false" android:launchMode="singleTop"
+            android:theme="@style/MiuixHostTheme" />
+        <!-- Explicitly addressed by the official AI wallpaper renderer; caller and binding are verified in code. -->
+        <activity android:name=".AiRearWallpaperActivationActivity" android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" android:excludeFromRecents="true"
+            android:showWhenLocked="true" android:turnScreenOn="false" android:taskAffinity="${applicationId}.aiWallpaper" />
         <activity android:name=".VirtualRearHostActivity" android:exported="true" tools:targetApi="33"
             android:permission="android.permission.DUMP" android:excludeFromRecents="true"
             android:launchMode="singleInstance" android:taskAffinity="${applicationId}.virtual.rear"

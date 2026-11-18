@@ -52,26 +52,33 @@ final class RearInputProxy {
                               RearCastViewport viewport, RearTouchRouter.Menu menu, int contentRotation,
                               AcceptedInteraction acceptedInteraction) throws Exception {
         return startInternal(path, task, owner, display, feedback, viewport, menu, contentRotation,
-                acceptedInteraction, true, null);
+                acceptedInteraction, true, null, null);
     }
     /** Controlled empty start: it cannot stop or replace any existing reader. */
     synchronized String startControlled(String path, int task, IBinder owner, int display,
             RearTouchRouter.Feedback feedback, RearCastViewport viewport, RearTouchRouter.Menu menu,
             int contentRotation, AcceptedInteraction acceptedInteraction) throws Exception {
         return startInternal(path, task, owner, display, feedback, viewport, menu, contentRotation,
-                acceptedInteraction, false, null);
+                acceptedInteraction, false, null, null);
     }
     synchronized String startControlled(String path, int task, IBinder owner, int display,
             RearTouchRouter.Feedback feedback, RearCastViewport viewport, RearTouchRouter.Menu menu,
             int contentRotation, AcceptedInteraction acceptedInteraction, LifecycleReceipt lifecycle) throws Exception {
         return startInternal(path, task, owner, display, feedback, viewport, menu, contentRotation,
-                acceptedInteraction, false, lifecycle);
+                acceptedInteraction, false, lifecycle, null);
     }
+    synchronized String startWallpaper(WallpaperTouch touch, int task, IBinder owner, int display,
+            RearTouchRouter.Feedback feedback, RearCastViewport viewport, RearTouchRouter.Menu menu,
+            int contentRotation, AcceptedInteraction acceptedInteraction) throws Exception {
+        return startInternal(touch.path, task, owner, display, feedback, viewport, menu, contentRotation,
+                acceptedInteraction, false, null, touch);
+    }
+
     private String startInternal(String path, int task, IBinder owner, int display,
                                  RearTouchRouter.Feedback feedback, RearCastViewport viewport,
                                  RearTouchRouter.Menu menu, int contentRotation,
                                  AcceptedInteraction acceptedInteraction, boolean replaceExisting,
-                                 LifecycleReceipt lifecycle) throws Exception {
+                                 LifecycleReceipt lifecycle, WallpaperTouch wallpaperTouch) throws Exception {
         Session next = null;
         boolean occupiedOwner = false;
         try {
@@ -92,7 +99,7 @@ final class RearInputProxy {
             current = next;
             if (lifecycle != null && !lifecycle.record("ALLOCATED", next.id, next.generation, task, display))
                 throw new IOException("reader_allocation_receipt_rejected");
-            next.begin();
+            next.begin(wallpaperTouch);
             if (lifecycle != null && !lifecycle.record("READY", next.id, next.generation, task, display))
                 throw new IOException("reader_ready_receipt_rejected");
             return next.status();
@@ -106,6 +113,90 @@ final class RearInputProxy {
             throw e;
         }
     }
+    @FunctionalInterface
+    interface WallpaperRequest { void requireCurrent() throws Exception; }
+
+    WallpaperTouch openWallpaperTouch(String path, int host, WallpaperRequest request) throws Exception {
+        File file = new File(path).getCanonicalFile();
+        if (!isInstalledReader(file, BuildConfig.APPLICATION_ID, file.canExecute()))
+            throw new SecurityException("Reader must belong to this installed APK");
+        request.requireCurrent();
+        return new WallpaperTouch(file.getPath(), host, RearInputDevices.require(), request);
+    }
+
+    private static Process openReader(String path, RearInputPolicy.Device device, String mode) throws IOException {
+        return new ProcessBuilder(path, mode, device.path, device.name,
+                Integer.toString(device.xmin), Integer.toString(device.xmax),
+                Integer.toString(device.ymin), Integer.toString(device.ymax), Integer.toString(device.slots))
+                .redirectErrorStream(true).start();
+    }
+
+    /** One process for passive wait and the eventual reader; transfers only after target creation. */
+    static final class WallpaperTouch implements AutoCloseable {
+        private static final long MAX_WAIT_MS = 20_000;
+        final String path;
+        final RearInputPolicy.Device device;
+        final Process process;
+        final BufferedReader lines;
+        final BufferedWriter commands;
+        final WallpaperRequest request;
+        final int host;
+        final long opened = SystemClock.uptimeMillis();
+        boolean transferred;
+        WallpaperTouch(String path, int host, RearInputPolicy.Device device, WallpaperRequest request) throws IOException {
+            this.path = path;
+            this.host = host;
+            this.device = device;
+            this.request = request;
+            process = openReader(path, device, "--wallpaper-stream");
+            lines = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            commands = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));
+        }
+        void requireCurrent() throws Exception {
+            request.requireCurrent();
+            if (SystemClock.uptimeMillis() - opened >= MAX_WAIT_MS)
+                throw new IOException("wallpaper_touch_wait_expired");
+        }
+        void awaitNeutral() throws Exception {
+            while (true) {
+                requireCurrent();
+                if (lines.ready()) {
+                    String line = lines.readLine();
+                    if ("NEUTRAL".equals(line)) {
+                        android.util.Log.i("RearInputProxy", "wallpaper_neutral host=" + host + " elapsedMs="
+                                + (SystemClock.uptimeMillis() - opened));
+                        return;
+                    }
+                    if (!"WAIT_RELEASE".equals(line)) throw new IOException("wallpaper_touch_observation_lost");
+                    logWaiting();
+                } else {
+                    if (!process.isAlive()) throw new IOException("wallpaper_touch_observer_exited");
+                    Thread.sleep(35);
+                }
+            }
+        }
+        void logWaiting() {
+            android.util.Log.i("RearInputProxy", "wallpaper_wait_release host=" + host + " elapsedMs="
+                    + (SystemClock.uptimeMillis() - opened));
+        }
+        void sendArm() throws IOException {
+            commands.write("R 0\n");
+            commands.flush();
+        }
+        @Override public void close() {
+            if (transferred) return;
+            try { commands.close(); } catch (IOException ignored) { }
+            try {
+                if (!waitForProcess(process, 300)) process.destroy();
+                if (!waitForProcess(process, 300)) process.destroyForcibly();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                process.destroyForcibly();
+            }
+            try { lines.close(); } catch (IOException ignored) { }
+        }
+    }
+
     static boolean isInstalledReader(File canonicalFile, String applicationId, boolean executable) {
         String path = canonicalFile.getPath();
         return path.startsWith("/data/app/") && path.contains("/" + applicationId + "-")
@@ -430,7 +521,7 @@ final class RearInputProxy {
             pending.rebound = false;
         }
 
-        void begin() throws Exception {
+        void begin(WallpaperTouch wallpaperTouch) throws Exception {
             linkOwner(owner);
             injector = RearInputInjector.shell(display);
             state = new RearTouchState(new RearTouchState.Output() {
@@ -447,7 +538,7 @@ final class RearInputProxy {
                 }
             }, viewport);
             state.configure(viewport, contentRotation, SystemClock.uptimeMillis());
-            RearInputPolicy.Device device = RearInputDevices.require();
+            RearInputPolicy.Device device = wallpaperTouch == null ? RearInputDevices.require() : wallpaperTouch.device;
             node = device.path;
             geometry();
             router = new RearTouchRouter(state, width, height, density, !RearDisplay.isRear(display), time -> {
@@ -460,11 +551,21 @@ final class RearInputProxy {
             }, feedback);
             router.setMenu(menu);
             gestureClock.resume();
-            process = new ProcessBuilder(path, "--stream", node, device.name, Integer.toString(device.xmin), Integer.toString(device.xmax),
-                    Integer.toString(device.ymin), Integer.toString(device.ymax), Integer.toString(device.slots)).redirectErrorStream(true).start();
-            commands = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));
+            final BufferedReader responses;
+            if (wallpaperTouch == null) {
+                process = openReader(path, device, "--stream");
+                responses = new BufferedReader(new InputStreamReader(process.getInputStream()));
+                commands = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));
+            } else {
+                process = wallpaperTouch.process;
+                commands = wallpaperTouch.commands;
+                responses = wallpaperTouch.lines;
+                wallpaperTouch.transferred = true;
+                wallpaperTouch.requireCurrent();
+                wallpaperTouch.sendArm();
+            }
             CountDownLatch started = new CountDownLatch(1);
-            new Thread(() -> read(started), "rear-input-reader").start();
+            new Thread(() -> read(started, responses, wallpaperTouch), "rear-input-reader").start();
             // Both the native watchdog and this lease are independent of Activity destruction.
             timer.scheduleAtFixedRate(() -> {
                 try {
@@ -473,7 +574,16 @@ final class RearInputProxy {
                     synchronized (this) { if (!closed) { commands.write("P\n"); commands.flush(); } }
                 } catch (Exception e) { close(e.toString()); }
             }, 500, 500, TimeUnit.MILLISECONDS);
-            if (!started.await(3500, TimeUnit.MILLISECONDS) || !ready || closed) throw new IOException("Rear grab failed: " + reason);
+            if (wallpaperTouch == null) {
+                if (!started.await(3500, TimeUnit.MILLISECONDS) || !ready || closed)
+                    throw new IOException("Rear grab failed: " + reason);
+            } else {
+                while (!started.await(100, TimeUnit.MILLISECONDS)) {
+                    wallpaperTouch.requireCurrent();
+                    lease = SystemClock.uptimeMillis();
+                }
+                if (!ready || closed) throw new IOException("Rear grab failed: " + reason);
+            }
         }
         synchronized void setOutputAvailableLocked(boolean available) throws Exception {
             if (closed) return;
@@ -521,13 +631,21 @@ final class RearInputProxy {
                     throw new IOException("Virtual/rear geometry changed; restart casting");
             }
         }
-        void read(CountDownLatch started) {
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+        void read(CountDownLatch started, BufferedReader responses, WallpaperTouch wallpaperTouch) {
+            try (BufferedReader r = responses) {
                 String line;
                 while (!closed && (line = r.readLine()) != null) {
                     String[] parts = line.split(" ");
                     if (RearInputReaderLineProtocol.discardFrameIfNotReady(parts, ready && outputAvailable && !closed, slots)) continue;
-                    if (parts[0].equals("READY2")) {
+                    if (wallpaperTouch != null && !readerReadySeen && "WAIT_RELEASE".equals(line)) {
+                        wallpaperTouch.logWaiting();
+                    } else if (wallpaperTouch != null && !readerReadySeen && "NEUTRAL".equals(line)) {
+                        wallpaperTouch.requireCurrent();
+                        synchronized (this) {
+                            if (!closed) wallpaperTouch.sendArm();
+                        }
+                    } else if (parts[0].equals("READY2")) {
+                        if (wallpaperTouch != null && !readerReadySeen) wallpaperTouch.requireCurrent();
                         if (parts.length != 8 || !parts[2].equals(node)) throw new IOException("Invalid reader handshake");
                         long ackEpoch = Long.parseLong(parts[1]);
                         slots = Integer.parseInt(parts[3]); xmin = Integer.parseInt(parts[4]); xmax = Integer.parseInt(parts[5]);

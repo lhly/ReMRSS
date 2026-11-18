@@ -504,6 +504,13 @@ class MiuixSettingsUi(
                 val always = s(if (state.values["charging_always_on_enabled"] == true) "status_on" else "status_off")
                 EntryCard("nav_charging", s("nav_charging_state").replace("{0}", animation).replace("{1}", always), "charging_settings_entry") { actions.navigate(12) }
             }
+            if (AiRearWallpaperSupport.supported()) item("ai_rear_wallpaper") {
+                AppCard {
+                    AppRow(activity.getString(R.string.ai_rear_title), activity.getString(R.string.ai_rear_entry),
+                        modifier = Modifier.testTag("ai_rear_wallpaper_entry"),
+                        action = { activity.startActivity(android.content.Intent(activity, AiRearWallpaperEditorActivity::class.java)) })
+                }
+            }
             item("screenshots") { EntryCard("nav_screenshots", activity.getString(R.string.rear_screenshot_entry_help), "screenshot_settings_entry") {
                 activity.startActivity(android.content.Intent(activity, RearScreenshotActivity::class.java))
             } }

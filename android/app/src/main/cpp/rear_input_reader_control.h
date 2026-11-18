@@ -56,6 +56,19 @@ static enum ReaderControlAction reader_control_stream_byte(ReaderControlState *s
     return reader_control_line(state, state->line);
 }
 
+/* Each host authorization applies to one attempt, never to a later contact epoch. */
+static int reader_take_idle_arm(ReaderControlState *state, int neutral) {
+    int requested = state->resume_pending && !state->quit;
+    state->resume_pending = 0;
+    state->resume_edge = 0;
+    return requested && neutral;
+}
+
+static int reader_contacts_neutral(const int *tracking, int count) {
+    for (int i = 0; i < count; i++) if (tracking[i] >= 0) return 0;
+    return 1;
+}
+
 static int reader_watchdog_timeout_ms(int64_t heartbeat, int64_t now) {
     int64_t remaining = heartbeat + 4000 - now;
     if (remaining <= 0) return 0;

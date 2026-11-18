@@ -3,6 +3,7 @@ import android.os.IBinder;
 import android.view.Surface;
 import android.os.ParcelFileDescriptor;
 import top.zainzh.rearscreen.IRearGestureListener;
+import top.zainzh.rearscreen.IRearWallpaperOutputReleased;
 import top.zainzh.rearscreen.ISceneTaskActionGate;
 import top.zainzh.rearscreen.ITaskFocusActionGate;
 import top.zainzh.rearscreen.IPhysicalCastReaderLifecycle;
@@ -331,5 +332,16 @@ interface ITaskService {
             IPhysicalReplacementMoveGate focusGate) = 89;
     /** Normal controlled physical close: no-op for the exact hidden/asleep OEM launcher; restore only from empty. */
     boolean restoreSubScreenLauncherAfterNormalControlledClose(int displayId, String expectedRearIdentity) = 90;
+    /** Host-only, primary user's existing AI wallpaper slots. */
+    String listAiRearWallpapers(String languageTag) = 91;
+    String copyAiRearWallpaper(String id, boolean thumbnail, in ParcelFileDescriptor destination) = 92;
+    void replaceAiRearWallpaper(String id, in ParcelFileDescriptor original, in ParcelFileDescriptor replacement) = 93;
+    boolean restoreAiRearWallpaper(String id, in ParcelFileDescriptor applied, in ParcelFileDescriptor original) = 94;
+    /** Isolated, Shizuku-only shortcut cast. Never replaces an existing cast or target task. */
+    String startParkedWallpaperCast(in Surface surface, String readerPath, int host, int density,
+            String component, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean compatibility, int rotation, boolean full, ISceneTaskActionGate launchGate) = 95;
+    /** Releases the exact wallpaper cast. The callback is not a terminal cleanup acknowledgement. */
+    void stopParkedWallpaperCast(String sessionId, IRearWallpaperOutputReleased receipt) = 96;
 }
 

@@ -77,7 +77,11 @@ public final class RearFreezeGuardProcess {
                     if (line.startsWith("PACKAGES:")) packageUpdates.offer(line.substring("PACKAGES:".length()));
                 }
             } catch (IOException ignored) { }
-            finally { ended = true; }
+            finally {
+                ended = true;
+                // Wake the owner immediately on EOF. If the queue is full, poll is already ready.
+                packageUpdates.offer("");
+            }
         }, "freeze-owner-lease");
         reader.setDaemon(true); reader.start();
         try (RearFreezeState state = new RearFreezeState(store(), DIRECTORY)) {
@@ -88,6 +92,7 @@ public final class RearFreezeGuardProcess {
                 System.out.println("READY"); System.out.flush();
                 while (!ended && SystemClock.elapsedRealtime() - heartbeat < LEASE_MS) {
                     String update = packageUpdates.poll(2000, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (ended) break; // No package updates once the owning session closes.
                     if (update != null) {
                         try {
                             String[] next = update.split(",", -1);

@@ -51,6 +51,13 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private final top.zainzh.rearscreen.platform.CandidateActionGateSlot<ISceneTaskActionGate> candidateActionGate =
             new top.zainzh.rearscreen.platform.CandidateActionGateSlot<>();
     private FrameLayout root;
+    private final ViewTreeObserver.OnGlobalLayoutListener presentationLayout = this::layoutViewport;
+    private androidx.activity.OnBackPressedCallback presentationBack;
+    private androidx.activity.OnBackPressedCallback wallpaperPickerBack;
+    private androidx.compose.ui.platform.ComposeView wallpaperPicker;
+    private androidx.compose.ui.platform.ComposeView wallpaperTouchWait;
+    private volatile boolean wallpaperStartCancelled;
+    private RearWallpaperStandby wallpaperStandby;
     private RearCastViewport viewport;
     private RearCastViewport safeViewport;
     private boolean densityCompatibility;
@@ -1068,8 +1075,67 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         if (Build.VERSION.SDK_INT < 33) { finish(); return; }
         android.util.Log.i("VirtualRearHost", "Launch display=" + getDisplay().getDisplayId() + " rear=" + RearDisplay.id()
                 + " task=" + getIntent().getIntExtra("task", -1) + " stop=" + getIntent().getBooleanExtra("stop", false));
-        if (!BuildConfig.VIRTUAL_CAST_ENABLED || !RearDisplay.isRear(getDisplay().getDisplayId()) || getIntent().getBooleanExtra("stop", false)
-                || (getIntent().getIntExtra("task", -1) < 0 && getIntent().getStringExtra("component") == null)) { finish(); return; }
+        if (!BuildConfig.VIRTUAL_CAST_ENABLED || !RearDisplay.isRear(getDisplay().getDisplayId()) || getIntent().getBooleanExtra("stop", false)) {
+            finish(); return;
+        }
+        if (getIntent().getBooleanExtra(RearWallpaperStandby.PREPARE, false)) {
+            wallpaperStandby = RearWallpaperStandby.prepare(this, getIntent().getIntExtra(RearWallpaperStandby.REAR, -1));
+            if (wallpaperStandby == null) finishAndRemoveTask();
+            return;
+        }
+        if (getIntent().getIntExtra("task", -1) < 0 && getIntent().getStringExtra("component") == null) { finish(); return; }
+        initializePresentation();
+    }
+
+    void showWallpaperStandbyWindow() {
+        detachWallpaperPicker();
+        setShowWhenLocked(true);
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        setContentView(new FrameLayout(this));
+    }
+
+    void showWallpaperAppPicker(ITaskService remote, boolean showApps, boolean launchFailed,
+                                Runnable dismiss, java.util.function.Predicate<ComponentName> choose) {
+        detachWallpaperPicker();
+        getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        getWindow().setDecorFitsSystemWindows(false);
+        wallpaperPicker = AiRearAppPickerView.create(this, remote, showApps, launchFailed, dismiss, choose);
+        setContentView(wallpaperPicker);
+        getWindow().getInsetsController().hide(WindowInsets.Type.systemBars());
+        wallpaperPickerBack = new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() { dismiss.run(); }
+        };
+        getOnBackPressedDispatcher().addCallback(this, wallpaperPickerBack);
+    }
+
+    private void detachWallpaperPicker() {
+        if (wallpaperPickerBack != null) {
+            wallpaperPickerBack.remove();
+            wallpaperPickerBack = null;
+        }
+        if (wallpaperPicker != null) {
+            wallpaperPicker.disposeComposition();
+            wallpaperPicker = null;
+        }
+    }
+
+    void initializePreparedWallpaperCast(ComponentName target) {
+        detachWallpaperPicker();
+        wallpaperStartCancelled = false;
+        // Standby was created while unlocked; use the current power/lock state for
+        // the renderer's wake-edge bookkeeping, just as on a fresh presentation.
+        PowerManager power = getSystemService(PowerManager.class);
+        primaryInteractive = power != null && power.isInteractive();
+        primaryKeyguardLocked = getSystemService(android.app.KeyguardManager.class).isKeyguardLocked();
+        // Configuration only: this is still the already-running physical task.
+        setIntent(new Intent(this, VirtualRearHostActivity.class)
+                .putExtra("task", -1).putExtra("component", target.flattenToString())
+                .putExtra("targetPackage", target.getPackageName()).putExtra("managed", true));
+        initializePresentation();
+    }
+
+    private void initializePresentation() {
+        ending = false;
         instance = this;
         setShowWhenLocked(true);
         getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
@@ -1108,9 +1174,9 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         root.addView(castNotification, new FrameLayout.LayoutParams(1, -2));
         backIndicator = new RearBackGestureView(this);
         root.addView(backIndicator, new FrameLayout.LayoutParams(backIndicator.dp(32), backIndicator.dp(40), Gravity.RIGHT | Gravity.TOP));
-        castMenu = new RearCastMenuUi(this, this::finish, () -> rotateContent(-1), () -> rotateContent(1), this::toggleViewport, this::dismissMenu);
+        castMenu = new RearCastMenuUi(this, this::exitPresentation, () -> rotateContent(-1), () -> rotateContent(1), this::toggleViewport, this::dismissMenu);
         root.addView(castMenu.getView(), new FrameLayout.LayoutParams(1, 1));
-        root.getViewTreeObserver().addOnGlobalLayoutListener(this::layoutViewport);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(presentationLayout);
         setContentView(root);
         RearCastNotification.attach(notificationTarget);
         getWindow().getInsetsController().hide(WindowInsets.Type.systemBars());
@@ -1124,13 +1190,14 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         observedRearDisplayState = rearDisplay == null ? android.view.Display.STATE_UNKNOWN : rearDisplay.getState();
         if (displayManager != null) displayManager.registerDisplayListener(rearDisplayListener, main);
         TaskServiceManager.acquire(this, connection);
-        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
-            @Override public void handleOnBackPressed() { finish(); }
-        });
+        presentationBack = new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() { exitPresentation(); }
+        };
+        getOnBackPressedDispatcher().addCallback(this, presentationBack);
         main.post(heartbeat);
     }
     private void layoutViewport() {
-        if (ending || viewport == null || root.getWidth() == 0 || root.getHeight() == 0) return;
+        if (ending || root == null || viewport == null || root.getWidth() == 0 || root.getHeight() == 0) return;
         android.graphics.Rect buffer = output.getHolder().getSurfaceFrame();
         if (buffer.width() != viewport.bufferWidth || buffer.height() != viewport.bufferHeight)
             output.getHolder().setFixedSize(viewport.bufferWidth, viewport.bufferHeight);
@@ -1295,6 +1362,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         if (ending || starting || remote == null || holder == null || viewport == null || !viewportPlaced
                 || width != viewport.bufferWidth || height != viewport.bufferHeight) return;
         starting = true;
+        if (wallpaperStandby != null) main.postDelayed(this::showWallpaperTouchWait, 350);
         Surface surface = holder.getSurface();
         int target = getIntent().getIntExtra("task", -1), host = getTaskId();
         String operationId = getIntent().getStringExtra("rc5_operation_id");
@@ -1306,6 +1374,8 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                         : getIntent().getBundleExtra("rc5_gate_bundle").getBinder("source_action_gate"));
         worker.execute(() -> {
             try {
+                RearWallpaperStandby probe = wallpaperStandby;
+                if (probe != null) probe.requireColdStart(remote);
                 String path = new File(getApplicationInfo().nativeLibraryDir, RearInputProxy.READER_LIBRARY).getPath();
                 if (operationId != null) {
                     ITaskService authority = taskServiceFromIntent(getIntent());
@@ -1317,11 +1387,22 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                 }
                 if (operationId != null && cancelledControlledOperations.contains(operationId))
                     throw new IllegalStateException("controlled_start_cancelled_before_backend");
-                status = operationId == null ? remote.startRearVirtualCast(surface, path, target, host,
-                        requestedLayoutDensity, getIntent().getStringExtra("component"), owner, gestures,
-                        RearCastGeometry.encode(viewport), densityCompatibility, initialRotation, initialFull)
-                        : startControlledWithActionGate(remote, surface, path, target, host, expectedBase,
-                        operationId, ownerGeneration, ownerIdentity, sourceActionGate);
+                if (probe != null) {
+                    SurfaceHolder expectedHolder = holder;
+                    ISceneTaskActionGate gate = new VirtualCastRecoveryActionGate(() ->
+                            !ending && !wallpaperStartCancelled && holder == expectedHolder
+                                    && surface.isValid() && probe.isCurrentStart(remote));
+                    status = remote.startParkedWallpaperCast(surface, path, host,
+                            requestedLayoutDensity, getIntent().getStringExtra("component"), owner, gestures,
+                            RearCastGeometry.encode(viewport), densityCompatibility, initialRotation, initialFull, gate);
+                } else if (operationId == null) {
+                    status = remote.startRearVirtualCast(surface, path, target, host,
+                            requestedLayoutDensity, getIntent().getStringExtra("component"), owner, gestures,
+                            RearCastGeometry.encode(viewport), densityCompatibility, initialRotation, initialFull);
+                } else {
+                    status = startControlledWithActionGate(remote, surface, path, target, host, expectedBase,
+                            operationId, ownerGeneration, ownerIdentity, sourceActionGate);
+                }
                 JSONObject state = new JSONObject(status);
                 if (operationId != null && cancelledControlledOperations.contains(operationId)) {
                     String id = state.optString("id");
@@ -1344,6 +1425,14 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                     controlledOwnerIdentity = ownerIdentity; controlledExpectedBaseComponent = expectedBase;
                 }
                 sessionPackage = state.getString("package");
+                if (probe != null) {
+                    probe.recordStarted(state);
+                    main.post(() -> {
+                        if (isFinishing() || isDestroyed() || !state.optString("id").equals(session)) return;
+                        detachWallpaperTouchWait();
+                        if (wallpaperStartCancelled) exitPresentation();
+                    });
+                }
                 main.post(this::updateCameraGapBattery);
                 if (densityCompatibility && !"unrestricted".equals(state.optString("sizePolicy")))
                     main.post(() -> { if (!ending) android.widget.Toast.makeText(this, R.string.rear_density_partial_support,
@@ -1352,7 +1441,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                 android.util.Log.i("VirtualRearHost", status);
                 if (shouldStartManagedKeeper(getIntent().getBooleanExtra("managed", false),
                         getIntent().getBooleanExtra("rc5_defer_keeper", false))) main.post(() -> {
-                    if (ending) return;
+                    if (ending || (probe != null && wallpaperStartCancelled)) return;
                     Intent keeper = new Intent(this, RearScreenKeeperService.class)
                             .putExtra(VirtualCastUriFlow.EXTRA_SESSION, session)
                             .putExtra("lastMovedTask", monitored)
@@ -1478,10 +1567,61 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private void fail(Exception e) {
         if (ending || isFinishing()) return;
         ending = true;
-        android.util.Log.e("VirtualRearHost", "Virtual casting stopped", e);
-        main.post(this::finish);
+        RearWallpaperStandby probe = wallpaperStandby;
+        boolean cancelled = probe != null && wallpaperStartCancelled;
+        if (!cancelled) android.util.Log.e("VirtualRearHost", "Virtual casting stopped", e);
+        if (probe == null || session != null) {
+            main.post(this::finish);
+            return;
+        }
+        // A rejected app need not consume the prepared task. Only reuse it if the backend is clean.
+        worker.execute(() -> {
+            boolean clean = false;
+            try {
+                ITaskService remote = service;
+                if (TaskServiceManager.isConnectedServiceCurrent(remote)) {
+                    JSONObject state = new JSONObject(remote.getRearVirtualCastStatus());
+                    clean = "stopped".equals(state.optString("state"))
+                            && Boolean.TRUE.equals(state.opt("managerResourcesStopped"));
+                }
+            } catch (Exception unavailable) {
+                android.util.Log.w("VirtualRearHost", "Wallpaper cast cleanup unverified", unavailable);
+            }
+            final boolean reusable = clean;
+            main.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (!reusable) { probe.retire("parked_start_cleanup_unverified"); return; }
+                resetPresentationForWallpaperStandby();
+                if (cancelled) probe.afterCancelledStart();
+                else probe.afterStartFailure();
+            });
+        });
     }
-    @Override public boolean dispatchTouchEvent(MotionEvent event) { return true; /* hardware is exclusively read by evdev */ }
+
+    private void showWallpaperTouchWait() {
+        if (ending || wallpaperStartCancelled || !starting || session != null
+                || root == null || viewport == null || wallpaperTouchWait != null) return;
+        wallpaperTouchWait = AiRearAppPickerView.waiting(this, viewport, this::cancelWallpaperStart);
+        root.addView(wallpaperTouchWait, new FrameLayout.LayoutParams(-1, -1));
+    }
+
+    private void cancelWallpaperStart() {
+        wallpaperStartCancelled = true;
+        if (session != null) exitPresentation();
+    }
+
+    private void detachWallpaperTouchWait() {
+        if (wallpaperTouchWait == null) return;
+        if (root != null) root.removeView(wallpaperTouchWait);
+        wallpaperTouchWait.disposeComposition();
+        wallpaperTouchWait = null;
+    }
+
+    @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        // Before the exclusive reader is ready, Android still dispatches rear touches normally.
+        if (wallpaperPicker != null || wallpaperTouchWait != null) return super.dispatchTouchEvent(event);
+        return true;
+    }
     private void updateCameraGapBattery() {
         updateCastNotification();
         if (cameraGapBattery == null || root == null) return;
@@ -1500,11 +1640,21 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     }
     @Override protected void onResume() {
         super.onResume();
+        if (wallpaperStandby != null) wallpaperStandby.resumed();
         hostResumed = true; updateCastNotification();
         if (cameraGapBattery != null) { cameraGapBattery.visible(true); updateCameraGapBattery(); }
         if (cameraStatus != null) cameraStatus.visible(true);
     }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (wallpaperStandby != null) wallpaperStandby.focusChanged(focused);
+    }
+    @Override protected void onStop() {
+        super.onStop();
+        if (wallpaperStandby != null) wallpaperStandby.stopped();
+    }
     @Override protected void onPause() {
+        if (wallpaperStandby != null) wallpaperStandby.paused();
         hostResumed = false; updateCastNotification();
         if (cameraGapBattery != null) cameraGapBattery.visible(false);
         if (cameraStatus != null) cameraStatus.visible(false);
@@ -1512,6 +1662,19 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     }
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (wallpaperStandby != null) {
+            if (intent.getBooleanExtra("stop", false)) { finish(); return; }
+            if (root != null || wallpaperPicker != null
+                    || intent.getBooleanExtra(RearWallpaperStandby.PREPARE, false)) return;
+            if (intent.getIntExtra("task", -1) >= 0 || intent.getStringExtra("component") != null) {
+                // An idle prepared window must not block a normal cast addressed to this component.
+                wallpaperStandby.close();
+                wallpaperStandby = null;
+                setIntent(intent);
+                initializePresentation();
+            }
+            return;
+        }
         setIntent(intent);
         if (intent.getBooleanExtra("stop", false)) { finish(); return; }
         if (intent.getBooleanExtra("rc5_cancel_candidate", false)) {
@@ -2017,16 +2180,73 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         if (cameraGapBattery != null) cameraGapBattery.themeChanged();
         if (cameraStatus != null) cameraStatus.themeChanged();
         if (castNotification != null) castNotification.applyTheme();
-        if (safeViewport != null) worker.execute(() -> {
+        if (!ending && safeViewport != null) worker.execute(() -> {
             try {
-                if (!safeViewport.key().equals(RearCastGeometry.decode(service.getRearCastViewport()).key()))
+                if (!ending && !safeViewport.key().equals(RearCastGeometry.decode(service.getRearCastViewport()).key()))
                     throw new IllegalStateException("Rear display geometry changed; restart casting");
             } catch (Exception e) { fail(e); }
         });
     }
-    @Override protected void onDestroy() {
+    private void exitPresentation() {
+        RearWallpaperStandby probe = wallpaperStandby;
+        if (probe == null) { finish(); return; }
+        if (ending) return;
+        String id = session;
+        if (id == null) {
+            if (starting) cancelWallpaperStart();
+            else {
+                resetPresentationForWallpaperStandby();
+                probe.afterCancelledStart();
+            }
+            return;
+        }
+        if (!probe.beginReturn()) return;
+        ending = true; // Stop lease renewal and new input/Surface work for this round.
+        ITaskService remote = service;
+        int hostTask = getTaskId();
+        IRearWallpaperOutputReleased receipt = new IRearWallpaperOutputReleased.Stub() {
+            @Override public void onReleased(String releasedId, int releasedHost) {
+                if (releasedHost != hostTask || !id.equals(releasedId)) return;
+                main.post(() -> {
+                    if (!ending || !id.equals(session) || isFinishing() || isDestroyed()) return;
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    probe.outputReleased();
+                });
+            }
+        };
+        worker.execute(() -> {
+            try {
+                if (!TaskServiceManager.isConnectedServiceCurrent(remote))
+                    throw new IllegalStateException("parked_cast_service_disconnected");
+                JSONObject live = new JSONObject(remote.getRearVirtualCastStatus());
+                JSONObject released = AcceptedVirtualCloseFlow.stopAndReadTerminal(id, live,
+                        () -> new JSONObject(remote.getRearVirtualCastStatus()),
+                        exactId -> remote.stopParkedWallpaperCast(exactId, receipt),
+                        state -> id.equals(state.optString("id")),
+                        state -> VirtualCastTerminalStatus.matchesReleasedParkedCast(live, state));
+                if (released == null) throw new IllegalStateException("parked_cast_cleanup_unverified");
+                android.util.Log.i("RearParkProbe", "terminal_reader_display task=" + hostTask + " id=" + id);
+                if (!RearScreenKeeperService.stopVirtualSessionAndAwait(id, 2_000))
+                    throw new IllegalStateException("parked_cast_keeper_cleanup_unverified");
+                boolean officialFront = probe.officialRearOwnsDisplay(remote);
+                android.util.Log.i("RearParkProbe", "return_readback task=" + hostTask
+                        + " officialFront=" + officialFront);
+                main.post(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    resetPresentationForWallpaperStandby();
+                    probe.afterReturn(released, officialFront);
+                });
+            } catch (Exception e) {
+                android.util.Log.e("VirtualRearHost", "Cannot return parked cast", e);
+                main.post(() -> probe.retire("return_cleanup_failed"));
+            }
+        });
+    }
+
+    private void detachPresentationUi() {
         ending = true; outputPowerEpoch++; screenOffCycleEpoch++; invalidateRecoveryActions();
         missingSurfacePresentationGate.invalidate(); main.removeCallbacksAndMessages(null);
+        detachWallpaperTouchWait();
         RearCastNotification.detach(notificationTarget);
         if (castNotification != null) castNotification.close();
         if (cameraGapBattery != null) cameraGapBattery.close();
@@ -2036,6 +2256,47 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         if (screenReceiverRegistered) { unregisterReceiver(screenReceiver); screenReceiverRegistered = false; }
         android.hardware.display.DisplayManager displayManager = getSystemService(android.hardware.display.DisplayManager.class);
         if (displayManager != null) displayManager.unregisterDisplayListener(rearDisplayListener);
+        if (presentationBack != null) { presentationBack.remove(); presentationBack = null; }
+        if (root != null) root.getViewTreeObserver().removeOnGlobalLayoutListener(presentationLayout);
+    }
+
+    private void resetPresentationForWallpaperStandby() {
+        detachPresentationUi();
+        output.getHolder().removeCallback(this);
+        if (instance == this) instance = null;
+        TaskServiceManager.release(connection); // The parked task still holds its minimal Shizuku binding.
+        service = null;
+        session = null;
+        sessionPackage = null;
+        activeSessionStatus = null;
+        status = "{}";
+        outputGeneration++;
+        output = null;
+        holder = null;
+        root = null;
+        cameraGapBattery = null;
+        cameraStatus = null;
+        castNotification = null;
+        backIndicator = null;
+        castMenu = null;
+        safeViewport = null;
+        viewport = null;
+        lastViewportLayout = null;
+        width = height = 0;
+        surfaceConfigured = viewportPlaced = false;
+        starting = reconnecting = powerSuspendedOutput = false;
+        resizing = resizeSubmitted = menuBusy = false;
+        lockRecoveryRequested = wakeAttempted = false;
+        showWallpaperStandbyWindow();
+    }
+
+    @Override protected void onDestroy() {
+        detachWallpaperPicker();
+        if (wallpaperStandby != null) {
+            wallpaperStandby.close();
+            if (root == null) { worker.shutdown(); super.onDestroy(); return; }
+        }
+        detachPresentationUi();
         worker.execute(() -> {
             try {
                 if (service != null && candidateToken != null)

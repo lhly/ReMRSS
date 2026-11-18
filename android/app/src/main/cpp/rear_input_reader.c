@@ -62,7 +62,41 @@ static int reacquire_if_idle(int fd, int slots, int *ids, struct input_absinfo *
     for (int i = 0; i < slots; i++) if (ids[i] >= 0) { ioctl(fd, EVIOCGRAB, 0); return 0; }
     return 1;
 }
-static int stream(int fd, const char *path, const int *expected) {
+/* Wallpaper launch uses the same fd for passive observation and eventual acquisition.
+ * Nothing is grabbed or forwarded until Java authorizes a current neutral observation. */
+static int wallpaper_initial_grab(int fd, int slots, int *ids, struct input_absinfo *slot) {
+    ReaderControlState control = {.paused = 1};
+    int reported = -1;
+    int64_t deadline = millis() + 30000; /* Failsafe; the current host has a shorter request deadline. */
+    while (!stopping && !control.quit && millis() < deadline) {
+        if (snapshot(fd, ABS_MT_TRACKING_ID, slots, ids)) return -1;
+        int neutral = reader_contacts_neutral(ids, slots);
+        int armed = control.resume_pending;
+        if (reader_take_idle_arm(&control, neutral)) {
+            // Re-read immediately before and after EVIOCGRAB. A new DOWN returns to waiting.
+            int acquired = reacquire_if_idle(fd, slots, ids, slot);
+            if (acquired != 0) return acquired;
+            if (snapshot(fd, ABS_MT_TRACKING_ID, slots, ids)) return -1;
+            neutral = reader_contacts_neutral(ids, slots);
+        }
+        if (neutral != reported || armed) {
+            if (puts(neutral ? "NEUTRAL" : "WAIT_RELEASE") == EOF || fflush(stdout) == EOF) return -1;
+            reported = neutral;
+        }
+        struct pollfd command = {STDIN_FILENO, POLLIN | POLLHUP, 0};
+        int ready = poll(&command, 1, 20);
+        if (ready < 0) { if (errno == EINTR) continue; return -1; }
+        if (command.revents & (POLLHUP | POLLERR | POLLNVAL)) return 0;
+        if (command.revents & POLLIN) {
+            char buffer[64]; ssize_t size = read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (size <= 0) return 0;
+            for (ssize_t i = 0; i < size; i++) reader_control_stream_byte(&control, buffer[i]);
+        }
+    }
+    return 0;
+}
+
+static int stream(int fd, const char *path, const int *expected, int wallpaper) {
     struct input_absinfo slot, ax, ay;
     if (ioctl(fd, EVIOCGABS(ABS_MT_SLOT), &slot) || ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ax)
             || ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay)) return 3;
@@ -77,8 +111,13 @@ static int stream(int fd, const char *path, const int *expected) {
     int grabbed = 0;
     int clock_id = CLOCK_MONOTONIC;
     if (ioctl(fd, EVIOCSCLOCKID, &clock_id)) return 3;
+    if (wallpaper) {
+        int acquired = wallpaper_initial_grab(fd, slots, ids, &slot);
+        if (acquired < 0) { fprintf(stderr, "ERROR wallpaper rear reader unavailable\n"); return 3; }
+        grabbed = acquired == 1;
+    }
     int64_t idle_deadline = millis() + 2500;
-    while (!stopping && millis() < idle_deadline) {
+    while (!wallpaper && !stopping && millis() < idle_deadline) {
         /* Discard only pre-grab events, never a new contact received after the grab. */
         while (read(fd, events, sizeof(events)) > 0) { }
         if (ioctl(fd, EVIOCGABS(ABS_MT_SLOT), &slot)) return 3;
@@ -190,7 +229,8 @@ int main(int argc, char **argv) {
         puts(found); return 0;
     }
     if (argc < 3) return 2;
-    if ((argc != 3 && argc != 9) || strcmp(argv[1], "--stream")) return 2;
+    int wallpaper = argc == 9 && !strcmp(argv[1], "--wallpaper-stream");
+    if (!wallpaper && ((argc != 3 && argc != 9) || strcmp(argv[1], "--stream"))) return 2;
     const char *expected_name = argc == 9 ? argv[3] : "Xiaomi_Touch_Input_1";
     if (!*expected_name || !strcmp(expected_name, "Xiaomi_Touch_Input_0")) return 2;
     int expected[5];
@@ -208,5 +248,5 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     /* A stalled Java reader must never keep the grab alive by blocking stdout. */
     fcntl(STDOUT_FILENO, F_SETFL, fcntl(STDOUT_FILENO, F_GETFL) | O_NONBLOCK);
-    int result = stream(fd, argv[2], argc == 9 ? expected : NULL); close(fd); return result;
+    int result = stream(fd, argv[2], argc == 9 ? expected : NULL, wallpaper); close(fd); return result;
 }
