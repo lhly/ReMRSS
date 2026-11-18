@@ -24,7 +24,7 @@ import android.util.Log;
 /**
  * V2.6: URI接收Activity
  * 完全透明，只负责转发URI到UriCommandService，然后立即finish
- * 不会显示任何UI，避免跳到ReMRSS页面
+ * 自动化命令不显示 UI；自定义背屏路由仅用于打开主屏编辑器。
  */
 public class UriReceiverActivity extends Activity {
     private static final String TAG = "UriReceiverActivity";
@@ -50,6 +50,7 @@ public class UriReceiverActivity extends Activity {
                     // Navigation only; do not forward parameters or make this a launch authorization.
                     if ((BuildConfig.URI_SCHEME + "://rear-wallpaper").equals(uri.toString())
                             && AiRearWallpaperSupport.supported()
+                            && getDisplay() != null && getDisplay().getDisplayId() == android.view.Display.DEFAULT_DISPLAY
                             && !getSystemService(android.app.KeyguardManager.class).isDeviceLocked())
                         startActivity(new Intent(this, AiRearWallpaperEditorActivity.class)
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
