@@ -20,6 +20,7 @@ from typing import Any
 
 DEFAULT_ADB_PORT = 5037
 PHONE_DEVICE = "d708dac7"
+PHONE_IDENTITY_SHELL = "set -e; getprop ro.product.device; getprop ro.product.model; getprop ro.serialno"
 APP_ID = "top.zainzh.rearscreen"
 JAVA_ID = r"[A-Za-z_$][A-Za-z0-9_$]*"
 JAVA_CLASS = re.compile(rf"{JAVA_ID}(?:\.{JAVA_ID})*")
@@ -128,6 +129,18 @@ def inventory(adb: str, session: dict[str, Any]) -> None:
 def validate_identity(adb: str, session: dict[str, Any]) -> None:
     inventory(adb, session)
     target = session["target"]
+    if target["kind"] == "phone":
+        # Keep the inventory gate and all comparisons, but read the fixed
+        # properties through one serial-pinned ADB shell round trip.
+        rows = adb_call(adb, session, ["shell", "sh", "-c", shlex.quote(PHONE_IDENTITY_SHELL)]).splitlines()
+        if len(rows) != 3 or not all(row.strip() for row in rows):
+            raise GuardError("真机身份回读不完整或含额外输出")
+        device, model, serialno = (row.strip() for row in rows)
+        if device != target["expected_device"] or model != target["expected_model"]:
+            raise GuardError(f"设备身份不匹配: device={device!r}, model={model!r}")
+        if serialno != PHONE_DEVICE:
+            raise GuardError(f"拒绝非授权真机serial: {serialno!r}")
+        return
     device = adb_call(adb, session, ["shell", "getprop", "ro.product.device"])
     model = adb_call(adb, session, ["shell", "getprop", "ro.product.model"])
     if device != target["expected_device"] or model != target["expected_model"]:
@@ -140,10 +153,6 @@ def validate_identity(adb: str, session: dict[str, Any]) -> None:
         avd_name = next((line.strip() for line in avd.splitlines() if line.strip() and line.strip() != "OK"), "")
         if avd_name != target["avd_name"]:
             raise GuardError(f"AVD身份不匹配: {avd_name!r}")
-    else:
-        serialno = adb_call(adb, session, ["shell", "getprop", "ro.serialno"])
-        if serialno != PHONE_DEVICE:
-            raise GuardError(f"拒绝非授权真机serial: {serialno!r}")
 
 
 def aapt_path(explicit: str | None) -> str:

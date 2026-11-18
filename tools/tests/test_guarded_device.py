@@ -41,6 +41,14 @@ if cmd[:2] == ["devices", "-l"]:
     if mode == "multi": print("List of devices attached\n" + target_serial + " device product:x\nother device product:y")
     elif mode == "wrong_serial": print("List of devices attached\nother device product:x")
     else: print("List of devices attached\n" + target_serial + " device product:x")
+elif cmd == ["shell", "sh", "-c", "set -e; getprop ro.product.device; getprop ro.product.model; getprop ro.serialno"]:
+    rows = ["d708", "Xiaomi 17 Pro", "d708dac7"]
+    if mode == "phone_bad_device": rows[0] = "wrong-device"
+    if mode == "phone_bad_model": rows[1] = "wrong model"
+    if mode == "phone_bad_serial": rows[2] = "wrong-serial"
+    if mode == "phone_missing": rows.pop()
+    if mode == "phone_extra": rows.append("extra")
+    print("\n".join(rows))
 elif cmd[:3] == ["shell", "getprop", "ro.product.device"]: print("d708" if mode.startswith("phone") else ("emu64a" if mode != "bad_device" else "phone"))
 elif cmd[:3] == ["shell", "getprop", "ro.product.model"]: print("Xiaomi 17 Pro" if mode.startswith("phone") else "sdk_gphone64_arm64")
 elif cmd[:3] == ["shell", "getprop", "ro.serialno"]: print("d708dac7")
@@ -288,8 +296,26 @@ class GuardedDeviceTests(unittest.TestCase):
         os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
         session = self.phone_session()
         gd.validate_identity(str(self.fake), session)
-        self.assertIn(["shell", "getprop", "ro.serialno"], self.commands())
-        self.assertFalse(any(c and c[0] in {"install", "uninstall"} or c[:3] == ["shell", "am", "instrument"] for c in self.commands()))
+        self.assertEqual([["devices", "-l"], ["shell", "sh", "-c",
+            "'set -e; getprop ro.product.device; getprop ro.product.model; getprop ro.serialno'"]], self.commands())
+
+    def test_phone_batched_identity_rejects_each_mismatch_and_bad_shape(self):
+        os.environ["FAKE_SERIAL"] = "d708dac7"
+        session = self.phone_session()
+        for mode, message in (
+            ("phone_bad_device", "设备身份不匹配"),
+            ("phone_bad_model", "设备身份不匹配"),
+            ("phone_bad_serial", "拒绝非授权真机serial"),
+            ("phone_missing", "真机身份回读不完整"),
+            ("phone_extra", "真机身份回读不完整"),
+        ):
+            with self.subTest(mode=mode):
+                self.log.write_text("")
+                os.environ["FAKE_MODE"] = mode
+                with self.assertRaisesRegex(gd.GuardError, message):
+                    gd.package_installed(str(self.fake), session, "top.zainzh.rearscreen.debug")
+                self.assertEqual(2, len(self.commands()))
+                self.assertEqual(["devices", "-l"], self.commands()[0])
 
     def test_verify_cli_consumes_session_and_remains_read_only(self):
         os.environ["FAKE_MODE"] = "phone"; os.environ["FAKE_SERIAL"] = "d708dac7"
