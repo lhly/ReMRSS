@@ -508,7 +508,7 @@ class MiuixSettingsUi(
                 AppCard {
                     AppRow(activity.getString(R.string.ai_rear_title), activity.getString(R.string.ai_rear_entry),
                         modifier = Modifier.testTag("ai_rear_wallpaper_entry"),
-                        action = { activity.startActivity(android.content.Intent(activity, AiRearWallpaperEditorActivity::class.java)) })
+                        action = { activity.startActivity(AiRearWallpaperEditorActivity.open(activity)) })
                 }
             }
             item("screenshots") { EntryCard("nav_screenshots", activity.getString(R.string.rear_screenshot_entry_help), "screenshot_settings_entry") {

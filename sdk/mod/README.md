@@ -30,9 +30,9 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private
 
 [按场景查阅 `rear.info@1` 字段、状态和兼容条件](docs/mod-sdk.md#读取背屏与当前场景)。
 
-## 自定义背屏模板
+## 背屏启动器模板
 
-[为锁屏六宫格打包壁纸模板](docs/rear-wallpaper-template.md)。用户从「自定义背屏」导入背景和布局，自己选择快捷应用和要替换的 AI 壁纸。
+[为锁屏六宫格打包壁纸模板](docs/rear-wallpaper-template.md)。用户在「模块 → ZIP Mods」安装模板，再选择快捷应用和要替换的 AI 壁纸。
 
 ## 保存配置并更新派生状态
 

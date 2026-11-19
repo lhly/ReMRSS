@@ -1,6 +1,10 @@
 package top.zainzh.rearscreen.platform.mods
 
 import android.content.ContentValues
+import top.zainzh.rearscreen.AiRearModWallpaperTheme
+import top.zainzh.rearscreen.AiRearWallpaperBinding
+import top.zainzh.rearscreen.AiRearWallpaperInstallations
+import top.zainzh.rearscreen.ModWallpaperThemeKind
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
@@ -71,7 +75,8 @@ data class InstalledMod(
     val enabled: Boolean,
     val requiredCapabilities: List<ModCapability>,
     val optionalCapabilities: List<ModCapability>,
-    val grantedCapabilities: Set<String>
+    val grantedCapabilities: Set<String>,
+    val wallpaperTheme: ModWallpaperThemeKind? = null,
 )
 
 object ModPackageStore {
@@ -88,8 +93,10 @@ object ModPackageStore {
                 while (cursor.moveToNext()) {
                     val manifest = JSONObject(cursor.getString(8))
                     val caps = parseCapabilities(manifest.getJSONObject("capabilities"))
+                    val payloads = manifest.getJSONArray("payloads")
+                    val theme = AiRearModWallpaperTheme.classify(List(payloads.length()) { payloads.getJSONObject(it).getString("path") })
                     add(InstalledMod(cursor.getString(0), cursor.getString(1), manifest.getJSONObject("author").getString("name"), cursor.getString(2), cursor.getString(3), cursor.getString(4),
-                        cursor.getInt(5), cursor.getInt(6), cursor.getInt(7) != 0, caps.first, caps.second, grants(database,cursor.getString(0))))
+                        cursor.getInt(5), cursor.getInt(6), cursor.getInt(7) != 0, caps.first, caps.second, grants(database,cursor.getString(0)), theme))
                 }
             }
         }
@@ -103,6 +110,17 @@ object ModPackageStore {
     }
 
     @Synchronized internal fun installed(context: Context, id: String, storage: ModPackageStoreTestSession.Storage? = null): InstalledMod? = list(context, storage).firstOrNull { it.id==id }
+
+    @Synchronized internal fun usableWallpaperTheme(context: Context, id: String): InstalledMod? =
+        installed(context, id)?.takeIf {
+            it.wallpaperTheme != null && (it.enabled || it.wallpaperTheme == ModWallpaperThemeKind.GRID_TEMPLATE) &&
+                isAuthorTrusted(context, it.authorFingerprint)
+        }
+
+    @Synchronized internal fun wallpaperArtwork(context: Context, id: String): AiRearModWallpaperTheme? {
+        if (usableWallpaperTheme(context, id) == null) return null
+        return find(context, id)?.let { AiRearModWallpaperTheme.fromVerifiedAssets(it.payloads) }
+    }
 
     @Synchronized internal fun model(context: Context, id: String, storage: ModPackageStoreTestSession.Storage? = null): ModPersistedModel? =
         db(context, storage).readableDatabase.rawQuery("SELECT state_json,config_json,revision,data_version FROM mod_models WHERE mod_id=?", arrayOf(id)).use {
@@ -227,7 +245,8 @@ object ModPackageStore {
         return InstalledMod(verified.id, verified.name, verified.authorName, verified.authorFingerprint, logicalSessionId, verified.version, verified.versionCode,
             verified.dataVersion, old?.enabled ?: false, verified.requiredCapabilities,
             verified.optionalCapabilities.filter { it.name in decision.acceptedCapabilities },
-            (verified.requiredCapabilities+verified.optionalCapabilities.filter { it.name in decision.acceptedCapabilities }).map { it.name }.toSet())
+            (verified.requiredCapabilities+verified.optionalCapabilities.filter { it.name in decision.acceptedCapabilities }).map { it.name }.toSet(),
+            AiRearModWallpaperTheme.classify(verified.payloads.keys))
     }
 
     /** Debug-only same-author, same-data-version package replacement. It never migrates or edits model data. */
@@ -326,18 +345,31 @@ object ModPackageStore {
         return ids
     }
 
-    @Synchronized internal fun uninstall(context: Context, id: String, storage: ModPackageStoreTestSession.Storage? = null) {
-        val database = db(context, storage).writableDatabase
-        val install = readInstallRow(database, id) ?: return
-        database.beginTransaction()
-        try {
-            database.delete("installed_mods", "mod_id=?", arrayOf(id))
-            database.delete("mod_models", "mod_id=?", arrayOf(id))
-            database.delete("mod_capability_grants", "mod_id=?", arrayOf(id))
-            database.setTransactionSuccessful()
-        } finally { database.endTransaction() }
-        if (storage == null) closeDataSessions(context, id)
-        File(install.packagePath).delete()
+    internal fun uninstall(context: Context, id: String, storage: ModPackageStoreTestSession.Storage? = null) {
+        synchronized(AiRearWallpaperInstallations.writeLock) {
+            synchronized(this) {
+                if (storage == null) check(AiRearWallpaperInstallations.forApp(context).forMod(id).isEmpty()) {
+                    context.getString(top.zainzh.rearscreen.R.string.ai_rear_uninstall_restore_first)
+                }
+                val database = db(context, storage).writableDatabase
+                val install = readInstallRow(database, id) ?: return
+                database.beginTransaction()
+                try {
+                    database.delete("installed_mods", "mod_id=?", arrayOf(id))
+                    database.delete("mod_models", "mod_id=?", arrayOf(id))
+                    database.delete("mod_capability_grants", "mod_id=?", arrayOf(id))
+                    database.setTransactionSuccessful()
+                } finally { database.endTransaction() }
+                if (storage == null) {
+                    closeDataSessions(context, id)
+                    val prefs = context.getSharedPreferences(AiRearWallpaperBinding.PREFS, Context.MODE_PRIVATE)
+                    val draftPrefix = AiRearWallpaperInstallations.modDraftPrefix(id)
+                    val keys = prefs.all.keys.filter { it.startsWith(draftPrefix) }
+                    if (keys.isNotEmpty()) prefs.edit().also { edit -> keys.forEach(edit::remove) }.apply()
+                }
+                File(install.packagePath).delete()
+            }
+        }
     }
 
     /** Optimistic state/config commit; unchanged JSON does not write or advance the revision. */

@@ -3,16 +3,24 @@ package top.zainzh.rearscreen;
 import android.app.ActivityManager;
 import android.app.KeyguardManager;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.ServiceConnection;
+import android.hardware.display.DisplayManager;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.Display;
+import android.widget.Toast;
+
+import androidx.annotation.StringRes;
 
 import java.util.function.BooleanSupplier;
 
+import kotlinx.coroutines.flow.MutableStateFlow;
+import kotlinx.coroutines.flow.StateFlow;
+import kotlinx.coroutines.flow.StateFlowKt;
 import org.json.JSONObject;
 
 
@@ -23,6 +31,8 @@ final class RearWallpaperStandby {
     private static final String TAG = "RearParkProbe";
     private static final String HOST_PACKAGE = BuildConfig.APPLICATION_ID;
     private enum Phase { SETTING_UP, PARKING, PARKED, ACTIVATING, PICKING, PRESENTING, RETURNING, CLOSED }
+    enum Readiness { UNPREPARED, PREPARING, PREPARED }
+    private static final MutableStateFlow<Readiness> readiness = StateFlowKt.MutableStateFlow(Readiness.UNPREPARED);
     private static RearWallpaperStandby preparedHost; // Main thread only.
 
     private final VirtualRearHostActivity host;
@@ -59,9 +69,7 @@ final class RearWallpaperStandby {
     private final Runnable parkDeadline = () -> {
         if (phase == Phase.SETTING_UP || phase == Phase.PARKING) retire("park_not_acknowledged");
     };
-    private final Runnable focusDeadline = () -> {
-        if (phase == Phase.ACTIVATING) retire("no_rear_focus");
-    };
+    private final Runnable focusDeadline = this::activationTimedOut;
     private final ServiceConnection standbyConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) { }
         @Override public void onServiceDisconnected(ComponentName name) { retire("service_disconnected"); }
@@ -78,6 +86,7 @@ final class RearWallpaperStandby {
                 || !RearDisplay.isRear(rear) || locked(host)) return null;
         RearWallpaperStandby probe = new RearWallpaperStandby(host, rear);
         preparedHost = probe;
+        readiness.setValue(Readiness.PREPARING);
         host.showWallpaperStandbyWindow();
         TaskServiceManager.acquire(host, probe.standbyConnection);
         probe.main.postDelayed(probe.parkDeadline, 8_000);
@@ -85,63 +94,78 @@ final class RearWallpaperStandby {
         return probe;
     }
 
-    static String requestApp(int rear, String unique, ComponentName target, ITaskService remote,
-                             BooleanSupplier bindingCurrent) {
-        if (target == null) return reject("parked_target_unavailable");
+    // Zero means accepted or already being handled. Otherwise return a localized status for the tap.
+    @StringRes
+    static int requestApp(int rear, String unique, ComponentName target, ITaskService remote,
+                          BooleanSupplier bindingCurrent) {
+        if (target == null) return reject("parked_target_unavailable", R.string.ai_rear_shortcuts_app_failed);
         return request(rear, unique, target, remote, bindingCurrent);
     }
 
-    static String requestAllApps(int rear, String unique, ITaskService remote, BooleanSupplier bindingCurrent) {
+    @StringRes
+    static int requestAllApps(int rear, String unique, ITaskService remote, BooleanSupplier bindingCurrent) {
         return request(rear, unique, null, remote, bindingCurrent);
     }
 
-    private static String request(int rear, String unique, ComponentName target, ITaskService remote,
-                                  BooleanSupplier bindingCurrent) {
+    @StringRes
+    private static int request(int rear, String unique, ComponentName target, ITaskService remote,
+                               BooleanSupplier bindingCurrent) {
         RearWallpaperStandby probe = preparedHost;
-        boolean returningToGrid = probe != null && probe.phase == Phase.RETURNING && probe.earlyHandoff;
-        if (probe == null || (!returningToGrid && probe.phase != Phase.PARKED)
-                || probe.host.isFinishing() || probe.rear != rear || !probe.onRear()
-                || !locked(probe.host)) return reject("parked_host_unavailable");
-        if (!RearCastMode.useVirtual(probe.host) || !enabled(probe.host)
+        boolean returningToGrid = probe != null && probe.earlyHandoff
+                && (probe.phase == Phase.RETURNING || probe.phase == Phase.PARKING);
+        if (probe == null || probe.phase == Phase.CLOSED || probe.host.isFinishing()
+                || probe.rear != rear || !probe.onRear())
+            return reject("parked_host_unavailable", R.string.ai_rear_shortcuts_not_prepared);
+        if (!returningToGrid && (probe.phase == Phase.SETTING_UP || probe.phase == Phase.PARKING))
+            return reject("parked_host_not_ready", R.string.ai_rear_shortcuts_preparing);
+        if (!returningToGrid && probe.phase != Phase.PARKED) return 0; // One tap already owns the transition.
+        if (!AiRearWallpaperSupport.allowsShortcut(probe.host))
+            return reject("parked_cast_unlocked_blocked", R.string.ai_rear_unlocked_blocked);
+        if (!RearCastMode.useVirtual(probe.host))
+            return reject("parked_virtual_disabled", R.string.ai_rear_shortcuts_virtual);
+        if (!enabled(probe.host)
                 || !TaskServiceManager.isConnectedServiceCurrent(remote) || !bindingCurrent.getAsBoolean())
-            return reject("parked_cast_unavailable");
+            return reject("parked_cast_unavailable", R.string.ai_rear_shortcuts_not_prepared);
         try {
             RearDisplayCastOccupancy.Result entry =
                     RearDisplayCastOccupancy.query(remote, HOST_PACKAGE, rear);
             if (entry.disposition != RearDisplayCastOccupancy.OwnerDisposition.SYSTEM_LAUNCHER)
-                return reject("parked_cast_rear_busy");
+                return reject("parked_cast_rear_busy", R.string.ai_rear_shortcuts_rear_busy);
             if (returningToGrid) {
-                if (probe.pendingActivation != null) return reject("parked_cast_resume_already_queued");
+                if (probe.pendingActivation != null) return 0;
                 if (probe.host.getDisplay().getState() != Display.STATE_ON)
-                    return reject("parked_cast_state_changed");
+                    return reject("parked_cast_state_changed", R.string.ai_rear_shortcuts_app_failed);
                 probe.pendingActivation = new PendingActivation(rear, unique, target, remote, bindingCurrent);
                 Log.i(TAG, "resume_queued_after_handoff task=" + probe.host.getTaskId());
-                return "parked_cast_resume_queued";
+                return 0;
             }
             for (ActivityManager.AppTask task : probe.host.getSystemService(ActivityManager.class).getAppTasks()) {
                 ActivityManager.RecentTaskInfo info = task.getTaskInfo();
                 if (info == null || info.taskId != probe.host.getTaskId()
                         || !probe.host.getComponentName().equals(info.baseActivity)) continue;
-                if (!locked(probe.host) || probe.host.getDisplay().getState() != Display.STATE_ON)
-                    return reject("parked_cast_state_changed");
+                if (!AiRearWallpaperSupport.allowsShortcut(probe.host))
+                    return reject("parked_cast_unlocked_blocked", R.string.ai_rear_unlocked_blocked);
+                if (probe.host.getDisplay().getState() != Display.STATE_ON)
+                    return reject("parked_cast_state_changed", R.string.ai_rear_shortcuts_app_failed);
                 probe.target = target;
                 probe.authority = remote;
                 probe.rearUnique = unique;
                 probe.bindingCurrent = bindingCurrent;
                 probe.fromAppList = target == null;
                 probe.phase = Phase.ACTIVATING;
-                Log.i(TAG, "move_to_front_requested task=" + info.taskId + " source=" + probe.source() + " locked=true");
+                Log.i(TAG, "move_to_front_requested task=" + info.taskId + " source=" + probe.source()
+                        + " locked=" + locked(probe.host));
                 task.moveToFront();
                 probe.main.postDelayed(probe.focusDeadline, 4_500);
-                return "parked_cast_resume_requested";
+                return 0;
             }
         } catch (Exception failed) {
             Log.w(TAG, "move_to_front_error type=" + failed.getClass().getSimpleName());
             probe.retire("move_to_front_error");
-            return "parked_cast_resume_denied";
+            return R.string.ai_rear_shortcuts_app_failed;
         }
         probe.retire("own_task_missing");
-        return "parked_host_unavailable";
+        return R.string.ai_rear_shortcuts_not_prepared;
     }
 
     void focusChanged(boolean focused) {
@@ -152,11 +176,12 @@ final class RearWallpaperStandby {
             park();
         } else if (phase == Phase.ACTIVATING) {
             main.removeCallbacks(focusDeadline);
-            if (!requestCurrent() || VirtualRearHostActivity.instance != null) {
+            if (!requestBound() || VirtualRearHostActivity.instance != null) {
                 retire("parked_request_stale_before_focus");
                 return;
             }
-            Log.i(TAG, "same_task_focused locked=true display=" + rear + " task=" + host.getTaskId()
+            if (!AiRearWallpaperSupport.allowsShortcut(host)) { denyAndPark(); return; }
+            Log.i(TAG, "same_task_focused locked=" + locked(host) + " display=" + rear + " task=" + host.getTaskId()
                     + " source=" + source());
             if (fromAppList) openPicker(false);
             else startTarget(target);
@@ -165,10 +190,27 @@ final class RearWallpaperStandby {
         }
     }
 
-    private boolean requestCurrent() {
+    private boolean requestBound() {
         BooleanSupplier binding = bindingCurrent;
-        return locked(host) && enabled(host) && binding != null && binding.getAsBoolean()
+        return enabled(host) && binding != null && binding.getAsBoolean()
                 && TaskServiceManager.isConnectedServiceCurrent(authority);
+    }
+
+    private boolean requestCurrent() {
+        return AiRearWallpaperSupport.allowsShortcut(host) && requestBound();
+    }
+
+    private void activationTimedOut() {
+        if (phase != Phase.ACTIVATING) return;
+        if (requestBound()) showFeedback(host, rear, AiRearWallpaperSupport.allowsShortcut(host)
+                ? R.string.ai_rear_shortcuts_app_failed : R.string.ai_rear_unlocked_blocked);
+        retire("no_rear_focus");
+    }
+
+    private void denyAndPark() {
+        showFeedback(host, rear, R.string.ai_rear_unlocked_blocked);
+        host.showWallpaperStandbyWindow();
+        clearAndPark();
     }
 
     private void startTarget(ComponentName component) {
@@ -186,9 +228,14 @@ final class RearWallpaperStandby {
     }
 
     private boolean chooseApp(ComponentName app) {
-        if (phase != Phase.PICKING || !fromAppList || !requestCurrent() || !onRear()
+        if (phase != Phase.PICKING || !fromAppList || !requestBound() || !onRear()
                 || !host.hasWindowFocus() || !AiRearAppCatalog.isCastTarget(host, app, HOST_PACKAGE)) return false;
-        Log.i(TAG, "picker_selected task=" + host.getTaskId() + " package=" + app.getPackageName() + " locked=true");
+        if (!AiRearWallpaperSupport.allowsShortcut(host)) {
+            denyAndPark();
+            return true; // The rear hint handled the tap; don't also render the generic picker error.
+        }
+        Log.i(TAG, "picker_selected task=" + host.getTaskId() + " package=" + app.getPackageName()
+                + " locked=" + locked(host));
         startTarget(app);
         return true;
     }
@@ -201,10 +248,11 @@ final class RearWallpaperStandby {
     }
 
     void afterStartFailure() {
-        if (phase != Phase.PRESENTING || !requestCurrent()) {
+        if (phase != Phase.PRESENTING || !requestBound()) {
             retire("parked_start_recovery_stale");
             return;
         }
+        if (!AiRearWallpaperSupport.allowsShortcut(host)) { denyAndPark(); return; }
         openPicker(true);
     }
 
@@ -235,6 +283,7 @@ final class RearWallpaperStandby {
 
     private void markParked(String event) {
         phase = Phase.PARKED;
+        readiness.setValue(Readiness.PREPARED);
         main.removeCallbacks(parkDeadline);
         Log.i(TAG, event + " task=" + host.getTaskId() + " display=" + rear
                 + " round=" + round + " locked=" + locked(host));
@@ -242,8 +291,10 @@ final class RearWallpaperStandby {
         handoffPaused = false;
         PendingActivation next = pendingActivation;
         pendingActivation = null;
-        if (next != null && SystemClock.uptimeMillis() - next.acceptedAt < 4_500)
-            request(next.rear, next.unique, next.target, next.remote, next.bindingCurrent);
+        if (next != null && SystemClock.uptimeMillis() - next.acceptedAt < 4_500) {
+            int feedback = request(next.rear, next.unique, next.target, next.remote, next.bindingCurrent);
+            if (feedback != 0) showFeedback(host, rear, feedback);
+        }
     }
 
     private void park() {
@@ -268,7 +319,7 @@ final class RearWallpaperStandby {
     }
 
     void outputReleased() {
-        if (phase != Phase.RETURNING || earlyHandoff || !onRear() || !locked(host)) return;
+        if (phase != Phase.RETURNING || earlyHandoff || !onRear()) return;
         // The reader and virtual output are gone. Return visually while the backend verifies its tail.
         if (host.moveTaskToBack(false)) {
             earlyHandoff = true;
@@ -340,9 +391,10 @@ final class RearWallpaperStandby {
         if (entry.disposition != RearDisplayCastOccupancy.OwnerDisposition.HOST
                 || !(HOST_PACKAGE + ":" + host.getTaskId()).equals(entry.foreground))
             throw new IllegalStateException("parked_cast_host_not_foreground");
-        if (VirtualCastUriFlow.isPhysicalCastActive() || !locked(host) || !TaskServiceManager.isConnectedServiceCurrent(remote))
+        if (VirtualCastUriFlow.isPhysicalCastActive() || !isCurrentStart(remote))
             throw new IllegalStateException("parked_cast_request_stale");
-        Log.i(TAG, "virtual_start_requested host=" + host.getTaskId() + " round=" + round + " locked=true");
+        Log.i(TAG, "virtual_start_requested host=" + host.getTaskId() + " round=" + round
+                + " locked=" + locked(host));
     }
 
     void recordStarted(JSONObject state) {
@@ -352,13 +404,7 @@ final class RearWallpaperStandby {
                 + " locked=" + locked(host));
     }
 
-    static boolean isParked() {
-        RearWallpaperStandby active = preparedHost;
-        return active != null && active.phase == Phase.PARKED && active.onRear()
-                && !active.host.isFinishing() && enabled(active.host);
-    }
-
-    static boolean ownsHost() { return preparedHost != null; }
+    static StateFlow<Readiness> readiness() { return readiness; }
 
     static void disarm() {
         if (preparedHost != null) preparedHost.retire("wallpaper_disarmed");
@@ -367,7 +413,10 @@ final class RearWallpaperStandby {
     void close() {
         phase = Phase.CLOSED;
         pendingActivation = null;
-        if (preparedHost == this) preparedHost = null;
+        if (preparedHost == this) {
+            preparedHost = null;
+            readiness.setValue(Readiness.UNPREPARED);
+        }
         main.removeCallbacksAndMessages(null);
         TaskServiceManager.release(standbyConnection);
         Log.i(TAG, "closed task=" + host.getTaskId());
@@ -387,9 +436,23 @@ final class RearWallpaperStandby {
         host.finishAndRemoveTask();
     }
 
-    private static String reject(String reason) {
+    static void showFeedback(Context source, int rear, @StringRes int message) {
+        if (rear <= Display.DEFAULT_DISPLAY) return;
+        RearWallpaperStandby probe = preparedHost;
+        Display display = probe != null && probe.rear == rear && probe.onRear()
+                ? probe.host.getDisplay() : source.getSystemService(DisplayManager.class).getDisplay(rear);
+        if (display == null || !display.isValid() || display.getState() != Display.STATE_ON) return;
+        try {
+            Toast.makeText(source.createDisplayContext(display), message, Toast.LENGTH_SHORT).show();
+        } catch (IllegalArgumentException | IllegalStateException gone) {
+            Log.w(TAG, "rear_feedback_display_gone");
+        }
+    }
+
+    @StringRes
+    private static int reject(String reason, @StringRes int message) {
         Log.i(TAG, "resume_declined " + reason);
-        return reason;
+        return message;
     }
 
     private static boolean locked(VirtualRearHostActivity host) {

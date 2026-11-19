@@ -6,6 +6,7 @@ import org.json.JSONObject;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 /** Session-scoped rear input relay running as the Shizuku shell user. */
@@ -324,7 +325,7 @@ final class RearInputProxy {
         volatile int contentRotation;
         final RearCastViewport safeViewport;
         volatile RearCastViewport viewport;
-        volatile IBinder.DeathRecipient death;
+        final AtomicReference<IBinder.DeathRecipient> death = new AtomicReference<>();
         final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
         // Task validation can execute shell commands; it must not delay gesture readiness.
         final ScheduledExecutorService gestureTimer = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -362,7 +363,7 @@ final class RearInputProxy {
                 owner = Session.this.owner; viewport = Session.this.viewport;
                 contentRotation = Session.this.contentRotation; feedback = Session.this.feedback;
                 menu = Session.this.menu; acceptedInteraction = Session.this.acceptedInteraction;
-                injector = Session.this.injector; death = Session.this.death;
+                injector = Session.this.injector; death = Session.this.death.get();
             }
         }
         Session(String path, int task, IBinder owner, int display, RearTouchRouter.Feedback feedback,
@@ -377,13 +378,13 @@ final class RearInputProxy {
                 catch (Exception e) { close(e.toString()); }
             }, 20);
         }
-        private void linkOwner(IBinder next) throws Exception {
+        private synchronized void linkOwner(IBinder next) throws Exception {
             if (next == null || !next.isBinderAlive()) throw new IOException("Input owner is unavailable");
             IBinder.DeathRecipient nextDeath = () -> { if (owner == next) close("owner_died"); };
             next.linkToDeath(nextDeath, 0);
             IBinder previous = owner;
-            IBinder.DeathRecipient previousDeath = death;
-            owner = next; death = nextDeath;
+            IBinder.DeathRecipient previousDeath = death.get();
+            owner = next; death.set(nextDeath);
             if (previous != null && previous != next && previousDeath != null) previous.unlinkToDeath(previousDeath, 0);
         }
 
@@ -439,7 +440,7 @@ final class RearInputProxy {
                     router.setFeedback(nextFeedback); router.setMenu(nextMenu);
                     if (pending.transferDeath != null && pending.owner != nextOwner && pending.death != null)
                         pending.owner.unlinkToDeath(pending.death, 0);
-                    death = nextOwner == pending.owner ? pending.death : pending.transferDeath;
+                    death.set(nextOwner == pending.owner ? pending.death : pending.transferDeath);
                     pending.rebound = true;
                     return true;
                 } catch (Exception failure) {
@@ -507,12 +508,12 @@ final class RearInputProxy {
 
         private void restoreTransferRoute(Transfer pending) throws Exception {
             IBinder failedOwner = owner;
-            IBinder.DeathRecipient failedDeath = death;
+            IBinder.DeathRecipient failedDeath = death.get();
             if (pending.owner != failedOwner) {
                 pending.owner.linkToDeath(pending.death, 0);
                 if (failedOwner != null && failedDeath != null) failedOwner.unlinkToDeath(failedDeath, 0);
             }
-            task = pending.task; display = pending.display; owner = pending.owner; death = pending.death;
+            task = pending.task; display = pending.display; owner = pending.owner; death.set(pending.death);
             injector = pending.injector; viewport = pending.viewport; contentRotation = pending.contentRotation;
             feedback = pending.feedback; menu = pending.menu; acceptedInteraction = pending.acceptedInteraction;
             state.configure(viewport, contentRotation, SystemClock.uptimeMillis());
@@ -716,7 +717,8 @@ final class RearInputProxy {
         }
         synchronized void close(String why) {
             if (closed && resourcesStopped) return;
-            closed = true; ready = false; reason = why; timer.shutdownNow(); gestureClock.close();
+            closed = true; ready = false; reason = why; timer.shutdown(); gestureClock.close();
+            unlinkClosingOwner(owner, death);
             try { if (router != null) router.cancel(SystemClock.uptimeMillis()); else if (state != null) state.cancel(SystemClock.uptimeMillis()); } catch (Exception ignored) { }
             try { if (commands != null) { commands.write("Q\n"); commands.flush(); commands.close(); } } catch (Exception ignored) { }
             if (process != null) {
@@ -732,7 +734,6 @@ final class RearInputProxy {
             if (resourcesStopped) {
                 outputAvailable = false;
             }
-            owner.unlinkToDeath(death, 0);
             if (resourcesStopped && lifecycle != null)
                 lifecycle.record("RELEASED", id, generation, task, display);
             lastStatus = status();
@@ -748,6 +749,14 @@ final class RearInputProxy {
                     closed, resourcesStopped, outputAvailable).toString(); }
             catch (Exception e) { return "{}"; }
         }
+    }
+
+    /** A reader exit may need a second cleanup pass; its binder registration is released only once. */
+    static void unlinkClosingOwner(IBinder owner, AtomicReference<IBinder.DeathRecipient> link) {
+        IBinder.DeathRecipient linked = link.getAndSet(null);
+        if (linked == null) return;
+        try { owner.unlinkToDeath(linked, 0); }
+        catch (NoSuchElementException alreadyUnlinked) { /* Binder has already discarded the registration. */ }
     }
 
     /** Called only for an accepted contact or matched final-UP frame, never RESET/CANCEL or a clock tick. */

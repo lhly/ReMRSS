@@ -37,6 +37,7 @@ internal object AiRearWallpaperArchive {
     private const val assetPrefix = "remrss_ai/"
     private const val manifest = "manifest.xml"
     private const val manifestLimit = 1024 * 1024
+    private const val pressedSlot = "remrssAiPressedSlot"
     private const val margin = 18
     private const val gap = 12
 
@@ -53,8 +54,10 @@ internal object AiRearWallpaperArchive {
     fun write(
         original: File, out: OutputStream, physical: Viewport, grid: AiRearGrid, apps: Map<String, Badge>,
         listBadge: Badge, emptyText: String, backdropJpeg: ByteArray?, activation: Activation,
+        themeArt: AiRearModWallpaperTheme? = null,
     ) {
         require(backdropJpeg == null || backdropJpeg.size in 1..(4 * 1024 * 1024))
+        require(themeArt == null || themeArt.art.isNotEmpty() && themeArt.validGrid(grid, apps::containsKey))
         ZipFile(original).use { source ->
             val manifestEntry = source.getEntry(manifest) ?: throw IOException("NO_WALLPAPER_MANIFEST")
             if (source.getEntry("var_config.xml")?.isDirectory != false ||
@@ -80,13 +83,31 @@ internal object AiRearWallpaperArchive {
             val markup = buildString {
                 // Retain official AI config, lifecycle and media references. Cover that artwork visually.
                 append(xml.removeSuffix(closing))
-                append("<Rectangle x=\"0\" y=\"0\" w=\"${viewport.width}\" h=\"${viewport.height}\" fillColor=\"#FF222634\"/>")
-                if (backdropJpeg != null) {
+                append("<Var name=\"$pressedSlot\" type=\"number\" expression=\"0\" const=\"true\"/>")
+                append("<Rectangle x=\"0\" y=\"0\" w=\"${viewport.width}\" h=\"${viewport.height}\" fillColor=\"${AiRearWallpaperArt.mamlColor(AiRearWallpaperArt.WALL)}\"/>")
+                if (themeArt != null) {
+                    val image = "${assetPrefix}theme-backdrop.png"
+                    assets[image] = themeArt.backdrop
+                    image(image, viewport.width, viewport.height)
+                } else if (backdropJpeg != null) {
                     val image = "${assetPrefix}background.jpg"
                     assets[image] = backdropJpeg
                     append("<Image x=\"0\" y=\"0\" w=\"${viewport.width}\" h=\"${viewport.height}\" src=\"$image\"/>")
+                    append("<Rectangle x=\"0\" y=\"0\" w=\"${viewport.width}\" h=\"${viewport.height}\" fillColor=\"${AiRearWallpaperArt.mamlColor(AiRearWallpaperArt.PHOTO_SHADE)}\"/>")
                 }
-                cells(viewport).forEachIndexed { index, cell ->
+                if (themeArt != null) themeArt.art.forEach { art ->
+                    val index = art.index
+                    val cell = art.cell(viewport)
+                    val src = "${assetPrefix}theme-button-$index.png"
+                    assets[src] = art.png
+                    val target = grid.tile(index) as AiRearGrid.Tile.App
+                    val label = escape(apps.getValue(target.component).label)
+                    button(cell, index, activation) { pressed ->
+                        image(src, cell.width, cell.height, if (pressed) 174 else 255)
+                        val text = artLabelSize(cell)
+                        append("<Text x=\"${cell.width / 2}\" y=\"${artLabelY(cell)}\" align=\"center\" alignV=\"center\" w=\"${cell.width - 16}\" size=\"$text\" color=\"#ffffffff\" text=\"$label\"/>")
+                    }
+                } else cells(viewport).forEachIndexed { index, cell ->
                     val tile = grid.tile(index)
                     val badge = when (tile) {
                         AiRearGrid.Tile.AllApps -> listBadge
@@ -99,18 +120,12 @@ internal object AiRearWallpaperArchive {
                     }
                     val label = escape(badge?.label ?: emptyText)
                     val (x, y, w, h) = cell
+                    val library = tile == AiRearGrid.Tile.AllApps
                     if (badge == null) {
                         append("<Group x=\"$x\" y=\"$y\">")
-                        face(w, h, label, null, false)
+                        face(w, h, label, null, library, false)
                         append("</Group>")
-                    } else {
-                        append("<Button x=\"$x\" y=\"$y\" w=\"$w\" h=\"$h\" alignChildren=\"true\">")
-                        append("<Normal>"); face(w, h, label, asset, false); append("</Normal>")
-                        append("<Pressed>"); face(w, h, label, asset, true); append("</Pressed>")
-                        append("<Triggers><Trigger action=\"up\" condition=\"lt(abs(#touch_x-#touch_begin_x),24)*lt(abs(#touch_y-#touch_begin_y),24)\">")
-                        appendActivation(activation, index)
-                        append("</Trigger></Triggers></Button>")
-                    }
+                    } else button(cell, index, activation) { pressed -> face(w, h, label, asset, library, pressed) }
                 }
                 append(closing)
             }.toByteArray(Charsets.UTF_8)
@@ -144,14 +159,49 @@ internal object AiRearWallpaperArchive {
         }
     }
 
-    private fun StringBuilder.face(w: Int, h: Int, label: String, asset: String?, pressed: Boolean) {
-        val tint = if (pressed) "#EB4A5265" else "#CC272C38"
-        val image = minOf(w, h) / 3
-        append("<Rectangle x=\"0\" y=\"0\" w=\"$w\" h=\"$h\" cornerRadius=\"20\" fillColor=\"$tint\"/>")
-        if (asset != null) append("<Image x=\"${(w - image) / 2}\" y=\"${h / 7}\" w=\"$image\" h=\"$image\" src=\"$asset\"/>")
-        val textY = if (asset == null) h / 2 else h * 3 / 4
-        val textSize = minOf(32, w / 6, h / 5)
-        append("<Text x=\"${w / 2}\" y=\"$textY\" align=\"center\" alignV=\"center\" w=\"${w - 18}\" size=\"$textSize\" color=\"#FFFFFFFF\" text=\"$label\"/>")
+    fun artLabelSize(cell: Cell): Int = (cell.width / 9).coerceIn(17, 32)
+    fun artLabelY(cell: Cell): Int = cell.height * 78 / 100
+
+    private fun StringBuilder.image(src: String, w: Int, h: Int, alpha: Int = 255) {
+        append("<Image x=\"0\" y=\"0\" w=\"$w\" h=\"$h\" alpha=\"$alpha\" src=\"$src\"/>")
+    }
+
+    private fun StringBuilder.button(cell: Cell, index: Int, activation: Activation, render: StringBuilder.(Boolean) -> Unit) {
+        val (x, y, w, h) = cell
+        val slot = index + 1 // Zero means no tile is pressed.
+        val owner = "eq(#$pressedSlot,$slot)"
+        val start = cell.hitExpression("touch_begin")
+        val pressed = "$owner*$start*${cell.hitExpression("touch")}"
+        // Both renderers share the repaired one-owner press and gesture gate.
+        append("<Button x=\"$x\" y=\"$y\" w=\"$w\" h=\"$h\" alignChildren=\"true\">")
+        append("<Normal><Group visibility=\"not($pressed)\">")
+        render(false)
+        append("</Group><Group visibility=\"$pressed\">")
+        render(true)
+        append("</Group></Normal><Triggers><Trigger action=\"down\" condition=\"$start\">")
+        setPressedSlot(slot)
+        append("</Trigger><Trigger action=\"up,cancel\" condition=\"$owner\">")
+        setPressedSlot(0)
+        append("</Trigger><Trigger action=\"up\" condition=\"lt(abs(#touch_x-#touch_begin_x),24)*lt(abs(#touch_y-#touch_begin_y),24)\">")
+        appendActivation(activation, index)
+        append("</Trigger></Triggers></Button>")
+    }
+
+    private fun Cell.hitExpression(touch: String) =
+        "ge(#${touch}_x,$x)*lt(#${touch}_x,${x + width})*ge(#${touch}_y,$y)*lt(#${touch}_y,${y + height})"
+
+    private fun StringBuilder.setPressedSlot(slot: Int) {
+        append("<VariableCommand name=\"$pressedSlot\" type=\"number\" expression=\"$slot\" requestUpdate=\"true\"/>")
+    }
+
+    private fun StringBuilder.face(w: Int, h: Int, label: String, asset: String?, library: Boolean, pressed: Boolean) {
+        val f = AiRearWallpaperArt.face(w, h, asset != null, library, pressed)
+        val edge = if (pressed) AiRearWallpaperArt.PRESSED_OUTLINE else AiRearWallpaperArt.OUTLINE
+        val i = f.inset
+        append("<Rectangle x=\"$i\" y=\"$i\" w=\"${w - 2 * i}\" h=\"${h - 2 * i}\" cornerRadius=\"${f.radius}\" fillColor=\"${AiRearWallpaperArt.mamlColor(edge)}\"/>")
+        append("<Rectangle x=\"${i + 2}\" y=\"${i + 2}\" w=\"${w - 2 * i - 4}\" h=\"${h - 2 * i - 4}\" cornerRadius=\"${f.radius - 2}\" fillColor=\"${AiRearWallpaperArt.mamlColor(f.surface)}\"/>")
+        if (asset != null) append("<Image x=\"${(w - f.icon) / 2}\" y=\"${f.iconTop}\" w=\"${f.icon}\" h=\"${f.icon}\" src=\"$asset\"/>")
+        append("<Text x=\"${w / 2}\" y=\"${f.labelY}\" align=\"center\" alignV=\"center\" w=\"${w - 18}\" size=\"${f.textSize}\" color=\"${AiRearWallpaperArt.mamlColor(AiRearWallpaperArt.TEXT)}\" text=\"$label\"/>")
     }
 
     /**

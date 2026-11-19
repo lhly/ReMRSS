@@ -14,17 +14,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.*
 import androidx.compose.ui.semantics.*
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.IntOffset
@@ -37,7 +33,6 @@ import java.util.concurrent.Future
 import top.yukonga.miuix.kmp.basic.Checkbox
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TextField
 
 /** Data and lifecycle for the Miuix app picker; preferences remain compatible with services. */
 class AppPickerModel(private val activity: MainActivity, saved: Bundle?, private val back: Runnable) {
@@ -253,16 +248,13 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
                     fontSize = 13.sp, color = AppPalette.secondary())
             }
             item("filters") {
-                TextField(state.search, { if (interactive) {
+                AppCatalogSearchField(state.search, {
                     filterGeneration++
                     selectionAnimationGeneration = -1
                     placementAnimationsSuppressed = true
                     placementBarrierPhase = 0
                     onSearch(it)
-                } }, label = s("search_apps"), singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("app_search").then(
-                        if (interactive) Modifier else Modifier.focusProperties { canFocus = false }
-                    ), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                }, label = s("search_apps"), modifier = Modifier.testTag("app_search"), interactive = interactive)
                 AppToggle(s("system_apps"), null, state.includeSystem, enabled = interactive,
                     modifier = Modifier.testTag("picker_system_apps_toggle")) {
                     if (interactive) {
@@ -289,18 +281,13 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
                         tween<IntOffset>(180, easing = pickerReorderEasing) else snap(),
                     fadeOutSpec = null,
                 )
-                AppCard(placementModifier.testTag("picker_app_${app.info.packageName}")) {
-                    Row(Modifier.fillMaxWidth().toggleable(state.selected.contains(app.info.packageName), enabled = interactive,
-                        role = Role.Checkbox, onValueChange = { choose(listOf(app.info.packageName), it) }).padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        icon(app)
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(app.name, fontSize = 16.sp, color = AppPalette.text())
-                            Text(app.info.packageName, fontSize = 12.sp, color = AppPalette.secondary())
-                        }
-                        Checkbox(if (state.selected.contains(app.info.packageName)) androidx.compose.ui.state.ToggleableState.On else androidx.compose.ui.state.ToggleableState.Off,
-                            onClick = null, modifier = Modifier.clearAndSetSemantics { })
-                    }
+                val checked = app.info.packageName in state.selected
+                AppCatalogCard(app.name, app.info.packageName,
+                    modifier = placementModifier.testTag("picker_app_${app.info.packageName}"),
+                    interaction = Modifier.toggleable(checked, enabled = interactive, role = Role.Checkbox,
+                        onValueChange = { choose(listOf(app.info.packageName), it) }), icon = { icon(app) }) {
+                    Checkbox(if (checked) androidx.compose.ui.state.ToggleableState.On else androidx.compose.ui.state.ToggleableState.Off,
+                        onClick = null, modifier = Modifier.clearAndSetSemantics { })
                 }
             }
         }

@@ -1,6 +1,8 @@
 package top.zainzh.rearscreen.platform.mods
 
 import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -11,11 +13,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -23,9 +27,14 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.window.WindowDialog
 import top.zainzh.rearscreen.AppCard
+import top.zainzh.rearscreen.AiRearModWallpaperRecovery
+import top.zainzh.rearscreen.AiRearWallpaperBinding
+import top.zainzh.rearscreen.AiRearWallpaperEditorActivity
+import top.zainzh.rearscreen.AiRearWallpaperInstallations
 import top.zainzh.rearscreen.AppRow
 import top.zainzh.rearscreen.AppToggle
 import top.zainzh.rearscreen.AppPalette
+import top.zainzh.rearscreen.ModWallpaperThemeKind
 import top.zainzh.rearscreen.PageFrame
 import top.zainzh.rearscreen.R
 import top.zainzh.rearscreen.miuixContent
@@ -50,16 +59,29 @@ class ModSettingsActivity : ComponentActivity() {
     private var error by mutableStateOf("")
     private var notice by mutableStateOf("")
     private var destructiveAction by mutableStateOf<ModDestructiveAction?>(null)
+    private var focusMod by mutableStateOf<String?>(null)
+    private var wallpaperWorks by mutableStateOf(emptyMap<String, List<String>>())
     private val executor: Executor by lazy { mainExecutor }
     private val picker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) inspectArchive(uri) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) focusMod = intent.getStringExtra(EXTRA_FOCUS_MOD)
         reload()
         miuixContent {
             val candidate = pending
+            val list = rememberLazyListState()
+            LaunchedEffect(focusMod, mods) {
+                val mod = focusMod ?: return@LaunchedEffect
+                val index = mods.indexOfFirst { it.id == mod }
+                if (index >= 0) {
+                    list.scrollToItem(index + 1 + (if (error.isNotEmpty()) 1 else 0) +
+                        (if (notice.isNotEmpty()) 1 else 0))
+                }
+                focusMod = null
+            }
             PageFrame("Mod 管理", ::finish, "mod_settings_back") { modifier, header ->
-                LazyColumn(modifier.padding(horizontal = 20.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(top = header + 12.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                LazyColumn(modifier.padding(horizontal = 20.dp), state = list, contentPadding = androidx.compose.foundation.layout.PaddingValues(top = header + 12.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     item {
                         AppCard {
                             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -77,6 +99,14 @@ class ModSettingsActivity : ComponentActivity() {
                             Column(Modifier.padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(mod.name, Modifier.padding(horizontal = 18.dp, vertical = 8.dp), fontSize = 18.sp)
                                 Text("${mod.authorName} · ${mod.version}", Modifier.padding(horizontal = 18.dp), fontSize = 13.sp)
+                                if (mod.wallpaperTheme != null && AiRearWallpaperEditorActivity.supportsThemes()) {
+                                    val needsEnable = mod.wallpaperTheme == ModWallpaperThemeKind.DRAWN_CONTROLS && !mod.enabled
+                                    AppRow(getString(if (needsEnable) R.string.ai_rear_enable_configure_theme
+                                        else R.string.ai_rear_configure_theme),
+                                        wallpaperWorks[mod.id]?.takeIf { it.isNotEmpty() }
+                                            ?.joinToString(" · ") ?: getString(R.string.ai_rear_theme_no_work), enabled = !working,
+                                        action = { configureWallpaper(mod, needsEnable) })
+                                }
                                 Text("已授权 ${mod.grantedCapabilities.sorted().joinToString { capabilityLabel(it) }.ifEmpty { "无" }}", Modifier.padding(horizontal = 18.dp, vertical = 8.dp), fontSize = 13.sp)
                                 AppToggle("启用", null, mod.enabled) { enabled -> changeEnabled(mod, enabled) }
                                 AppRow("本机预览", "同源原生渲染；不连接背屏", action = {
@@ -87,8 +117,9 @@ class ModSettingsActivity : ComponentActivity() {
                                 }
                                 AppRow("设置", null, action = { startActivity(android.content.Intent(this@ModSettingsActivity, ModConfigActivity::class.java).putExtra("mod_id", mod.id)) })
                                 val sceneAllowed = "rear.scene" in mod.grantedCapabilities
-                                AppRow("显示到背屏", if (sceneAllowed) null else "此 Mod 未请求背屏显示能力", enabled = sceneAllowed,
-                                    action = if (sceneAllowed) ({ openRear(mod.id) }) else null)
+                                if (sceneAllowed || mod.wallpaperTheme == null)
+                                    AppRow("显示到背屏", if (sceneAllowed) null else "此 Mod 未请求背屏显示能力", enabled = sceneAllowed,
+                                        action = if (sceneAllowed) ({ openRear(mod.id) }) else null)
                                 if (sceneAllowed) {
                                     Text(getString(R.string.mod_scene_cover_behavior_note), Modifier.padding(horizontal = 18.dp, vertical = 4.dp),
                                         color = AppPalette.secondary(), fontSize = 13.sp)
@@ -134,8 +165,11 @@ class ModSettingsActivity : ComponentActivity() {
                     }
                     is ModDestructiveAction.Uninstall -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("将移除 ${action.mod.name} 的安装包、配置和本地数据；此操作不能撤销。")
+                        wallpaperWorks[action.mod.id]?.takeIf { it.isNotEmpty() }?.let {
+                            Text(getString(R.string.ai_rear_uninstall_work_list, it.joinToString("、")))
+                        }
                         TextButton("取消", { destructiveAction = null }, Modifier.fillMaxWidth(), minHeight = 48.dp)
-                        TextButton("确认卸载并删除数据", { destructiveAction = null; uninstall(action.mod) }, Modifier.fillMaxWidth(), minHeight = 48.dp)
+                        TextButton("确认卸载并删除数据", { destructiveAction = null; uninstall(action.mod) }, Modifier.fillMaxWidth(), minHeight = 48.dp, enabled = !working)
                     }
                     null -> Unit
                 }
@@ -145,7 +179,36 @@ class ModSettingsActivity : ComponentActivity() {
 
     override fun onResume() { super.onResume(); reload() }
 
-    private fun reload() { runCatching { ModPackageStore.list(this) }.onSuccess { mods = it }.onFailure { error = it.message ?: "无法读取 Mod 列表" } }
+    private fun reload() {
+        runCatching { ModPackageStore.list(this) }.onSuccess { mods = it }.onFailure { error = it.message ?: "无法读取 Mod 列表" }
+        val installations = AiRearWallpaperInstallations.forApp(this)
+        val prefs = getSharedPreferences(AiRearWallpaperBinding.PREFS, MODE_PRIVATE)
+        wallpaperWorks = mods.associate { mod -> mod.id to runCatching {
+            installations.forMod(mod.id).map {
+                val suffix = it.id.takeLast(6)
+                prefs.getString(it.titleKey, null)?.takeIf(String::isNotBlank)?.let { title -> "$title · $suffix" } ?: suffix
+            }
+        }.getOrDefault(emptyList()) }
+    }
+
+    private fun configureWallpaper(mod: InstalledMod, enable: Boolean) {
+        if (working) return
+        if (!enable) {
+            startActivity(AiRearWallpaperEditorActivity.open(this, mod.id))
+            return
+        }
+        working = true
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { ModPackageStore.setEnabled(this@ModSettingsActivity, mod.id, true) }
+            }
+            working = false
+            result.onSuccess {
+                reload()
+                startActivity(AiRearWallpaperEditorActivity.open(this@ModSettingsActivity, mod.id))
+            }.onFailure { error = it.message ?: "启用 Mod 失败" }
+        }
+    }
 
     private fun inspectArchive(uri: Uri) {
         working = true; error = ""; notice = ""
@@ -202,6 +265,7 @@ class ModSettingsActivity : ComponentActivity() {
             working = false; pending = null; stagedArchive = null
             result.onSuccess {
                 reload()
+                if (old == null && it.wallpaperTheme != null) focusMod = it.id
                 notice = when {
                     old == null -> modInstallSuccessNotice(it.name, false, it.enabled)
                     oldCastCleanupRequested -> "已更新 ${it.name}；旧 Cast owner 已失权并提交异步收尾，实际结束状态待核验。"
@@ -277,7 +341,23 @@ class ModSettingsActivity : ComponentActivity() {
     }
 
     private fun uninstall(mod: InstalledMod) {
+        if (working) return
+        working = true
         lifecycleScope.launch(Dispatchers.IO) {
+          try {
+            val restored = try {
+                AiRearModWallpaperRecovery.restoreBeforeUninstall(this@ModSettingsActivity, mod.id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                withContext(Dispatchers.Main) {
+                    reload()
+                    error = if (failure.message == getString(R.string.ai_rear_uninstall_connect))
+                        getString(R.string.ai_rear_uninstall_connect)
+                    else getString(R.string.ai_rear_uninstall_restore_first)
+                }
+                return@launch
+            }
             val disabled = runCatching { ModPackageStore.setEnabled(this@ModSettingsActivity, mod.id, false) }
             if (disabled.isFailure) {
                 withContext(Dispatchers.Main) { error = disabled.exceptionOrNull()?.message ?: "无法停用 Mod" }
@@ -299,11 +379,21 @@ class ModSettingsActivity : ComponentActivity() {
             val removal = runCatching { ModPackageStore.uninstall(this@ModSettingsActivity, mod.id) }
             if (removal.isSuccess) withContext(Dispatchers.Main) {
                 reload(); error = ""
-                notice = "已卸载 ${mod.name} 并删除本地数据；Cast owner 收尾已提交，实际结束状态待核验。"
+                notice = if (restored > 0) getString(R.string.ai_rear_mod_uninstalled, mod.name)
+                    else "已卸载 ${mod.name} 并删除本地数据；Cast owner 收尾已提交，实际结束状态待核验。"
             } else withContext(Dispatchers.Main) {
                 reload(); error = removal.exceptionOrNull()?.message ?: "卸载失败；Mod 保持停用。"
             }
+          } finally {
+            withContext(Dispatchers.Main) { working = false }
+          }
         }
+    }
+
+    companion object {
+        private const val EXTRA_FOCUS_MOD = "focus_mod"
+        internal fun open(context: Context, modId: String? = null) =
+            Intent(context, ModSettingsActivity::class.java).putExtra(EXTRA_FOCUS_MOD, modId)
     }
 
     private fun openRear(id: String) {

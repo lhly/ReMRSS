@@ -32,6 +32,7 @@ final class PausableGestureClock {
         if (closed) return;
         closed = true; generation++;
         if (future != null) { future.cancel(false); future = null; }
-        executor.shutdownNow();
+        // A tick can initiate close itself. Do not interrupt that thread's remaining cleanup.
+        executor.shutdown();
     }
 }

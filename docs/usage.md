@@ -83,7 +83,7 @@
 | 投放指定应用 | `mrss://switch?packageName=com.example.app` |
 | 返回主屏 | `mrss://return?current=1` |
 | 截图 | `mrss://screenshot` |
-| 打开自定义背屏编辑器（主屏解锁、支持机型） | `mrss://rear-wallpaper` |
+| 打开背屏启动器编辑器（主屏解锁、支持机型） | `mrss://rear-wallpaper` |
 | 调整物理背屏显示 | `mrss://config?dpi=300&rotation=1` |
 
 `rotation` 使用 `0` / `1` / `2` / `3`，分别对应 0° / 90° / 180° / 270°，并非直接传角度。
