@@ -174,7 +174,7 @@ final class RearVirtualCast {
                 || !replacementIdentityCurrent(tx)) return false;
         boolean rebound = input.rebindPaused(tx.previous.inputId, token, tx.next.task, tx.next.display,
                 tx.next.owner, tx.next.viewport, tx.next.contentRotation, tx.next.inputFeedback(),
-                tx.next.inputMenu(), tx.next::reportAcceptedInteraction);
+                tx.next.inputMenu(), tx.next.inputInteraction());
         tx.rebound = rebound;
         return rebound;
     }
@@ -336,6 +336,11 @@ final class RearVirtualCast {
     }
 
     String renderPlan(int task, String component, int density, boolean compatibility, boolean full) throws Exception {
+        return renderPlan(task, component, density, compatibility, full, false);
+    }
+
+    private String renderPlan(int task, String component, int density, boolean compatibility, boolean full,
+            boolean disposableWallpaperCast) throws Exception {
         if (!BuildConfig.VIRTUAL_CAST_ENABLED) throw new SecurityException("Virtual casting is unavailable");
         VirtualCastRequest.density(Integer.toString(density));
         if (component != null) VirtualCastRequest.component(component);
@@ -344,11 +349,15 @@ final class RearVirtualCast {
         String pkg = component == null ? service.getPackageNameFromTaskId(task) : component.substring(0, component.indexOf('/'));
         VirtualCastRequest.packageName(pkg);
         int source = RearCastGeometry.displayDensity(0);
-        int actual = RearCastCompatibility.density(compatibility, density, source);
         RearCastViewport safe = RearCastGeometry.read();
+        int actual = compatibility || disposableWallpaperCast
+                ? RearCastCompatibility.density(compatibility, density, source)
+                : RearCastCompatibility.automaticRenderDensity(density, source, safe);
         RearCastViewport render = RearCastCompatibility.viewport(full ? safe.full() : safe, density, actual);
         return new JSONObject(RearCastGeometry.encode(render)).put("package", pkg).put("renderDensity", actual)
                 .put("requestedDensity", density).put("sourceDensity", source)
+                .put("renderProfile", actual == density ? "layout_density" : "source_density")
+                .put("autoRotation", RearCastOrientation.initialRotation(task, component, render))
                 .put("compatibility", compatibility ? "source_density" : "none").toString();
     }
     String start(Surface surface, String reader, int task, int host, int density, String component,
@@ -377,7 +386,7 @@ final class RearVirtualCast {
         if (component != null) VirtualCastRequest.component(component);
         RearCastViewport safe = RearCastGeometry.read();
         if (!(full ? safe.full() : safe).key().equals(RearCastGeometry.decode(viewport).key())) throw new IllegalStateException("Rear output area changed before start");
-        JSONObject plan = new JSONObject(renderPlan(task, component, density, compatibility, full));
+        JSONObject plan = new JSONObject(renderPlan(task, component, density, compatibility, full, disposableWallpaperCast));
         if (!RearCastGeometry.decode(plan.toString()).renderKey().equals(RearCastGeometry.decode(viewport).renderKey()))
             throw new IllegalStateException("Rear render plan changed before start");
         if (surface == null || !surface.isValid() || owner == null || !owner.isBinderAlive()
@@ -675,6 +684,8 @@ final class RearVirtualCast {
         volatile boolean closed;
         volatile boolean resourcesStopped;
         volatile boolean virtualDisplayReleased;
+        // Keep the expected tasks through a timeout or a failed release reply.
+        private VirtualCastNativeReturn nativeReturn;
         // Every state transition which can invalidate an in-flight health probe advances this
         // generation while holding the Session monitor. The 500 ms probe may do slow checks
         // outside the lock, but it may only close the exact state it inspected.
@@ -697,6 +708,9 @@ final class RearVirtualCast {
         volatile ISceneTaskActionGate controlledStartActionGate;
         volatile boolean beginning, closeRequested;
         String sizePolicy = "disabled";
+        RearVirtualIme keyboard;
+        private boolean focusRequestLogged;
+        private boolean focusErrorLogged;
         RearAppFreezeGuard freezeGuard;
         boolean ownsFreezeGuard = true;
         boolean deferLauncherRestore;
@@ -772,8 +786,9 @@ final class RearVirtualCast {
                 return null;
             });
             Class<?> builderType = Class.forName("android.hardware.display.VirtualDisplayConfig$Builder");
+            String displayName = RearVirtualIme.DISPLAY_NAME_PREFIX + id;
             Object builder = builderType.getConstructor(String.class, int.class, int.class, int.class)
-                    .newInstance("ReMRSS-virtual-" + id, width, height, density);
+                    .newInstance(displayName, width, height, density);
             // PUBLIC | OWN_CONTENT_ONLY | SUPPORTS_TOUCH | TRUSTED | OWN_DISPLAY_GROUP | ALWAYS_UNLOCKED | OWN_FOCUS.
             // A separate display group is required for ALWAYS_UNLOCKED to survive system validation.
             // Keep the cast interactive when the main display locks; never dismiss the main keyguard.
@@ -791,7 +806,16 @@ final class RearVirtualCast {
                     .invoke(manager, config, callback, null, "com.android.shell");
             if (display <= 0 || RearDisplay.isRear(display)) throw new IOException("Virtual display creation failed: " + display);
             ensureControlledStartCurrent("after_virtual_display_create");
-            // Apply the saved orientation before moving the task or enabling hardware input.
+            if (!disposableWallpaperCast) {
+                try {
+                    keyboard = RearVirtualIme.enable(display, physicalRearId);
+                    CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=local");
+                } catch (Exception e) {
+                    CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=unavailable reason=" + root(e));
+                    // Lack of IME support does not change this ROM's ordinary touch behavior.
+                }
+            }
+            // Apply the resolved orientation before moving the task or enabling hardware input.
             ensureControlledStartCurrent("before_rotation");
             command("wm", "fixed-to-user-rotation", "-d", Integer.toString(display), "enabled");
             command("wm", "user-rotation", "-d", Integer.toString(display), "lock", Integer.toString(contentRotation));
@@ -845,6 +869,22 @@ final class RearVirtualCast {
             // This is an additional replacement identity signal, not a new precondition for
             // legacy casting. A controlled replacement fails closed if this read is unavailable.
             baseComponent = service.getTaskBaseComponent(task, display);
+            if (startInput && keyboard != null && coordinatorOwnerGeneration == 0L
+                    && component == null && task > 0 && baseComponent != null) {
+                try {
+                    boolean restored = RearImeStartupFocus.prepare(display, displayName, task,
+                            () -> current == this && !closed && !closeRequested && owner.isBinderAlive()
+                                    && surface != null && surface.isValid());
+                    CompatibilityDiagnostics.record("virtual_ime_focus_prepare",
+                            "display=" + display + " state=" + (restored ? "restored" : "skipped"));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw interrupted;
+                } catch (Exception unavailable) {
+                    CompatibilityDiagnostics.record("virtual_ime_focus_prepare", "display=" + display
+                            + " state=unavailable reason=" + root(unavailable).getClass().getSimpleName());
+                }
+            }
             if (startInput) {
                 ensureControlledStartCurrent("before_reader_start");
                 if (physicalReaderLifecycle != null && !recordReaderLifecycle("REQUESTED", "", 0L))
@@ -855,11 +895,11 @@ final class RearVirtualCast {
                             viewport, inputMenu(), contentRotation, this::reportAcceptedInteraction);
                 } else inputStatus = coordinatorOwnerGeneration > 0L
                         ? input.startControlled(reader, task, owner, display, inputFeedback(), viewport,
-                            inputMenu(), contentRotation, this::reportAcceptedInteraction,
+                            inputMenu(), contentRotation, inputInteraction(),
                             physicalReaderLifecycle == null ? null : (state, readerId, readerGeneration, readerTask, readerDisplay) ->
                                     recordReaderLifecycle(state, readerId, readerGeneration))
                         : input.start(reader, task, owner, display, inputFeedback(), viewport,
-                            inputMenu(), contentRotation, this::reportAcceptedInteraction);
+                            inputMenu(), contentRotation, inputInteraction());
                 JSONObject started = new JSONObject(inputStatus);
                 inputId = started.getString("id");
                 readerId = inputId;
@@ -1026,6 +1066,31 @@ final class RearVirtualCast {
                 } catch (Exception e) { failure = root(e).toString(); }
                 if (failure != null) closeIfHealthSnapshotCurrent(checked, failure);
             }, 500, 500, TimeUnit.MILLISECONDS);
+        }
+        private RearInputProxy.AcceptedInteraction inputInteraction() {
+            if (keyboard == null) return this::reportAcceptedInteraction;
+            return new RearInputProxy.AcceptedInteraction() {
+                @Override public void beforeForwardedDown() { prepareInputFocus(); }
+                @Override public void afterRouterFrameAccepted(long eventTimeUptime) { reportAcceptedInteraction(eventTimeUptime); }
+            };
+        }
+        private void prepareInputFocus() {
+            // Runs under the input session's lock. Do not take the cast session's lock; close()
+            // stops input before moving the task and freeing its display.
+            try {
+                if (keyboard.beforeDown(() -> current == this && !closed && owner.isBinderAlive()
+                        && outputAvailable && pendingViewport == null && surface != null && surface.isValid())
+                        && !focusRequestLogged) {
+                    focusRequestLogged = true;
+                    CompatibilityDiagnostics.record("virtual_ime_focus", "display=" + display + " state=requested");
+                }
+            } catch (Exception e) {
+                if (!focusErrorLogged) {
+                    focusErrorLogged = true;
+                    CompatibilityDiagnostics.record("virtual_ime_focus", "display=" + display + " state=unavailable reason=" + root(e));
+                }
+                // The observed failure is an IME-focus capability issue, not a failed touch.
+            }
         }
         private void reportAcceptedInteraction(long eventTimeUptime) {
             if (current != this || closed || !owner.isBinderAlive() || host < 0
@@ -1458,7 +1523,18 @@ final class RearVirtualCast {
             if (display > 0 && !RearDisplay.isRear(display)) {
                 displayCleanupComplete = false;
                 try {
-                    if (!disposableWallpaperCast) returnTasksToMain();
+                    if (nativeReturn == null && !virtualDisplayReleased && inputStopped && keyboard != null
+                            && current == this && coordinatorOwnerGeneration == 0L
+                            && !disposableWallpaperCast && "stopped".equals(phase)) {
+                        try {
+                            nativeReturn = VirtualCastNativeReturn.prepare(display, task);
+                        } catch (Exception unavailable) {
+                            CompatibilityDiagnostics.record("virtual_ime_system_return",
+                                    "display=" + display + " state=inventory_unavailable reason="
+                                            + root(unavailable).getClass().getSimpleName());
+                        }
+                    }
+                    if (!disposableWallpaperCast && !virtualDisplayReleased && nativeReturn == null) returnTasksToMain();
                     if (!virtualDisplayReleased) {
                         if (disposableWallpaperCast) restoreUnexpectedReusedTasks();
                         // A wallpaper cast owns a disposable display, not a user's earlier tasks.
@@ -1470,6 +1546,11 @@ final class RearVirtualCast {
                                 android.util.Log.w("RearVirtualCast", "Wallpaper release callback unavailable", lost);
                             }
                         }
+                    }
+                    if (nativeReturn != null) {
+                        int count = nativeReturn.awaitOnMain();
+                        CompatibilityDiagnostics.record("virtual_ime_system_return",
+                                "display=" + display + " state=restored tasks=" + count);
                     }
                     if (disposableWallpaperCast && task > 0 && !tasksBeforeWallpaperLaunch.containsKey(task)) {
                         long deadline = SystemClock.uptimeMillis() + 1200;
@@ -1520,6 +1601,7 @@ final class RearVirtualCast {
                     .put("package", packageName).put("baseComponent", baseComponent)
                     .put("intendedBaseComponent", expectedBaseComponent)
                     .put("density", density).put("requestedDensity", requestedDensity)
+                    .put("renderProfile", density == requestedDensity ? "layout_density" : "source_density")
                     .put("compatibility", densityCompatibility ? "source_density" : "none")
                     .put("sizePolicy", sizePolicy)
                     .put("freezeProtection", freezeGuard == null ? "unavailable" : freezeGuard.mode)

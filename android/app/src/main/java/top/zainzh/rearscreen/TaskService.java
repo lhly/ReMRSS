@@ -31,8 +31,8 @@ public class TaskService extends ITaskService.Stub {
     private static final String TAG = "TaskService";
     private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
             BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
-    static final int USER_SERVICE_CONTRACT_VERSION = 100;
-    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 104 : USER_SERVICE_CONTRACT_VERSION;
+    static final int USER_SERVICE_CONTRACT_VERSION = 104;
+    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 108 : USER_SERVICE_CONTRACT_VERSION;
     private final Object mainTaskFocusLock = new Object();
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {

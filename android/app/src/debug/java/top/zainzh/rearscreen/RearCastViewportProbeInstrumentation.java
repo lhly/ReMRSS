@@ -117,8 +117,12 @@ public final class RearCastViewportProbeInstrumentation extends Instrumentation 
             remote.stopRearVirtualCast(id); stopped(before); passed("normal_full_stop_restored", state());
             before = startCast(); id = before.getString("id");
             if (densityCompatibility) {
-                if (!"none".equals(before.getString("compatibility")) || before.getInt("density") != 240)
-                    throw new AssertionError("Next cast ignored disabled preference: " + before);
+                String component = fixturePackage + "/top.zainzh.rearscreen.FixtureInputActivity";
+                JSONObject plan = new JSONObject(remote.getRearCastRenderPlan(-1, component, 240, false, false));
+                if (!"none".equals(before.getString("compatibility")) || before.getInt("requestedDensity") != 240
+                        || before.getInt("density") != plan.getInt("renderDensity")
+                        || !plan.getString("renderProfile").equals(before.getString("renderProfile")))
+                    throw new AssertionError("Disabled layout compatibility changed the cast render plan: " + before);
                 passed("next_cast_uses_disabled_preference", before);
             }
             remote.beginRearCastViewport(id, true); // Deliberately omit the Surface commit.

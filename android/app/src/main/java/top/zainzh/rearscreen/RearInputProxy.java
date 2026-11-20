@@ -13,7 +13,10 @@ import java.util.function.BooleanSupplier;
 final class RearInputProxy {
     static final String READER_LIBRARY = "libremrss_input_proxy.so";
     interface Guard { boolean allowed(int task, int display) throws Exception; }
-    interface AcceptedInteraction { void afterRouterFrameAccepted(long eventTimeUptime); }
+    interface AcceptedInteraction {
+        void afterRouterFrameAccepted(long eventTimeUptime);
+        default void beforeForwardedDown() { }
+    }
     interface LifecycleReceipt { boolean record(String state, String id, long generation, int task, int display); }
     private static final java.util.concurrent.atomic.AtomicLong generationSequence = new java.util.concurrent.atomic.AtomicLong();
     private final Guard guard;
@@ -529,6 +532,8 @@ final class RearInputProxy {
                 public void event(int action, int[] ids, float[] xs, float[] ys, long down, long time) throws Exception {
                     RearInputInjector currentInjector = Session.this.injector;
                     if (currentInjector == null) throw new IOException("Input route is unavailable");
+                    AcceptedInteraction route = acceptedInteraction;
+                    if (action == android.view.MotionEvent.ACTION_DOWN && route != null) route.beforeForwardedDown();
                     currentInjector.touch(action, ids, xs, ys, down, time);
                     events++;
                 }

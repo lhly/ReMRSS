@@ -579,7 +579,14 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                     if (compatibility || requestedFull || layoutDpi != dpi)
                         plan = new JSONObject(connected.getRearCastRenderPlan(task, component, layoutDpi, compatibility,
                                 requestedFull));
-                    RearCastViewport render = RearCastGeometry.decode(plan.toString());
+                    boolean parkedWallpaper = wallpaperStandby != null;
+                    // Parked wallpaper uses its existing lightweight, non-IME render path
+                    // unless the user explicitly configured density compatibility for this App.
+                    RearCastViewport render = parkedWallpaper && !compatibility
+                            ? (requestedFull ? safe.full() : safe)
+                            : RearCastGeometry.decode(plan.toString());
+                    int autoRotation = parkedWallpaper ? 0 : plan.optInt("autoRotation", 0);
+                    int defaultRotation = presentation.rotation != null ? presentation.rotation : autoRotation;
                     android.util.Log.i("VirtualRearHost", "Received safe viewport=" + safe.key());
                     main.post(() -> {
                         if (ending || root != presentingRoot) return;
@@ -589,8 +596,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                         safeViewport = safe;
                         densityCompatibility = compatibility;
                         requestedLayoutDensity = layoutDpi;
-                        initialRotation = getIntent().hasExtra("candidateRotation")
-                                ? getIntent().getIntExtra("candidateRotation", presentation.rotation) : presentation.rotation;
+                        initialRotation = getIntent().getIntExtra("candidateRotation", defaultRotation);
                         initialFull = getIntent().hasExtra("fullViewport")
                                 ? getIntent().getBooleanExtra("fullViewport", presentation.full) : presentation.full;
                         if (viewport == null) viewport = render;
@@ -670,10 +676,13 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                         RearDensityPreferences.layoutDensity(VirtualRearHostActivity.this, pkg), explicitDpi);
                 RearPresentationPreferences.Selection presentation = RearPresentationPreferences.read(
                         VirtualRearHostActivity.this, pkg);
-                if (!intent.hasExtra("candidateRotation")) candidateRotation = presentation.rotation;
                 candidateFull = intent.hasExtra("fullViewport") ? requestedFull : presentation.full;
                 plan = new JSONObject(remote.getRearCastRenderPlan(candidateTask, candidateComponent,
                         candidateDensity, candidateCompatibility, candidateFull));
+                if (!intent.hasExtra("candidateRotation")) {
+                    candidateRotation = presentation.rotation != null
+                            ? presentation.rotation : plan.optInt("autoRotation", 0);
+                }
                 candidateViewport = RearCastGeometry.decode(plan.toString());
                 main.post(() -> {
                     if (ending || !previous.equals(session) || candidateOutput != null) return;

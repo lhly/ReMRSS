@@ -12,6 +12,20 @@ final class RearCastCompatibility {
             throw new IllegalArgumentException("Invalid casting/source density");
         return enabled ? source : requested;
     }
+    /** Native IME windows render at source density even when the App has no layout override. */
+    static int automaticRenderDensity(int requested, int source, RearCastViewport safe) {
+        int nativeDensity = density(false, requested, source);
+        if (source <= nativeDensity) return nativeDensity;
+        try {
+            // The session keeps this DPI when the user changes the area. Make sure both
+            // the safe and full viewports support it before allocating the first surface.
+            viewport(safe.full(), requested, source);
+            return source;
+        } catch (IllegalArgumentException tooLarge) {
+            return nativeDensity;
+        }
+    }
+
     static RearCastViewport viewport(RearCastViewport physical, int requested, int renderDensity) {
         if (requested < 72 || requested > 640 || renderDensity < 72 || renderDensity > 1280)
             throw new IllegalArgumentException("Invalid render density");

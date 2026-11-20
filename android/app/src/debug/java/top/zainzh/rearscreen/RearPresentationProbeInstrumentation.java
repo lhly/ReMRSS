@@ -32,11 +32,16 @@ public final class RearPresentationProbeInstrumentation extends Instrumentation 
     private String pkg() { return getTargetContext().getPackageName(); }
     private JSONObject state() throws Exception { return new JSONObject(remote.getRearVirtualCastStatus()); }
     private RearPresentationPreferences.Selection choice() { return RearPresentationPreferences.read(getTargetContext(), pkg()); }
-    private void selected(int r, boolean full) {
+    private void selected(Integer r, boolean full) {
         RearPresentationPreferences.Selection p = choice();
-        if (p.rotation != r || p.full != full) throw new AssertionError("Saved choice " + p.rotation + "/" + p.full);
+        if (!java.util.Objects.equals(p.rotation, r) || p.full != full) throw new AssertionError("Saved choice " + p.rotation + "/" + p.full);
     }
     private void passed(String name) { checks.put(name); Bundle b = new Bundle(); b.putString("check", name); sendStatus(1, b); }
+    private JSONObject renderPlan(boolean full, boolean layoutCompatibility) throws Exception {
+        return new JSONObject(remote.getRearCastRenderPlan(-1,
+                pkg() + "/top.zainzh.rearscreen.FixtureInputActivity", 240, layoutCompatibility, full));
+    }
+
     private JSONObject startCast(int rotation, boolean full, int density) throws Exception {
         shell("input -d 1 keyevent KEYCODE_WAKEUP");
         shell("am start --display 1 --windowingMode 1 -n " + pkg() + "/top.zainzh.rearscreen.VirtualRearHostActivity"
@@ -95,10 +100,16 @@ public final class RearPresentationProbeInstrumentation extends Instrumentation 
                 runOnMainSync(() -> TaskServiceManager.acquire(getTargetContext(), connection));
                 if (!connected.await(8, TimeUnit.SECONDS)) throw new AssertionError("Shizuku unavailable");
                 if ("setup".equals(mode)) {
-                    selected(0, false); RearDensityPreferences.setEnabled(getTargetContext(), pkg(), true);
-                    JSONObject s = startCast(0, false, 480); passed("first_cast_default_safe_rotation0");
-                    menu(700, 1, false); passed("right_rotation_saved");
-                    menu(550, 0, false); passed("explicit_rotation0_saved");
+                    selected(null, false);
+                    RearDensityPreferences.setEnabled(getTargetContext(), pkg(), true);
+                    JSONObject initial = renderPlan(false, true);
+                    int rotation = initial.getInt("autoRotation");
+                    JSONObject s = startCast(rotation, false, initial.getInt("renderDensity"));
+                    passed("first_cast_default_safe_auto_rotation");
+                    menu(700, (rotation + 1) % 4, false); passed("right_rotation_saved");
+                    menu(550, rotation, false);
+                    if (rotation != 0) menu(550, 0, false);
+                    passed("explicit_rotation0_saved");
                     menu(550, 3, false); menu(864, 3, true); passed("left_rotation_and_full_saved");
                     stop(s); selected(3, true); passed("normal_stop_keeps_choice");
                 } else if ("verify".equals(mode)) {
@@ -112,7 +123,7 @@ public final class RearPresentationProbeInstrumentation extends Instrumentation 
                         RearPresentationPreferences.saveRotation(getTargetContext(), pkg(), r);
                         RearPresentationPreferences.saveViewport(getTargetContext(), pkg(), full);
                         RearDensityPreferences.setEnabled(getTargetContext(), pkg(), full);
-                        JSONObject s = startCast(r, full, full ? 480 : 240); input(s); stop(s);
+                        JSONObject s = startCast(r, full, renderPlan(full, full).getInt("renderDensity")); input(s); stop(s);
                         passed("restored_rotation_" + r + "_full_" + full + "_input_and_stop");
                     }
                     selected(3, true); JSONObject s = startCast(3, true, 480);

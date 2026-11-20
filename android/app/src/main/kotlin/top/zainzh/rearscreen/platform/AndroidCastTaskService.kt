@@ -18,6 +18,7 @@ internal interface HostCastTaskSource {
     fun taskBaseComponent(taskId: Int, displayId: Int): String?
     fun taskIdByPackage(packageName: String): Int
     fun isTaskOnDisplay(taskId: Int, displayId: Int): Boolean
+    fun autoContentRotation(taskId: Int, full: Boolean): Int = 0
     fun isExplicitTargetCurrent(target: HostCastTarget): Boolean = false
 }
 
@@ -58,6 +59,12 @@ internal class AndroidCastTaskService(context: Context) : Closeable, HostCastTas
         runCatching { current()?.getTaskIdByPackage(packageName) ?: -1 }.getOrDefault(-1)
     override fun isTaskOnDisplay(taskId: Int, displayId: Int): Boolean =
         runCatching { current()?.isTaskOnDisplay(taskId, displayId) == true }.getOrDefault(false)
+
+    override fun autoContentRotation(taskId: Int, full: Boolean): Int = runCatching {
+        val plan = current()?.getRearCastRenderPlan(taskId, null,
+            200, false, full) ?: return 0
+        JSONObject(plan).optInt("autoRotation", 0)
+    }.getOrDefault(0)
 
     /** Preparation, admission and physical moves require the original exact main-focused picker. */
     override fun isExplicitTargetCurrent(target: HostCastTarget): Boolean =
@@ -275,13 +282,15 @@ internal class AndroidHostCastTargetResolver(
         val pkg = CastComponentIdentity.parse(selected.second)?.first ?: return null
         val presentation = if (request.mode == CastMode.VIRTUAL && (request.region == null || request.contentRotation == null))
             top.zainzh.rearscreen.RearPresentationPreferences.read(app, pkg) else null
+        val region = if (request.mode == CastMode.DIRECT_PHYSICAL) CastRegion.SAFE
+            else request.region ?: if (presentation?.full == true) CastRegion.FULL else CastRegion.SAFE
+        val rotation = if (request.mode == CastMode.DIRECT_PHYSICAL) 0
+            else request.contentRotation ?: presentation?.rotation
+                ?: service.autoContentRotation(selected.first, region == CastRegion.FULL)
         return HostCastTarget(UUID.randomUUID().toString(), selected.first, selected.second,
             request.selector.let { if (it is CastTargetSelector.Component) it.flattened else null },
             0, rear.first, rear.second, request.mode,
-            if (request.mode == CastMode.DIRECT_PHYSICAL) CastRegion.SAFE
-                else request.region ?: if (presentation?.full == true) CastRegion.FULL else CastRegion.SAFE,
-            if (request.mode == CastMode.DIRECT_PHYSICAL) 0 else request.contentRotation ?: presentation?.rotation ?: 0,
-            request.requestedDensityDpi, selectedTopComponent, confirmationTaskId, confirmationComponent)
+            region, rotation, request.requestedDensityDpi, selectedTopComponent, confirmationTaskId, confirmationComponent)
     }
 
     override fun isCurrent(target: HostCastTarget): Boolean {

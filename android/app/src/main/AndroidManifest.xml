@@ -209,6 +209,11 @@
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode|smallestScreenSize|density|fontScale"
             android:theme="@style/MiuixHostTheme" />
         
+        <activity android:name=".RearImeFocusActivity" android:exported="true"
+            android:permission="android.permission.DUMP" android:excludeFromRecents="true"
+            android:taskAffinity="${applicationId}.virtual.ime"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- V2.7: 背屏录屏服务（前台Service+悬浮窗） -->
         <service
             android:name=".ScreenRecordService"

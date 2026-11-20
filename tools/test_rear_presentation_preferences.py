@@ -18,20 +18,20 @@ STUBS = {
 ''',
     'top/zainzh/rearscreen/platform/RearCapabilityCore.java': '''package top.zainzh.rearscreen.platform; public final class RearCapabilityCore { public static boolean isActiveSceneTaskForeground(String s,int d){return false;} public static boolean hasActiveScenePackage(String s){return false;} public static boolean isActiveSceneTask(int t,int d){return false;} }''',
     'PresentationTest.java': '''package top.zainzh.rearscreen;import android.content.Context;public class PresentationTest {
- static void eq(Context c,String pkg,int rotation,boolean full){RearPresentationPreferences.Selection p=RearPresentationPreferences.read(c,pkg);
-  if(p.rotation!=rotation||p.full!=full)throw new AssertionError(pkg+" "+p.rotation+" "+p.full);}
+ static void eq(Context c,String pkg,Integer rotation,boolean full){RearPresentationPreferences.Selection p=RearPresentationPreferences.read(c,pkg);
+  if(!java.util.Objects.equals(p.rotation,rotation)||p.full!=full)throw new AssertionError(pkg+" "+p.rotation+" "+p.full);}
  public static void main(String[] args){Context c=new Context();String a="com.example.reader",b="com.example.video";
-  eq(c,a,0,false);eq(c,b,0,false);
+  eq(c,a,null,false);eq(c,b,null,false);
   RearPresentationPreferences.saveRotation(c,a,3);RearPresentationPreferences.saveViewport(c,a,true);
-  if(!BuildConfig.VIRTUAL_CAST_ENABLED){eq(c,a,0,false);
+  if(!BuildConfig.VIRTUAL_CAST_ENABLED){eq(c,a,null,false);
    if(RearPresentationPreferences.preferences(c).getInt("rotation:"+a,-1)!=-1||RearPresentationPreferences.preferences(c).getBoolean("full:"+a,false))throw new AssertionError("Disabled feature wrote preferences");
    System.out.println("PASS disabled feature ignores presentation and performs no writes");return;}
-  eq(new Context(),a,3,true);eq(c,b,0,false);RearPresentationPreferences.saveRotation(c,b,1);eq(c,b,1,false);eq(c,a,3,true);
+  eq(new Context(),a,3,true);eq(c,b,null,false);RearPresentationPreferences.saveRotation(c,b,1);eq(c,b,1,false);eq(c,a,3,true);
   RearPresentationPreferences.saveViewport(c,a,false);eq(c,a,3,false);RearPresentationPreferences.saveRotation(c,a,0);eq(new Context(),a,0,false);
   for(int r=0;r<4;r++)for(boolean full:new boolean[]{false,true}){RearPresentationPreferences.saveRotation(c,a,r);RearPresentationPreferences.saveViewport(c,a,full);eq(new Context(),a,r,full);}
   boolean rejected=false;try{RearPresentationPreferences.saveRotation(c,a,4);}catch(IllegalArgumentException expected){rejected=true;}if(!rejected)throw new AssertionError("Invalid rotation accepted");
   rejected=false;try{RearPresentationPreferences.saveViewport(c,"bad/../key",true);}catch(IllegalArgumentException expected){rejected=true;}if(!rejected)throw new AssertionError("Invalid package accepted");
-  RearPresentationPreferences.preferences(c).edit().putInt("rotation:"+a,9).apply();eq(c,a,0,true);
+  RearPresentationPreferences.preferences(c).edit().putInt("rotation:"+a,9).apply();eq(c,a,null,true);
   System.out.println("PASS presentation defaults, four rotations/full-safe, independent fields/apps, explicit defaults, cold reads and validation");
  }}'''
 }

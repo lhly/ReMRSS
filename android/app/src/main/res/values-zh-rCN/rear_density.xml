@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="rear_density_help">允许应用按投放窗口重新排版，并改善局部缩放。下次虚拟投放生效；新安装的应用默认关闭。</string>
+    <string name="rear_density_help">为应用放宽窗口尺寸限制，并可单独设置布局 DPI。默认关闭，下次投放生效。使用背屏键盘不用开启。</string>
     <string name="rear_density_bulk_summary">共 %1$d 个应用</string>
     <string name="rear_density_bulk_running">正在更新 %1$d 个应用…</string>
     <string name="rear_density_bulk_enable">全部开启</string>

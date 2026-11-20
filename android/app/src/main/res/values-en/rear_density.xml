@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="rear_density_help">Allows apps to adapt to the casting window and helps with scaling issues. Applies to the next virtual cast; newly installed apps remain off by default.</string>
+    <string name="rear_density_help">Relaxes window size limits and lets you set a layout DPI for each app. Off by default. Changes apply to the next cast. Not required for the rear keyboard.</string>
     <string name="rear_density_bulk_summary">%1$d apps total</string>
     <string name="rear_density_bulk_running">Updating %1$d apps…</string>
     <string name="rear_density_bulk_enable">Enable all</string>
