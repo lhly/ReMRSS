@@ -13,9 +13,13 @@
     <string name="ui_notification_never_close" formatted="false">不自動關閉</string>
     <string name="ui_notification_never_close_help" formatted="false">通知仍有效時持續顯示。保持螢幕開啟會增加耗電；通知撤回或關閉此功能時仍會結束。</string>
     <string name="ui_notification_click_action" formatted="false">點擊通知</string>
-    <string name="ui_notification_click_action_help" formatted="false">在背螢幕開啟詳細資訊前，請先解鎖手機。投放期間，點按通知膠囊只會關閉提醒。</string>
+    <string name="ui_notification_click_action_help" formatted="false">主螢幕鎖定且熄滅或處於常亮顯示時，優先開啟通知詳細資訊；不支援時嘗試開啟來源應用程式。投放期間，點按通知膠囊只會關閉提醒。</string>
     <string name="ui_notification_click_open" formatted="false">在主螢幕開啟應用程式</string>
-    <string name="ui_notification_click_open_rear">在背螢幕開啟詳細資訊</string>
+    <string name="ui_notification_click_open_rear">在背螢幕開啟</string>
+    <string name="ui_notification_locked_home">鎖定時開啟應用程式</string>
+    <string name="ui_notification_locked_home_summary">選擇哪些應用程式可在不解鎖手機時從背螢幕開啟。</string>
+    <string name="ui_notification_locked_home_warning">點按通知只會開啟應用程式，不會跳到通知詳細資訊。手機鎖定時，拿到手機的人也可能看到聊天清單等內容。</string>
+    <string name="ui_notification_locked_home_empty">請先在「通知應用程式」選擇支援獨立啟動的應用程式。</string>
     <string name="ui_notification_click_dismiss" formatted="false">僅關閉背螢提醒</string>
     <string name="ui_minutes_value" formatted="false">{0} 分鐘</string>
     <string name="ui_unit_seconds" formatted="false">秒</string>

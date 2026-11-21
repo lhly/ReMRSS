@@ -1,5 +1,4 @@
 <resources>
-    <string name="rear_notification_open_unlock">请先解锁手机，再打开通知详情</string>
     <string name="rear_notification_open_busy">背屏正在使用，请先退出当前页面</string>
     <string name="rear_notification_open_unavailable">这条通知无法在背屏打开</string>
 </resources>

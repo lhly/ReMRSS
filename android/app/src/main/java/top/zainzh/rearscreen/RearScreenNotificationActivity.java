@@ -887,8 +887,9 @@ public class RearScreenNotificationActivity extends Activity {
         if (!BuildConfig.VIRTUAL_CAST_ENABLED || settings.getBoolean("notification_dismiss_only", false)
                 || !settings.getBoolean(RearNotificationCastRequest.PREF, false)) return false;
         if (!isRearPresentationReadyOnMain() || pendingRearOpenSession == acceptedAnimationId) return true;
-        if (!RearNotificationCastRequest.unlocked(this)) {
-            showRearOpenMessage(R.string.rear_notification_open_unlock);
+        boolean locked = RearNotificationCastRequest.lockedWithPrimaryInactive(this);
+        if (!locked && !RearNotificationCastRequest.unlocked(this)) {
+            showRearOpenMessage(R.string.rear_notification_open_unavailable);
             return true;
         }
         // Never replace a Scene or another physical owner that is temporarily under this notice.
@@ -907,9 +908,9 @@ public class RearScreenNotificationActivity extends Activity {
             showRearOpenMessage(R.string.rear_notification_open_unavailable);
             scheduleAutomaticFinish();
         };
-        lifecycleHandler.postDelayed(rejected, 9_000L);
+        lifecycleHandler.postDelayed(rejected, locked ? 14_000L : 9_000L);
         NotificationService.prepareRearNotificationCast(sessionId, currentDisplayId(), getTaskId(),
-                android.os.SystemClock.uptimeMillis(), rejected);
+                android.os.SystemClock.uptimeMillis(), locked, rejected);
         return true;
     }
 

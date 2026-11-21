@@ -302,7 +302,7 @@ public class NotificationService extends NotificationListenerService {
      * Read the real notification again rather than accepting a PendingIntent from an exported
      * presentation Activity. Match the exact displayed instance and the notification's own UID.
      */
-    static PendingIntent originalActivityAction(long sessionId) {
+    static StatusBarNotification currentRearOpenNotification(long sessionId) {
         NotificationService service = instance;
         if (service == null || !service.isOrdinaryTapCurrent(sessionId)) return null;
         String key = service.activeOrdinaryNotificationKey;
@@ -313,17 +313,21 @@ public class NotificationService extends NotificationListenerService {
             StatusBarNotification[] notifications = service.getActiveNotifications(new String[]{key});
             if (notifications == null || !service.isOrdinaryTapCurrent(sessionId)) return null;
             for (StatusBarNotification item : notifications) {
-                if (!key.equals(item.getKey()) || postTime != item.getPostTime()
-                        || !packageName.equals(item.getPackageName())
-                        || !android.os.Process.myUserHandle().equals(item.getUser())) continue;
-                PendingIntent action = item.getNotification().contentIntent;
-                if (action != null && action.isActivity() && action.getCreatorUid() == item.getUid()
-                        && packageName.equals(action.getCreatorPackage())) return action;
+                if (key.equals(item.getKey()) && postTime == item.getPostTime()
+                        && packageName.equals(item.getPackageName())
+                        && android.os.Process.myUserHandle().equals(item.getUser())) return item;
             }
         } catch (RuntimeException unavailable) {
             Log.i(TAG, "rear_notification_action_unavailable");
         }
         return null;
+    }
+
+    static PendingIntent originalActivityAction(StatusBarNotification item) {
+        if (item == null) return null;
+        PendingIntent action = item.getNotification().contentIntent;
+        return action != null && action.isActivity() && action.getCreatorUid() == item.getUid()
+                && item.getPackageName().equals(action.getCreatorPackage()) ? action : null;
     }
 
     private boolean isOrdinaryTapCurrent(long sessionId) {
@@ -332,24 +336,26 @@ public class NotificationService extends NotificationListenerService {
     }
 
     static void prepareRearNotificationCast(long sessionId, int rearDisplay, int notificationTask,
-            long clickedAt, Runnable rejected) {
+            long clickedAt, boolean locked, Runnable rejected) {
         NotificationService service = instance;
         if (service == null) { rejected.run(); return; }
         try {
             service.animationWorker.execute(() -> {
                 boolean dispatched = false;
                 try {
-                    PendingIntent action = originalActivityAction(sessionId);
+                    StatusBarNotification notice = currentRearOpenNotification(sessionId);
+                    PendingIntent action = originalActivityAction(notice);
                     ITaskService remote = service.taskService;
-                    if (action == null || remote == null) return;
+                    if (notice == null || (!locked && action == null) || remote == null) return;
                     if (VirtualRearHostActivity.instance != null || RearScreenKeeperService.physicalCastTask() != null
                             || !RearAnimationManager.isAnimationActivityTask(sessionId, notificationTask)
                             || rearDisplay != RearDisplay.requireId()
                             || !(BuildConfig.APPLICATION_ID + ":" + notificationTask)
                                     .equals(remote.getForegroundAppOnDisplay(rearDisplay))) return;
-                    RearNotificationCastRequest request = new RearNotificationCastRequest(sessionId, rearDisplay, clickedAt, action);
+                    RearNotificationCastRequest request = new RearNotificationCastRequest(service, sessionId, rearDisplay,
+                            clickedAt, locked, notice, action);
                     if (!request.usable(service)) return;
-                    dispatched = request.dispatch(remote, service.getPackageName());
+                    dispatched = request.dispatch(service, remote, notificationTask);
                 } catch (Exception unavailable) {
                     Log.i(TAG, "rear_notification_host_dispatch_failed type=" + unavailable.getClass().getSimpleName());
                 } finally {

@@ -4,7 +4,6 @@ import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.os.*;
-import android.hardware.display.DisplayManager;
 import android.view.Surface;
 import org.json.JSONObject;
 import java.lang.reflect.*;
@@ -20,15 +19,11 @@ final class RearVirtualCast {
     static final int RECOVERY_PRESENT_HOST = 2;
     // Framework flags hidden from the public SDK. Preserve these values for the shell-owned display.
     private static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
-    private static final int VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 << 8;
-    private static final int VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 10;
-    private static final int VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP = 1 << 11;
     private static final int VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED = 1 << 12;
     private static final int VIRTUAL_DISPLAY_FLAG_OWN_FOCUS = 1 << 14;
-    private static final int CAST_DISPLAY_FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
-            | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY | VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH
-            | VIRTUAL_DISPLAY_FLAG_TRUSTED | VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP
-            | VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED | VIRTUAL_DISPLAY_FLAG_OWN_FOCUS;
+    private static final int CAST_DISPLAY_FLAGS = RearTrustedVirtualDisplay.TRUSTED_NON_MIRRORING
+            | VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH | VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED
+            | VIRTUAL_DISPLAY_FLAG_OWN_FOCUS;
     private final TaskService service;
     private final RearInputProxy input;
     private final AtomicLong generationSequence = new AtomicLong();
@@ -378,21 +373,26 @@ final class RearVirtualCast {
 
     String startNotification(Surface surface, String reader, int host, int density, String packageName,
             IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility, int rotation,
-            boolean full, IRearNotificationTarget target) throws Exception {
+            boolean full, IRearNotificationTarget target, boolean locked, boolean homeOnly) throws Exception {
         if (target == null || !target.asBinder().isBinderAlive()
                 || BuildConfig.APPLICATION_ID.equals(VirtualCastRequest.packageName(packageName)))
             throw new SecurityException("Invalid rear notification target");
         return start(surface, reader, -1, host, density, null, owner, gestures, viewport, compatibility,
-                rotation, full, null, new NotificationTarget(packageName, target));
+                rotation, full, null, new NotificationTarget(packageName, target, locked, homeOnly));
     }
 
     private static final class NotificationTarget {
         final String packageName;
         final IRearNotificationTarget action;
 
-        NotificationTarget(String packageName, IRearNotificationTarget action) {
+        final boolean locked;
+        final boolean homeOnly;
+
+        NotificationTarget(String packageName, IRearNotificationTarget action, boolean locked, boolean homeOnly) {
             this.packageName = packageName;
             this.action = action;
+            this.locked = locked;
+            this.homeOnly = homeOnly;
         }
     }
 
@@ -460,6 +460,17 @@ final class RearVirtualCast {
         current = s;
         try { s.begin(true); return s.status(); }
         catch (Exception e) { CompatibilityDiagnostics.record("virtual_start_failed", root(e).toString()); s.close("start_failed: " + root(e)); throw e; }
+    }
+
+    static int visibleLockedNotificationTask(RearDisplayCastOccupancy.Snapshot state,
+            int targetDisplay, String packageName) {
+        if (state.displayId != targetDisplay || state.failure != null || state.tasks.size() != 1
+                || state.displayState != android.view.Display.STATE_ON) return -1;
+        RearDisplayCastOccupancy.Task candidate = state.tasks.get(0);
+        if (candidate.userId != 0 || !packageName.equals(candidate.basePackage)
+                || !packageName.equals(candidate.topPackage) || !Boolean.TRUE.equals(candidate.visible)
+                || !Boolean.TRUE.equals(candidate.requested) || !Boolean.FALSE.equals(candidate.sleeping)) return -1;
+        return candidate.taskId;
     }
 
     private static Map<Integer, Integer> runningTaskDisplays() throws Exception {
@@ -702,7 +713,7 @@ final class RearVirtualCast {
         final NotificationTarget notificationTarget;
         ISceneTaskActionGate wallpaperLaunchGate;
         // A separate-task launch must not dispose a pre-existing user task, even if an OEM reuses it.
-        Map<Integer, Integer> tasksBeforeWallpaperLaunch = Collections.emptyMap();
+        Map<Integer, Integer> tasksBeforeDisposableLaunch = Collections.emptyMap();
         final String physicalIdentity = RearDisplay.identity();
         final int physicalRearId = RearDisplay.requireId();
         volatile Surface surface;
@@ -758,8 +769,8 @@ final class RearVirtualCast {
         boolean launcherEntry;
         int display = -1;
         volatile int contentRotation;
-        Object manager, callback;
-        Class<?> iface, callbackType;
+        RearTrustedVirtualDisplay outputDisplay;
+        String notificationRoute = "";
         Session(Surface surface, String reader, int task, int host, int density, String component, IBinder owner,
                 IRearGestureListener gestures, RearCastViewport safe, int renderDensity, boolean compatibility,
                 int rotation, boolean full, String coordinatorOperationId, long coordinatorOwnerGeneration,
@@ -818,50 +829,9 @@ final class RearVirtualCast {
                 wallpaperTouch.awaitNeutral(); // No temporary display, app, or grab while a contact is down.
                 wallpaperTouch.requireCurrent();
             }
-            int width = viewport.bufferWidth, height = viewport.bufferHeight;
-            iface = Class.forName("android.hardware.display.IDisplayManager");
-            callbackType = Class.forName("android.hardware.display.IVirtualDisplayCallback");
-            Object binder = Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "display");
-            manager = Class.forName("android.hardware.display.IDisplayManager$Stub").getMethod("asInterface", IBinder.class).invoke(null, binder);
-            Binder token = new Binder() {
-                @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
-                    if (code == INTERFACE_TRANSACTION) { if (reply != null) reply.writeString("android.hardware.display.IVirtualDisplayCallback"); return true; }
-                    if (code >= 1 && code <= 3) { data.enforceInterface("android.hardware.display.IVirtualDisplayCallback"); return true; }
-                    return super.onTransact(code, data, reply, flags);
-                }
-            };
-            callback = Proxy.newProxyInstance(callbackType.getClassLoader(), new Class<?>[]{callbackType}, (p, m, a) -> {
-                if (m.getName().equals("asBinder")) return token;
-                if (m.getName().equals("hashCode")) return System.identityHashCode(p);
-                if (m.getName().equals("equals")) return p == a[0];
-                if (m.getName().equals("toString")) return "ReMRSS display callback";
-                return null;
-            });
-            Class<?> builderType = Class.forName("android.hardware.display.VirtualDisplayConfig$Builder");
             String displayName = RearVirtualIme.DISPLAY_NAME_PREFIX + id;
-            Object builder = builderType.getConstructor(String.class, int.class, int.class, int.class)
-                    .newInstance(displayName, width, height, density);
-            // PUBLIC | OWN_CONTENT_ONLY | SUPPORTS_TOUCH | TRUSTED | OWN_DISPLAY_GROUP | ALWAYS_UNLOCKED | OWN_FOCUS.
-            // A separate display group is required for ALWAYS_UNLOCKED to survive system validation.
-            // Keep the cast interactive when the main display locks; never dismiss the main keyguard.
-            int displayFlags = CAST_DISPLAY_FLAGS | (disposableWallpaperCast
-                    ? VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL : 0);
-            // A notification can open private content; unlike wallpaper shortcuts, this cast
-            // participates in Android's lock screen instead of requesting an always-unlocked display.
-            if (notificationTarget != null) displayFlags &= ~VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED;
-            builderType.getMethod("setFlags", int.class).invoke(builder, displayFlags);
-            builderType.getMethod("setSurface", Surface.class).invoke(builder, surface);
-            RearCastResizePolicy.Result resizePolicy = RearCastResizePolicy.build(builder, densityCompatibility);
-            Object config = resizePolicy.config;
-            sizePolicy = resizePolicy.mode;
-            android.util.Log.i("RearVirtualCast", "size_policy=" + sizePolicy + " requested=" + densityCompatibility);
-            ensureControlledStartCurrent("before_virtual_display_create");
-            display = (Integer) iface.getMethod("createVirtualDisplay", config.getClass(), callbackType,
-                    Class.forName("android.media.projection.IMediaProjection"), String.class)
-                    .invoke(manager, config, callback, null, "com.android.shell");
-            if (display <= 0 || RearDisplay.isRear(display)) throw new IOException("Virtual display creation failed: " + display);
-            ensureControlledStartCurrent("after_virtual_display_create");
-            if (!disposableWallpaperCast) {
+            createOutputDisplay(displayName);
+            if (!disposableWallpaperCast && !lockedNotification()) {
                 try {
                     keyboard = RearVirtualIme.enable(display, physicalRearId);
                     CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=local");
@@ -872,14 +842,12 @@ final class RearVirtualCast {
             }
             // Apply the resolved orientation before moving the task or enabling hardware input.
             ensureControlledStartCurrent("before_rotation");
-            command("wm", "fixed-to-user-rotation", "-d", Integer.toString(display), "enabled");
-            command("wm", "user-rotation", "-d", Integer.toString(display), "lock", Integer.toString(contentRotation));
-            awaitRotation(contentRotation);
+            applyDisplayRotation();
             ensureControlledStartCurrent("after_rotation");
             // Acquire before the target enters the virtual display. The independent process
             // restores its mirror entry even if this Shizuku service is killed abruptly.
             ensureControlledStartCurrent("before_freeze_guard");
-            if (freezeGuard == null) freezeGuard = RearAppFreezeGuard.start(packageName);
+            if (freezeGuard == null && !lockedNotification()) freezeGuard = RearAppFreezeGuard.start(packageName);
             ensureControlledStartCurrent("after_freeze_guard");
             if (coordinatorOwnerGeneration > 0L) {
                 String sourceBase = service.getTaskBaseComponent(task, 0);
@@ -896,7 +864,9 @@ final class RearVirtualCast {
                     expectedBaseComponent, task, service.getTaskBaseComponent(task, display),
                     service.isTaskOnDisplay(task, display))))
                 throw new IllegalStateException("controlled_target_changed_after_move");
-            if (component != null || notificationTarget != null) {
+            if (lockedNotification()) {
+                launchLockedNotificationTarget(displayName);
+            } else if (component != null || notificationTarget != null) {
                 ensureControlledStartCurrent("before_target_launch");
                 if (notificationTarget != null) {
                     if (!physicalIdentity.equals(RearDisplay.identity())
@@ -913,7 +883,7 @@ final class RearVirtualCast {
                     if (foreground != null && foreground.startsWith(packageName + ":")) {
                         task = Integer.parseInt(foreground.substring(foreground.lastIndexOf(':') + 1));
                         found = service.isTaskOnDisplay(task, display);
-                        if (found && disposableWallpaperCast && tasksBeforeWallpaperLaunch.containsKey(task))
+                        if (found && disposableWallpaperCast && tasksBeforeDisposableLaunch.containsKey(task))
                             throw new IOException("parked_wallpaper_not_a_new_task");
                         if (found) break;
                     }
@@ -996,6 +966,121 @@ final class RearVirtualCast {
                 throw new IllegalStateException("parked_wallpaper_app_request_changed");
         }
 
+        private boolean lockedNotification() {
+            return notificationTarget != null && notificationTarget.locked;
+        }
+
+        private void createOutputDisplay(String displayName) throws Exception {
+            int flags = CAST_DISPLAY_FLAGS;
+            if (disposableWallpaperCast || lockedNotification())
+                flags |= RearTrustedVirtualDisplay.DESTROY_CONTENT_ON_REMOVAL;
+            // A notification action must keep Android's lock-screen policy. The separate,
+            // opted-in home route starts only a plain Launcher entry, like a wallpaper shortcut.
+            if (notificationTarget != null && !notificationTarget.homeOnly)
+                flags &= ~VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED;
+            Object builder = RearTrustedVirtualDisplay.builder(displayName, viewport.bufferWidth,
+                    viewport.bufferHeight, density, flags, surface);
+            RearCastResizePolicy.Result resizePolicy = RearCastResizePolicy.build(builder, densityCompatibility);
+            sizePolicy = resizePolicy.mode;
+            android.util.Log.i("RearVirtualCast", "size_policy=" + sizePolicy + " requested=" + densityCompatibility);
+            ensureControlledStartCurrent("before_virtual_display_create");
+            outputDisplay = new RearTrustedVirtualDisplay();
+            display = outputDisplay.create(resizePolicy.config);
+            if (RearDisplay.isRear(display)) throw new IOException("Invalid virtual display: " + display);
+            ensureControlledStartCurrent("after_virtual_display_create");
+        }
+
+        private void applyDisplayRotation() throws Exception {
+            command("wm", "fixed-to-user-rotation", "-d", Integer.toString(display), "enabled");
+            command("wm", "user-rotation", "-d", Integer.toString(display), "lock", Integer.toString(contentRotation));
+            awaitRotation(contentRotation);
+        }
+
+        private void requireLockedNotificationRear() throws Exception {
+            ensureControlledStartCurrent("locked_notification_target");
+            if (physicalRearId != RearDisplay.requireId() || !physicalIdentity.equals(RearDisplay.identity()))
+                throw new IOException("rear_notification_physical_display_changed");
+        }
+
+        private boolean isNotificationHostForeground() throws Exception {
+            return (BuildConfig.APPLICATION_ID + ":" + host).equals(service.getForegroundAppOnDisplay(physicalRearId));
+        }
+
+        private void requireCurrentLockedNotification() throws Exception {
+            requireLockedNotificationRear();
+            if (!isNotificationHostForeground() || !notificationTarget.action.isCurrent())
+                throw new IOException("rear_notification_no_longer_current");
+        }
+
+        private boolean snapshotBeforeNotificationLaunch() throws Exception {
+            Map<Integer, Integer> placement = new HashMap<>();
+            boolean sourceHasTask = false;
+            for (SceneTaskIdentity.Record row : RearSystemBridge.runningTaskSnapshot()) {
+                placement.put(row.taskId, row.displayId);
+                if (belongsToNotificationSource(row.baseComponent) || belongsToNotificationSource(row.topComponent))
+                    sourceHasTask = true;
+            }
+            tasksBeforeDisposableLaunch = placement;
+            return sourceHasTask;
+        }
+
+        private boolean belongsToNotificationSource(String component) {
+            return component != null && component.startsWith(packageName + "/");
+        }
+
+        private void launchLockedNotificationTarget(String displayName) throws Exception {
+            boolean sourceHasTask = snapshotBeforeNotificationLaunch();
+            requireCurrentLockedNotification();
+            // The immutable notification can target the existing primary task. The explicit
+            // launcher, in contrast, is restricted to entries that can start an independent task.
+            if (!notificationTarget.homeOnly && !sourceHasTask && notificationTarget.action.launch(display)) {
+                if (awaitLockedNotificationTarget()) {
+                    notificationRoute = "original_action";
+                    return;
+                }
+                requireCurrentLockedNotification();
+                // Do not reuse a display that may still have a hidden or late-arriving detail.
+                restoreUnexpectedReusedTasks();
+                outputDisplay.close();
+                display = -1;
+                createOutputDisplay(displayName + "-source");
+                applyDisplayRotation();
+                snapshotBeforeNotificationLaunch();
+            } else if (!notificationTarget.homeOnly && sourceHasTask) {
+                android.util.Log.i("RearVirtualCast", "rear_notification_detail_skipped_existing_task");
+            }
+            requireCurrentLockedNotification();
+            if (!notificationTarget.action.launchSource(display))
+                throw new IOException("rear_notification_source_launch_rejected");
+            if (!awaitLockedNotificationTarget())
+                throw new IOException("rear_notification_source_unavailable");
+            notificationRoute = notificationTarget.homeOnly ? "approved_source_home" : "source_launcher";
+        }
+
+        private boolean awaitLockedNotificationTarget() throws Exception {
+            long deadline = SystemClock.uptimeMillis() + 2200L;
+            do {
+                requireLockedNotificationRear();
+                // A target may consume its own notification immediately. Verification must
+                // not require that notification to survive, and never grants another launch.
+                if (!notificationTarget.action.mayVerifyLaunch(display))
+                    throw new IOException("rear_notification_launch_owner_lost");
+                RearDisplayCastOccupancy.Snapshot state = RearDisplayCastOccupancyReader.readTypedOnly(display);
+                if (state.failure != null) throw new IOException("rear_notification_task_inventory_unavailable");
+                int visibleTask = visibleLockedNotificationTask(state, display, packageName);
+                if (visibleTask > 0) {
+                    if (tasksBeforeDisposableLaunch.containsKey(visibleTask))
+                        throw new IOException("rear_notification_target_reused_task");
+                    if (isNotificationHostForeground() && notificationTarget.action.mayVerifyLaunch(display)) {
+                        task = visibleTask;
+                        return true;
+                    }
+                }
+                Thread.sleep(80L);
+            } while (SystemClock.uptimeMillis() < deadline);
+            return false;
+        }
+
         private void launchWallpaperTarget() throws Exception {
             android.content.Context context = RearSystemBridge.systemContext();
             ComponentName target = ComponentName.unflattenFromString(component);
@@ -1003,7 +1088,7 @@ final class RearVirtualCast {
                     || !physicalIdentity.equals(RearDisplay.identity())
                     || !(BuildConfig.APPLICATION_ID + ":" + host).equals(service.getForegroundAppOnDisplay(physicalRearId)))
                 throw new IllegalStateException("parked_wallpaper_launch_no_longer_eligible");
-            tasksBeforeWallpaperLaunch = runningTaskDisplays();
+            tasksBeforeDisposableLaunch = runningTaskDisplays();
             // KeyguardManager needs an attached app process for WindowManager's shared memory.
             // Recheck the actual lock state and accepted gesture in the prepared app before launch.
             requireWallpaperLaunchCurrent();
@@ -1096,8 +1181,13 @@ final class RearVirtualCast {
                 }
             };
         }
+        private void renewFreezeProtection() throws Exception {
+            // Locked notification casts do not acquire a freeze guard.
+            if (freezeGuard != null) freezeGuard.renew();
+        }
+
         private void activate() throws Exception {
-            freezeGuard.renew();
+            renewFreezeProtection();
             touchLease();
             phase = "running";
             timer.scheduleAtFixedRate(() -> {
@@ -1121,7 +1211,7 @@ final class RearVirtualCast {
                                 || !service.isTaskOnDisplay(host, RearDisplay.requireId())
                                 || !service.isTaskOnDisplay(task, display) || !input.renew(inputId))
                             failure = "host_task_or_input_left";
-                        else if (freezeGuard != null) freezeGuard.renew();
+                        else renewFreezeProtection();
                     }
                 } catch (Exception e) { failure = root(e).toString(); }
                 if (failure != null) closeIfHealthSnapshotCurrent(checked, failure);
@@ -1290,9 +1380,8 @@ final class RearVirtualCast {
                 // Resize the same display/task; fix its current rotation before applying the new native dimensions.
                 command("wm", "fixed-to-user-rotation", "-d", Integer.toString(display), "enabled");
                 command("wm", "user-rotation", "-d", Integer.toString(display), "lock", Integer.toString(contentRotation));
-                iface.getMethod("resizeVirtualDisplay", callbackType, int.class, int.class, int.class)
-                        .invoke(manager, callback, pendingViewport.bufferWidth, pendingViewport.bufferHeight, density);
-                iface.getMethod("setVirtualDisplaySurface", callbackType, Surface.class).invoke(manager, callback, next);
+                outputDisplay.resize(pendingViewport.bufferWidth, pendingViewport.bufferHeight, density);
+                outputDisplay.setSurface(next);
                 Surface previous = surface; surface = next; adopted = true; previous.release();
                 viewport = pendingViewport;
                 awaitRotation(contentRotation);
@@ -1321,7 +1410,7 @@ final class RearVirtualCast {
             if (decision == VirtualCastOutputRecoveryPolicy.SurfaceUpdate.LOST_TEMPORARILY) {
                 if (outputAvailable || surface != null) {
                     if (outputAvailable)
-                        iface.getMethod("setVirtualDisplaySurface", callbackType, Surface.class).invoke(manager, callback, (Surface) null);
+                        outputDisplay.setSurface(null);
                     Surface previous = surface;
                     surface = null;
                     outputAvailable = false;
@@ -1338,7 +1427,7 @@ final class RearVirtualCast {
             }
             boolean adopted = false;
             try {
-                iface.getMethod("setVirtualDisplaySurface", callbackType, Surface.class).invoke(manager, callback, next);
+                outputDisplay.setSurface(next);
                 Surface previous = surface;
                 surface = next; adopted = true;
                 outputAvailable = true; healthGeneration.advance();
@@ -1374,8 +1463,7 @@ final class RearVirtualCast {
                 if (!outputAvailable) return "already_paused";
                 outputAvailable = false; healthGeneration.advance();
                 if (!sessionStillOwnsSleepingOutput(rearId)) return "cancelled";
-                iface.getMethod("setVirtualDisplaySurface", callbackType, Surface.class)
-                        .invoke(manager, callback, (Surface) null);
+                outputDisplay.setSurface(null);
                 android.util.Log.i("RearVirtualCast", "power_output_paused id=" + id + " surface_retained=" + (surface != null));
                 return "paused";
             }
@@ -1395,8 +1483,7 @@ final class RearVirtualCast {
                 if (replacement != null && replacement != surface) replacement.release();
                 return "cancelled";
             }
-            iface.getMethod("setVirtualDisplaySurface", callbackType, Surface.class)
-                    .invoke(manager, callback, candidate);
+            outputDisplay.setSurface(candidate);
             Surface previous = surface;
             surface = candidate;
             if (previous != null && previous != candidate) previous.release();
@@ -1408,8 +1495,7 @@ final class RearVirtualCast {
                             if (!input.outputAvailable(inputId, false))
                                 throw new IOException("Input session unavailable during cancelled restore");
                         },
-                        () -> iface.getMethod("setVirtualDisplaySurface", callbackType, Surface.class)
-                                .invoke(manager, callback, (Surface) null));
+                        () -> outputDisplay.setSurface(null));
                 outputAvailable = false; healthGeneration.advance();
                 if (!cleanupOk) {
                     close("cancelled_restore_cleanup_failed");
@@ -1549,10 +1635,10 @@ final class RearVirtualCast {
         private void restoreUnexpectedReusedTasks() throws Exception {
             for (Map.Entry<Integer, Integer> entry : runningTaskDisplays().entrySet()) {
                 if (entry.getValue() != display) continue;
-                Integer original = tasksBeforeWallpaperLaunch.get(entry.getKey());
+                Integer original = tasksBeforeDisposableLaunch.get(entry.getKey());
                 if (original != null && (!service.moveTaskToDisplay(entry.getKey(), original)
                         || !service.isTaskOnDisplay(entry.getKey(), original)))
-                    throw new IOException("parked_wallpaper_preexisting_task_not_restored");
+                    throw new IOException("disposable_display_preexisting_task_not_restored");
             }
         }
         void close(String reason) { close(reason, true); }
@@ -1594,11 +1680,12 @@ final class RearVirtualCast {
                                             + root(unavailable).getClass().getSimpleName());
                         }
                     }
-                    if (!disposableWallpaperCast && !virtualDisplayReleased && nativeReturn == null) returnTasksToMain();
+                    if (!disposableWallpaperCast && !lockedNotification() && !virtualDisplayReleased
+                            && nativeReturn == null) returnTasksToMain();
                     if (!virtualDisplayReleased) {
-                        if (disposableWallpaperCast) restoreUnexpectedReusedTasks();
-                        // A wallpaper cast owns a disposable display, not a user's earlier tasks.
-                        iface.getMethod("releaseVirtualDisplay", callbackType).invoke(manager, callback);
+                        if (disposableWallpaperCast || lockedNotification()) restoreUnexpectedReusedTasks();
+                        // A disposable display may destroy only the tasks created for it.
+                        outputDisplay.close();
                         virtualDisplayReleased = true;
                         if (disposableWallpaperCast && inputStopped && receipt != null) {
                             try { receipt.onReleased(id, host); }
@@ -1612,7 +1699,7 @@ final class RearVirtualCast {
                         CompatibilityDiagnostics.record("virtual_ime_system_return",
                                 "display=" + display + " state=restored tasks=" + count);
                     }
-                    if (disposableWallpaperCast && task > 0 && !tasksBeforeWallpaperLaunch.containsKey(task)) {
+                    if (disposableWallpaperCast && task > 0 && !tasksBeforeDisposableLaunch.containsKey(task)) {
                         long deadline = SystemClock.uptimeMillis() + 1200;
                         while (runningTaskDisplays().containsKey(task)) {
                             if (SystemClock.uptimeMillis() >= deadline)
@@ -1659,6 +1746,7 @@ final class RearVirtualCast {
                     .put("ownerIdentity", coordinatorOwnerIdentity == null ? "" : coordinatorOwnerIdentity)
                     .put("rearDisplayId", physicalRearId).put("rearIdentity", physicalIdentity)
                     .put("package", packageName).put("baseComponent", baseComponent)
+                    .putOpt("notificationRoute", notificationRoute.isEmpty() ? null : notificationRoute)
                     .put("intendedBaseComponent", expectedBaseComponent)
                     .put("density", density).put("requestedDensity", requestedDensity)
                     .put("renderProfile", density == requestedDensity ? "layout_density" : "source_density")

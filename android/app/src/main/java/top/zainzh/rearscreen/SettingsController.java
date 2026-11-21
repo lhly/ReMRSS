@@ -57,7 +57,8 @@ final class SettingsController {
     private int currentDpi, rotation;
     private String connectionSummary = "connection_help", connectionAction = "open_shizuku";
     private AppPickerModel picker;
-    private Bundle pickerState;
+    private Bundle pickerState, homePickerState;
+    private boolean homePicker;
     private final Runnable statusTick = new Runnable() {
         @Override public void run() {
             if (!resumed || destroyed) return;
@@ -99,7 +100,10 @@ final class SettingsController {
         page = restorePageForBuild(restoredPage, routeVersion, BuildConfig.DEBUG);
         currentDpi = state == null ? 0 : state.getInt("native_dpi", 0);
         rotation = state == null ? -1 : state.getInt("native_rotation", -1);
-        pickerState = state;
+        homePicker = page == 100 && state != null && state.getBoolean("native_locked_home_picker", false)
+                && AiRearWallpaperSupport.supported();
+        if (homePicker) homePickerState = state;
+        else pickerState = state;
         Bundle composeState = state == null ? null : new Bundle(state);
         if (composeState != null) {
             composeState.putInt("native_page", page);
@@ -117,7 +121,14 @@ final class SettingsController {
             @Override public void toggle(String key, String method, boolean enabled) { SettingsController.this.toggle(key, method, enabled); }
             @Override public void tutorial() { action("openTutorial"); }
             @Override public void automation() { showUri(); }
-            @Override public void apps() { navigate(100); }
+            @Override public void apps() {
+                homePicker = false;
+                navigate(100);
+            }
+            @Override public void lockedHomeApps() {
+                homePicker = true;
+                navigate(100);
+            }
             @Override public void moduleImport() {
                 if (!BuildConfig.DEBUG) return;
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
@@ -287,6 +298,7 @@ final class SettingsController {
         state.putInt("native_route_version", 2);
         state.putInt("native_dpi", currentDpi);
         state.putInt("native_rotation", rotation);
+        state.putBoolean("native_locked_home_picker", homePicker && picker != null);
         if (picker != null) picker.saveState(state);
         modal.saveState(state);
         if (diagnosticsReport != null && modal.isShowing(s("diagnostics"))) state.putString("compatibility_report", diagnosticsReport);
@@ -325,8 +337,10 @@ final class SettingsController {
         if (destroyed) return;
         target = normalizePageForBuild(target, BuildConfig.DEBUG);
         if (picker != null && target != 100) {
-            pickerState = new Bundle();
-            picker.saveState(pickerState);
+            Bundle savedPicker = new Bundle();
+            picker.saveState(savedPicker);
+            if (homePicker) homePickerState = savedPicker;
+            else pickerState = savedPicker;
             composeUi.showPickerExitSnapshot(picker.snapshotForExit());
             picker.destroy();
             picker = null;
@@ -336,7 +350,7 @@ final class SettingsController {
         updateDialog.setManualFeedbackVisible(page == 3);
         hideKeyboard();
         if (target == 100 && picker == null) {
-            picker = new AppPickerModel(activity, pickerState, this::closePicker);
+            picker = new AppPickerModel(activity, homePicker ? homePickerState : pickerState, this::closePicker, homePicker);
             composeUi.showPicker(picker);
             if (resumed) picker.onResume();
         }
