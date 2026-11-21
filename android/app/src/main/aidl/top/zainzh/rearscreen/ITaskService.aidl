@@ -348,5 +348,16 @@ interface ITaskService {
     String startRearNotificationCast(in Surface surface, String readerPath, int host, int density,
             String packageName, IBinder owner, IRearGestureListener gestures, String viewport,
             boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) = 98;
+    /** Starts only the empty ReMRSS host, on trusted non-mirroring staging, then moves its exact new task to rear. */
+    boolean stageLockedRearNotificationHost(int rearDisplayId, int notificationTaskId, String ticket,
+            ISceneTaskActionGate gate) = 99;
+    /** Lock-screen variant: temporary target tasks may never be restored onto the primary display. */
+    String startLockedRearNotificationCast(in Surface surface, String readerPath, int host, int density,
+            String packageName, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) = 100;
+    /** Explicit, per-source opted-in home route. Never sends a notification activity. */
+    String startLockedRearNotificationHomeCast(in Surface surface, String readerPath, int host, int density,
+            String packageName, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) = 101;
 }
 

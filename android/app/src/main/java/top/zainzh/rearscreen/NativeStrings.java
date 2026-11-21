@@ -39,6 +39,10 @@ final class NativeStrings {
             case "notification_click_action_help": id = R.string.ui_notification_click_action_help; break;
             case "notification_click_open": id = R.string.ui_notification_click_open; break;
             case "notification_click_open_rear": id = R.string.ui_notification_click_open_rear; break;
+            case "notification_locked_home": id = R.string.ui_notification_locked_home; break;
+            case "notification_locked_home_summary": id = R.string.ui_notification_locked_home_summary; break;
+            case "notification_locked_home_warning": id = R.string.ui_notification_locked_home_warning; break;
+            case "notification_locked_home_empty": id = R.string.ui_notification_locked_home_empty; break;
             case "notification_click_dismiss": id = R.string.ui_notification_click_dismiss; break;
             case "minutes_value": id = R.string.ui_minutes_value; break;
             case "unit_seconds": id = R.string.ui_unit_seconds; break;

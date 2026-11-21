@@ -31,8 +31,9 @@ public class TaskService extends ITaskService.Stub {
     private static final String TAG = "TaskService";
     private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
             BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
-    static final int USER_SERVICE_CONTRACT_VERSION = 105;
-    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 109 : USER_SERVICE_CONTRACT_VERSION;
+    // Replace a Shizuku process left from the pre-lockscreen notification RPC contract.
+    static final int USER_SERVICE_CONTRACT_VERSION = 110;
+    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 114 : USER_SERVICE_CONTRACT_VERSION;
     private final Object mainTaskFocusLock = new Object();
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {
@@ -129,8 +130,99 @@ public class TaskService extends ITaskService.Stub {
         if (!isHostApplicationCaller()) throw new SecurityException("Invalid notification cast caller");
         try {
             return virtualCast.startNotification(surface, path, host, density, packageName, owner, gestures,
-                    viewport, compatibility, rotation, full, target);
+                    viewport, compatibility, rotation, full, target, false, false);
         } catch (Exception e) { throw new IllegalStateException("Notification cast startup", e); }
+    }
+
+    @Override public String startLockedRearNotificationCast(android.view.Surface surface, String path,
+            int host, int density, String packageName, android.os.IBinder owner, IRearGestureListener gestures,
+            String viewport, boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) {
+        if (!isHostApplicationCaller()) throw new SecurityException("Invalid notification cast caller");
+        try {
+            return virtualCast.startNotification(surface, path, host, density, packageName, owner, gestures,
+                    viewport, compatibility, rotation, full, target, true, false);
+        } catch (Exception e) { throw new IllegalStateException("Locked notification cast startup", e); }
+    }
+
+    @Override public String startLockedRearNotificationHomeCast(android.view.Surface surface, String path,
+            int host, int density, String packageName, android.os.IBinder owner, IRearGestureListener gestures,
+            String viewport, boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) {
+        if (!isHostApplicationCaller() || android.os.Process.myUid() != 2000 || !AiRearWallpaperSupport.supported())
+            throw new SecurityException("Locked notification home requires the supported Shizuku backend");
+        try {
+            return virtualCast.startNotification(surface, path, host, density, packageName, owner, gestures,
+                    viewport, compatibility, rotation, full, target, true, true);
+        } catch (Exception e) { throw new IllegalStateException("Locked notification homepage startup", e); }
+    }
+
+    @Override public boolean stageLockedRearNotificationHost(int rearDisplay, int noticeTask,
+            String ticket, ISceneTaskActionGate gate) {
+        if (!isHostApplicationCaller() || !BuildConfig.VIRTUAL_CAST_ENABLED || rearDisplay <= 0 || noticeTask <= 0
+                || ticket == null || !ticket.matches("[a-f0-9-]{36}") || gate == null) return false;
+        long caller = android.os.Binder.clearCallingIdentity();
+        String component = new android.content.ComponentName(BuildConfig.APPLICATION_ID,
+                VirtualRearHostActivity.class.getName()).flattenToString();
+        try {
+            String rearIdentity = RearDisplay.identity();
+            if (!lockedNotificationHostMayStage(rearDisplay, noticeTask, rearIdentity, gate)) return false;
+            for (SceneTaskIdentity.Record row : RearSystemBridge.runningTaskSnapshot()) {
+                if (component.equals(row.baseComponent)) return false;
+            }
+            android.os.HandlerThread drainThread = new android.os.HandlerThread("remrss-rear-host-stage");
+            drainThread.start();
+            try (android.media.ImageReader reader = android.media.ImageReader.newInstance(
+                    640, 400, android.graphics.PixelFormat.RGBA_8888, 2);
+                 RearTrustedVirtualDisplay stage = new RearTrustedVirtualDisplay()) {
+                reader.setOnImageAvailableListener(source -> {
+                    try (var ignored = source.acquireLatestImage()) {
+                        // Nothing from staging is presented or saved.
+                    } catch (IllegalStateException closing) { }
+                }, new android.os.Handler(drainThread.getLooper()));
+                Object builder = RearTrustedVirtualDisplay.builder("ReMRSS rear notification host staging",
+                        640, 400, 160, RearTrustedVirtualDisplay.TRUSTED_NON_MIRRORING
+                                | RearTrustedVirtualDisplay.DESTROY_CONTENT_ON_REMOVAL, reader.getSurface());
+                int stageId = stage.create(builder.getClass().getMethod("build").invoke(builder));
+                if (RearDisplay.isRear(stageId) || !lockedNotificationHostMayStage(
+                        rearDisplay, noticeTask, rearIdentity, gate)) return false;
+                DisplayRotationController.Result launch = DisplayRotationController.runCommand(
+                        "am", "start", "--user", "0", "--display", Integer.toString(stageId), "--windowingMode", "1",
+                        "-f", "0x10000000", "-n", component,
+                        "--es", RearNotificationCastRequest.EXTRA, ticket, "--ez", "managed", "true");
+                if (!RearSystemBridge.commandSucceeded(launch)) return false;
+
+                long deadline = android.os.SystemClock.uptimeMillis() + 2200;
+                while (android.os.SystemClock.uptimeMillis() < deadline) {
+                    if (!lockedNotificationHostMayStage(rearDisplay, noticeTask, rearIdentity, gate)) return false;
+                    for (SceneTaskIdentity.Record row : RearSystemBridge.runningTaskSnapshot()) {
+                        if (row.displayId != stageId || !component.equals(row.baseComponent)) continue;
+                        DisplayRotationController.Result stacks = DisplayRotationController.runCommand("am", "stack", "list");
+                        if (stacks.exitCode != 0 || !RearSystemBridge.isExactSoleTaskRoot(
+                                stacks.output, row.taskId, component, stageId)
+                                || !lockedNotificationHostMayStage(rearDisplay, noticeTask, rearIdentity, gate))
+                            return false;
+                        return RearSystemBridge.moveTask(row.taskId, rearDisplay)
+                                && component.equals(getTaskBaseComponent(row.taskId, rearDisplay));
+                    }
+                    Thread.sleep(60);
+                }
+                return false;
+            } finally {
+                drainThread.quitSafely();
+            }
+        } catch (Exception unavailable) {
+            if (unavailable instanceof InterruptedException) Thread.currentThread().interrupt();
+            Log.i(TAG, "locked_rear_notification_host_failed type=" + unavailable.getClass().getSimpleName());
+            return false;
+        } finally {
+            android.os.Binder.restoreCallingIdentity(caller);
+        }
+    }
+
+    private boolean lockedNotificationHostMayStage(int rear, int noticeTask, String identity,
+            ISceneTaskActionGate gate) throws Exception {
+        return isExactRear(rear, identity)
+                && (BuildConfig.APPLICATION_ID + ":" + noticeTask).equals(getForegroundAppOnDisplay(rear))
+                && gate.isCurrent();
     }
 
     @Override public String startParkedWallpaperCast(android.view.Surface surface, String path,

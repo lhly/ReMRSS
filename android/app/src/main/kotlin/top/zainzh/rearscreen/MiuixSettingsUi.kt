@@ -85,6 +85,7 @@ class MiuixSettingsUi(
         fun toggle(key: String, method: String, enabled: Boolean)
         fun tutorial()
         fun apps()
+        fun lockedHomeApps()
         fun duration()
         fun clickAction()
         fun saveDuration(seconds: Int, neverAutoClose: Boolean)
@@ -963,6 +964,13 @@ class MiuixSettingsUi(
                     AppDivider()
                     AppRow(s("notification_apps"), s("selected_count").replace("{0}", settings.selected.toString()),
                         modifier = Modifier.testTag("notification_apps_entry"), action = actions::apps)
+                    val lockedHomeAvailable = settings.openOnRear && AiRearWallpaperSupport.supported()
+                    AppSettingsReveal(lockedHomeAvailable) {
+                        AppDivider()
+                        AppRow(s("notification_locked_home"), s("notification_locked_home_summary"),
+                            modifier = Modifier.testTag("notification_locked_home_entry"), enabled = lockedHomeAvailable,
+                            action = actions::lockedHomeApps)
+                    }
                     AppDivider()
                     AppRow(s("notification_access"), s("notification_access_help"), action = { actions.action("openNotificationListenerSettings") },
                         trailing = { Text(s(if (settings.listener) "access_granted" else "access_pending"), color = AppPalette.accent(), fontSize = 13.sp, modifier = Modifier.widthIn(max = 100.dp)) })

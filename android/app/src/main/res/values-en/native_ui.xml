@@ -13,9 +13,13 @@
     <string name="ui_notification_never_close" formatted="false">Don’t close automatically</string>
     <string name="ui_notification_never_close_help" formatted="false">Stays visible while the notification is active. Keeping the screen on uses more battery; it still ends if the notification is removed or the feature is turned off.</string>
     <string name="ui_notification_click_action" formatted="false">Tap notification</string>
-    <string name="ui_notification_click_action_help" formatted="false">Unlock your phone to open details. During casting, a tap only dismisses the banner.</string>
+    <string name="ui_notification_click_action_help" formatted="false">While the main screen is locked (off or showing Always-on display), try the notification details first, then its app. During casting, taps only dismiss banners.</string>
     <string name="ui_notification_click_open" formatted="false">Open app on main screen</string>
-    <string name="ui_notification_click_open_rear">Open details on rear screen</string>
+    <string name="ui_notification_click_open_rear">Open on the rear screen</string>
+    <string name="ui_notification_locked_home">Open apps from the lock screen</string>
+    <string name="ui_notification_locked_home_summary">Choose which apps may open on the rear screen without unlocking the phone.</string>
+    <string name="ui_notification_locked_home_warning">A tap opens the app, not the notification details. Anyone holding the locked phone may see its contents, such as a chat list.</string>
+    <string name="ui_notification_locked_home_empty">Choose a compatible source in Notification apps first.</string>
     <string name="ui_notification_click_dismiss" formatted="false">Dismiss rear reminder only</string>
     <string name="ui_minutes_value" formatted="false">{0} minutes</string>
     <string name="ui_unit_seconds" formatted="false">Seconds</string>

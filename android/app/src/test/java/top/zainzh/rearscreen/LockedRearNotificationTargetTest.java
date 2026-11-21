@@ -1,0 +1,65 @@
+package top.zainzh.rearscreen;
+
+import android.content.pm.ActivityInfo;
+import android.view.Display;
+import java.util.List;
+import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+public class LockedRearNotificationTargetTest {
+    private static final String SOURCE = "com.example.messages";
+    private static final int VIRTUAL = 22;
+
+    @Test public void acceptsOnlyAVisibleTaskFromTheSelectedSourceOnTheExpectedDisplay() {
+        RearDisplayCastOccupancy.Task visible = task(SOURCE, SOURCE, 0, true, true, false);
+        assertEquals(41, accepted(VIRTUAL, Display.STATE_ON, visible));
+        assertEquals(-1, accepted(0, Display.STATE_ON, visible));
+        assertEquals(-1, accepted(VIRTUAL, Display.STATE_OFF, visible));
+        assertEquals(-1, accepted(VIRTUAL, Display.STATE_ON, task(SOURCE, SOURCE, 10, true, true, false)));
+        assertEquals(-1, accepted(VIRTUAL, Display.STATE_ON, task(SOURCE, "com.example.other", 0, true, true, false)));
+    }
+
+    @Test public void aHiddenOrUnconfirmedDetailCannotPreventFallback() {
+        assertEquals(-1, accepted(VIRTUAL, Display.STATE_ON, task(SOURCE, SOURCE, 0, false, true, false)));
+        assertEquals(-1, accepted(VIRTUAL, Display.STATE_ON, task(SOURCE, SOURCE, 0, true, true, true)));
+        assertEquals(-1, accepted(VIRTUAL, Display.STATE_ON, task(SOURCE, SOURCE, 0, true, null, false)));
+        assertEquals(-1, accepted(VIRTUAL, Display.STATE_ON, task(SOURCE, SOURCE, 0, true, true, null)));
+    }
+
+    @Test public void launcherMustSupportANewIndependentTaskEvenIfTheAppIsAlreadyOpen() {
+        int none = ActivityInfo.DOCUMENT_LAUNCH_NONE;
+        assertTrue(RearNotificationCastRequest.canStartIndependentLauncher(ActivityInfo.LAUNCH_MULTIPLE, none, 0));
+        assertTrue(RearNotificationCastRequest.canStartIndependentLauncher(ActivityInfo.LAUNCH_SINGLE_TOP, none, 0));
+        assertFalse(RearNotificationCastRequest.canStartIndependentLauncher(ActivityInfo.LAUNCH_SINGLE_TASK, none, 0));
+        assertFalse(RearNotificationCastRequest.canStartIndependentLauncher(ActivityInfo.LAUNCH_SINGLE_INSTANCE, none, 0));
+        assertFalse(RearNotificationCastRequest.canStartIndependentLauncher(ActivityInfo.LAUNCH_MULTIPLE,
+                ActivityInfo.DOCUMENT_LAUNCH_INTO_EXISTING, 0));
+        assertFalse(RearNotificationCastRequest.canStartIndependentLauncher(ActivityInfo.LAUNCH_SINGLE_TOP, none,
+                ActivityInfo.FLAG_ALLOW_TASK_REPARENTING));
+    }
+
+    @Test public void securePrimaryDisplayAllowsSystemAodWithoutAcceptingInteractiveOrUnknownStates() {
+        for (int state : new int[]{Display.STATE_OFF, Display.STATE_DOZE, Display.STATE_DOZE_SUSPEND}) {
+            assertTrue(RearNotificationCastRequest.mayPresentWhileLocked(state, true, true));
+            assertFalse(RearNotificationCastRequest.mayPresentWhileLocked(state, false, true));
+            assertFalse(RearNotificationCastRequest.mayPresentWhileLocked(state, true, false));
+        }
+        for (int state : new int[]{Display.STATE_ON, Display.STATE_ON_SUSPEND, Display.STATE_UNKNOWN}) {
+            assertFalse(RearNotificationCastRequest.mayPresentWhileLocked(state, true, true));
+        }
+    }
+
+    private static int accepted(int display, int state, RearDisplayCastOccupancy.Task task) {
+        return RearVirtualCast.visibleLockedNotificationTask(new RearDisplayCastOccupancy.Snapshot(
+                display, state, List.of(task), "activity_task", null), VIRTUAL, SOURCE);
+    }
+
+    private static RearDisplayCastOccupancy.Task task(String base, String top, int user,
+            Boolean visible, Boolean requested, Boolean sleeping) {
+        return new RearDisplayCastOccupancy.Task(41, base, top, base + "/Home", top + "/Detail",
+                user, visible, requested, sleeping);
+    }
+}

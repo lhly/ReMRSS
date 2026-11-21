@@ -35,14 +35,20 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 
 /** Data and lifecycle for the Miuix app picker; preferences remain compatible with services. */
-class AppPickerModel(private val activity: MainActivity, saved: Bundle?, private val back: Runnable) {
+class AppPickerModel(
+    private val activity: MainActivity,
+    saved: Bundle?,
+    private val back: Runnable,
+    internal val lockedHome: Boolean,
+) {
     internal data class App(val info: ApplicationInfo, val name: String, val system: Boolean)
     private val preferences = activity.getSharedPreferences("mrss_settings", Context.MODE_PRIVATE)
+    private val selectedKey = if (lockedHome) RearNotificationCastRequest.HOME_APPS_PREF else "notification_selected_apps"
     private val executor = Executors.newFixedThreadPool(2)
     private val icons = LruCache<String, Drawable>(64)
     private var destroyed = false
     private var granted = queryGranted()
-    internal var selected by mutableStateOf(preferences.getStringSet("notification_selected_apps", emptySet())!!.toSet())
+    internal var selected by mutableStateOf(preferences.getStringSet(selectedKey, emptySet()).orEmpty().toSet())
         private set
     internal var includeSystem by mutableStateOf(saved?.getBoolean("native_include_system", false) ?: false)
     internal var search by mutableStateOf(saved?.getString("native_search", "") ?: "")
@@ -55,6 +61,7 @@ class AppPickerModel(private val activity: MainActivity, saved: Bundle?, private
     fun destroy() { destroyed = true; executor.shutdownNow(); icons.evictAll() }
     @JvmName("snapshotForExit")
     internal fun snapshotForExit(): AppPickerExitSnapshot = AppPickerExitSnapshot(
+        lockedHome = lockedHome,
         apps = apps.toList(),
         selected = selected.toSet(),
         includeSystem = includeSystem,
@@ -75,10 +82,19 @@ class AppPickerModel(private val activity: MainActivity, saved: Bundle?, private
         if (destroyed || loading) return
         loading = true
         executor.execute {
-            val result = runCatching { activity.packageManager.getInstalledApplications(0).filter { it.packageName != activity.packageName }.map {
-                App(it, activity.packageManager.getApplicationLabel(it).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 ||
-                    it.packageName.startsWith("com.android.") || it.packageName.startsWith("com.google.android.") || it.packageName.startsWith("android"))
-            } }
+            val result = runCatching {
+                val manager = activity.packageManager
+                val allowedSources = if (lockedHome) preferences.getStringSet("notification_selected_apps", emptySet()).orEmpty() else null
+                manager.getInstalledApplications(0).asSequence().filter { it.packageName != activity.packageName }
+                    .filter { app ->
+                        allowedSources == null || (app.packageName in allowedSources
+                            && AiRearAppCatalog.independentLauncher(activity, app.packageName) != null)
+                    }
+                    .map {
+                        App(it, manager.getApplicationLabel(it).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 ||
+                            it.packageName.startsWith("com.android.") || it.packageName.startsWith("com.google.android.") || it.packageName.startsWith("android"))
+                    }.toList()
+            }
             activity.runOnUiThread { if (!destroyed) { loading = false; apps = result.getOrDefault(emptyList()); failure = result.exceptionOrNull()?.message } }
         }
     }
@@ -86,8 +102,14 @@ class AppPickerModel(private val activity: MainActivity, saved: Bundle?, private
     internal val canInteract: Boolean get() = !destroyed
     internal fun renderState() = AppPickerRenderState(apps, selected, includeSystem, search, loading, failure, list)
     internal fun choose(packages: List<String>, enabled: Boolean) {
+        if (lockedHome && (packages.size != 1 || apps.none { it.info.packageName == packages.single() })) return
         selected = if (enabled) selected + packages else selected - packages.toSet()
-        preferences.edit().putStringSet("notification_selected_apps", selected.toSet()).apply()
+        val edit = preferences.edit().putStringSet(selectedKey, selected.toSet())
+        if (!lockedHome && !enabled) {
+            val home = preferences.getStringSet(RearNotificationCastRequest.HOME_APPS_PREF, emptySet()).orEmpty()
+            edit.putStringSet(RearNotificationCastRequest.HOME_APPS_PREF, home - packages.toSet())
+        }
+        edit.apply()
     }
     internal fun backFromContent() { back.run() }
     internal fun requestAccessFromContent() { activity.runAction("requestQueryAllPackagesPermission", null, null) }
@@ -113,6 +135,7 @@ class AppPickerModel(private val activity: MainActivity, saved: Bundle?, private
 }
 
 internal data class AppPickerExitSnapshot(
+    val lockedHome: Boolean,
     val apps: List<AppPickerModel.App>,
     val selected: Set<String>,
     val includeSystem: Boolean,
@@ -142,6 +165,7 @@ internal data class AppPickerRenderState(
     val granted = model?.queryPackagesGranted ?: snapshot?.granted ?: false
     PickerContent(
         state = state,
+        lockedHome = model?.lockedHome ?: snapshot?.lockedHome ?: false,
         interactive = interactive,
         granted = granted,
         onBack = { model?.takeIf { it.canInteract }?.backFromContent() },
@@ -168,6 +192,7 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable private fun PickerContent(
     state: AppPickerRenderState,
+    lockedHome: Boolean,
     interactive: Boolean,
     granted: Boolean,
     onBack: () -> Unit,
@@ -181,10 +206,10 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
     val context = LocalContext.current
     fun s(key: String) = NativeStrings.get(context, key)
     val locale = LocalConfiguration.current.locales[0]
-    val visible = remember(state.apps, state.search, state.includeSystem, state.selected, locale) {
+    val visible = remember(state.apps, state.search, state.includeSystem, state.selected, locale, lockedHome) {
         val query = state.search.trim().lowercase(Locale.ROOT)
         val collator = Collator.getInstance(locale)
-        state.apps.filter { (state.includeSystem || !it.system) && (query.isEmpty() || it.name.lowercase(Locale.ROOT).contains(query) || it.info.packageName.lowercase(Locale.ROOT).contains(query)) }
+        state.apps.filter { (lockedHome || state.includeSystem || !it.system) && (query.isEmpty() || it.name.lowercase(Locale.ROOT).contains(query) || it.info.packageName.lowercase(Locale.ROOT).contains(query)) }
             .sortedWith { a, b ->
                 val picked = state.selected.contains(b.info.packageName).compareTo(state.selected.contains(a.info.packageName))
                 if (picked != 0) picked else collator.compare(a.name, b.name)
@@ -225,7 +250,7 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
         }
         onChoose(packages, enabled)
     }
-    AppPageContent(s("notification_apps"), { keyboard?.hide(); if (interactive) onBack() }, "app_picker_back") { pageModifier, headerInset ->
+    AppPageContent(s(if (lockedHome) "notification_locked_home" else "notification_apps"), { keyboard?.hide(); if (interactive) onBack() }, "app_picker_back") { pageModifier, headerInset ->
         LazyColumn(pageModifier.testTag("app_picker_list").onPlaced {
             if (observedFilterGeneration == filterGeneration) {
                 val layout = state.list.layoutInfo
@@ -244,7 +269,8 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
         }, state = state.list,
             contentPadding = PaddingValues(20.dp, headerInset + 12.dp, 20.dp, 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item("title") {
-                Text(s("apps_summary").replace("{0}", state.selected.size.toString()).replace("{1}", visible.size.toString()),
+                Text(if (lockedHome) s("notification_locked_home_warning") else
+                    s("apps_summary").replace("{0}", state.selected.size.toString()).replace("{1}", visible.size.toString()),
                     fontSize = 13.sp, color = AppPalette.secondary())
             }
             item("filters") {
@@ -255,25 +281,28 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
                     placementBarrierPhase = 0
                     onSearch(it)
                 }, label = s("search_apps"), modifier = Modifier.testTag("app_search"), interactive = interactive)
-                AppToggle(s("system_apps"), null, state.includeSystem, enabled = interactive,
-                    modifier = Modifier.testTag("picker_system_apps_toggle")) {
-                    if (interactive) {
-                        filterGeneration++
-                        selectionAnimationGeneration = -1
-                        placementAnimationsSuppressed = true
-                        placementBarrierPhase = 0
-                        onIncludeSystem(it)
+                if (!lockedHome) {
+                    AppToggle(s("system_apps"), null, state.includeSystem, enabled = interactive,
+                        modifier = Modifier.testTag("picker_system_apps_toggle")) {
+                        if (interactive) {
+                            filterGeneration++
+                            selectionAnimationGeneration = -1
+                            placementAnimationsSuppressed = true
+                            placementBarrierPhase = 0
+                            onIncludeSystem(it)
+                        }
                     }
-                }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(s("select_all"), { choose(visible.map { it.info.packageName }, true) }, minHeight = 48.dp, enabled = interactive)
-                    TextButton(s("deselect_all"), { choose(visible.map { it.info.packageName }, false) }, minHeight = 48.dp, enabled = interactive)
-                    TextButton(s("refresh"), { if (interactive) onRefresh() }, minHeight = 48.dp, enabled = interactive && !state.loading)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(s("select_all"), { choose(visible.map { it.info.packageName }, true) }, minHeight = 48.dp, enabled = interactive)
+                        TextButton(s("deselect_all"), { choose(visible.map { it.info.packageName }, false) }, minHeight = 48.dp, enabled = interactive)
+                        TextButton(s("refresh"), { if (interactive) onRefresh() }, minHeight = 48.dp, enabled = interactive && !state.loading)
+                    }
                 }
                 if (!granted) TextButton(s("apps_access_help"), { if (interactive) onRequestAccess() }, minHeight = 48.dp,
                     enabled = interactive, modifier = Modifier.testTag("apps_access_help"))
             }
-            if (visible.isEmpty()) item("empty") { Text(state.failure ?: s(if (state.loading) "loading_apps" else "no_apps_found"), color = AppPalette.secondary()) }
+            if (visible.isEmpty()) item("empty") { Text(state.failure ?: s(if (state.loading) "loading_apps" else if (lockedHome && state.search.isBlank())
+                "notification_locked_home_empty" else "no_apps_found"), color = AppPalette.secondary()) }
             items(visible, key = { it.info.packageName }) { app ->
                 val placementModifier = if (placementAnimationsSuppressed) Modifier else Modifier.animateItem(
                     fadeInSpec = null,

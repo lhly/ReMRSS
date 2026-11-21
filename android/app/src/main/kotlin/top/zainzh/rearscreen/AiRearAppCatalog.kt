@@ -26,6 +26,12 @@ internal object AiRearAppCatalog {
         }
     }
 
+    @JvmStatic
+    fun independentLauncher(context: Context, packageName: String): ComponentName? {
+        val target = context.packageManager.getLaunchIntentForPackage(packageName)?.component ?: return null
+        return target.takeIf { it.packageName == packageName && isCastTarget(context, it, context.packageName) }
+    }
+
     /** Shared by the UI and Shizuku; only public, enabled launcher entries can start a separate task. */
     @JvmStatic
     fun isCastTarget(context: Context, target: ComponentName?, hostPackage: String): Boolean {

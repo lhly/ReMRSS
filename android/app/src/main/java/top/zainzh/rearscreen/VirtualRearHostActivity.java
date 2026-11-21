@@ -94,10 +94,21 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private boolean primaryInteractive;
     private boolean primaryKeyguardLocked;
     private int observedRearDisplayState = android.view.Display.STATE_UNKNOWN;
+    private int observedLockedNotificationPrimaryState = android.view.Display.STATE_UNKNOWN;
     private final android.hardware.display.DisplayManager.DisplayListener rearDisplayListener = new android.hardware.display.DisplayManager.DisplayListener() {
         @Override public void onDisplayAdded(int displayId) { }
         @Override public void onDisplayRemoved(int displayId) { }
         @Override public void onDisplayChanged(int displayId) {
+            if (notificationCast != null && notificationCast.locked) {
+                if (displayId == android.view.Display.DEFAULT_DISPLAY) {
+                    int primaryState = observeLockedNotificationPrimary();
+                    if (!RearNotificationCastRequest.lockedWithPrimaryInactive(
+                            VirtualRearHostActivity.this, primaryState)) finish();
+                }
+                if (displayId == notificationCast.rearDisplay && (getDisplay() == null
+                        || getDisplay().getState() != android.view.Display.STATE_ON)) finish();
+                return;
+            }
             if (displayId != RearDisplay.id()) return;
             android.view.Display display = getSystemService(android.hardware.display.DisplayManager.class).getDisplay(displayId);
             int state = display == null ? android.view.Display.STATE_UNKNOWN : display.getState();
@@ -109,6 +120,15 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                 main.post(() -> VirtualRearHostActivity.this.onRearDisplayResumed(true));
         }
     };
+    private int observeLockedNotificationPrimary() {
+        int state = RearNotificationCastRequest.primaryDisplayState(this);
+        if (observedLockedNotificationPrimaryState != state) {
+            observedLockedNotificationPrimaryState = state;
+            android.util.Log.i("VirtualRearHost", "locked_notification_primary_state=" + state);
+        }
+        return state;
+    }
+
     private final RearCastNotification.Target notificationTarget = new RearCastNotification.Target() {
         public void show(RearCastNotification.Message message) {
             main.post(() -> { if (!ending && instance == VirtualRearHostActivity.this && castNotification != null) castNotification.offer(message); });
@@ -443,6 +463,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         });
     }
     private void requestLockRecovery(long delay) {
+        if (notificationCast != null && notificationCast.locked) return;
         if (ending || isFinishing() || !VirtualCastOutputRecoveryPolicy.shouldScheduleWakeForPowerCycle(lockRecoveryRequested)) return;
         lockRecoveryRequested = true;
         wakeAttempted = false;
@@ -477,6 +498,11 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     }
     private final BroadcastReceiver screenReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
+            if (notificationCast != null && notificationCast.locked) {
+                if (Intent.ACTION_USER_PRESENT.equals(intent.getAction())
+                        || !notificationCast.powerAndLockUnchanged(VirtualRearHostActivity.this)) finish();
+                return;
+            }
             if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
                 if (notificationCast != null) {
                     finish();
@@ -561,6 +587,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         }
     };
     private volatile RearNotificationCastRequest notificationCast;
+    private boolean waitingForNotificationStage;
 
     private final ServiceConnection connection = new ServiceConnection() {
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -1105,13 +1132,14 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         if (Build.VERSION.SDK_INT < 33) { finish(); return; }
         android.util.Log.i("VirtualRearHost", "Launch display=" + getDisplay().getDisplayId() + " rear=" + RearDisplay.id()
                 + " task=" + getIntent().getIntExtra("task", -1) + " stop=" + getIntent().getBooleanExtra("stop", false));
-        if (!BuildConfig.VIRTUAL_CAST_ENABLED || !RearDisplay.isRear(getDisplay().getDisplayId()) || getIntent().getBooleanExtra("stop", false)) {
+        if (!BuildConfig.VIRTUAL_CAST_ENABLED || getIntent().getBooleanExtra("stop", false)) {
             finish(); return;
         }
         if (getIntent().hasExtra(RearNotificationCastRequest.EXTRA)) {
-            if (!acceptNotificationCast(getIntent())) finish();
+            if (!acceptNotificationCast(getIntent())) waitForNotificationStage();
             return;
         }
+        if (!RearDisplay.isRear(getDisplay().getDisplayId())) { finish(); return; }
         if (getIntent().getBooleanExtra(RearWallpaperStandby.PREPARE, false)) {
             prepareWallpaperStandby(getIntent());
             return;
@@ -1120,6 +1148,30 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         // command to this singleInstance. Reject an empty host only after pending intents arrive.
         if (getIntent().getIntExtra("task", -1) < 0 && getIntent().getStringExtra("component") == null) return;
         initializePresentation();
+    }
+
+    private void waitForNotificationStage() {
+        String ticket = getIntent().getStringExtra(RearNotificationCastRequest.EXTRA);
+        if (getDisplay() == null || !RearNotificationCastRequest.waitingOnStaging(
+                this, ticket, getDisplay().getDisplayId())) { finish(); return; }
+        waitingForNotificationStage = true;
+        // Staging has no notification content, SurfaceView or input route.
+        FrameLayout blank = new FrameLayout(this);
+        blank.setBackgroundColor(android.graphics.Color.BLACK);
+        setContentView(blank);
+        main.post(new Runnable() {
+            @Override public void run() {
+                if (isFinishing() || isDestroyed()) return;
+                if (acceptNotificationCast(getIntent())) {
+                    waitingForNotificationStage = false;
+                } else if (getDisplay() != null && RearNotificationCastRequest.waitingOnStaging(
+                        VirtualRearHostActivity.this, ticket, getDisplay().getDisplayId())) {
+                    main.postDelayed(this, 50L);
+                } else {
+                    finish();
+                }
+            }
+        });
     }
 
     private boolean acceptNotificationCast(Intent intent) {
@@ -1140,18 +1192,33 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
 
     private IRearNotificationTarget notificationTarget(RearNotificationCastRequest request, Surface surface) {
         return new IRearNotificationTarget.Stub() {
-            @Override public boolean launch(int displayId) {
+            @Override public boolean launch(int displayId) throws android.os.RemoteException {
+                return onVisibleHost(() -> request.launch(VirtualRearHostActivity.this, root, displayId));
+            }
+            @Override public boolean isCurrent() throws android.os.RemoteException {
+                return onVisibleHost(() -> request.currentOnRear(VirtualRearHostActivity.this, root));
+            }
+            @Override public boolean mayVerifyLaunch(int displayId) throws android.os.RemoteException {
+                return onVisibleHost(() -> request.mayVerifyLaunch(VirtualRearHostActivity.this, root, displayId));
+            }
+            @Override public boolean launchSource(int displayId) throws android.os.RemoteException {
+                return onVisibleHost(() -> request.launchSource(VirtualRearHostActivity.this, root, displayId));
+            }
+
+            private boolean onVisibleHost(java.util.concurrent.Callable<Boolean> action)
+                    throws android.os.RemoteException {
                 if (ending || notificationCast != request || !surface.isValid()) return false;
                 java.util.concurrent.FutureTask<Boolean> send = new java.util.concurrent.FutureTask<>(
-                        () -> !ending && notificationCast == request && surface.isValid()
-                                && request.launch(VirtualRearHostActivity.this, root, displayId));
+                        () -> !ending && notificationCast == request && surface.isValid() && action.call());
                 if (!main.post(send)) return false;
                 try { return send.get(1500, java.util.concurrent.TimeUnit.MILLISECONDS); }
                 catch (InterruptedException cancelled) { Thread.currentThread().interrupt(); }
                 catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException unavailable) {
                     android.util.Log.i("VirtualRearHost", "rear_notification_send_unavailable");
                 }
-                send.cancel(false); // If the main thread has not begun, do not launch after rollback.
+                send.cancel(false);
+                // If the launch verdict is unknown, the locked path must not try a second action.
+                if (request.locked) throw new android.os.RemoteException("Notification action verdict unavailable");
                 return false;
             }
         };
@@ -1215,7 +1282,8 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private void initializePresentation() {
         ending = false;
         instance = this;
-        setShowWhenLocked(notificationCast == null);
+        setShowWhenLocked(notificationCast == null || notificationCast.locked);
+        if (notificationCast != null && notificationCast.locked) observeLockedNotificationPrimary();
         getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         getWindow().setDecorFitsSystemWindows(false);
         if (getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE).getBoolean("flutter.keep_screen_on_enabled", true))
@@ -1256,7 +1324,8 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         root.addView(castMenu.getView(), new FrameLayout.LayoutParams(1, 1));
         root.getViewTreeObserver().addOnGlobalLayoutListener(presentationLayout);
         setContentView(root);
-        RearCastNotification.attach(notificationTarget);
+        if (notificationCast == null || !notificationCast.locked)
+            RearCastNotification.attach(notificationTarget);
         getWindow().getInsetsController().hide(WindowInsets.Type.systemBars());
         IntentFilter screenEvents = new IntentFilter(Intent.ACTION_SCREEN_OFF);
         screenEvents.addAction(Intent.ACTION_SCREEN_ON);
@@ -1391,6 +1460,10 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         } else maybeStart();
     }
     public void surfaceDestroyed(SurfaceHolder value) {
+        if (notificationCast != null && notificationCast.locked) {
+            finish();
+            return;
+        }
         holder = null; surfaceConfigured = false; outputGeneration++; main.removeCallbacks(startAfterLayout);
         missingSurfaceLossEpoch = missingSurfacePresentationGate.beginLoss();
         updateCameraGapBattery();
@@ -1485,9 +1558,21 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                 } else if (notificationCast != null) {
                     RearNotificationCastRequest notice = notificationCast;
                     if (!notice.usable(this)) throw new IllegalStateException("rear_notification_stale");
-                    status = remote.startRearNotificationCast(surface, path, host, requestedLayoutDensity,
-                            notice.packageName, owner, gestures, RearCastGeometry.encode(viewport), densityCompatibility,
-                            initialRotation, initialFull, notificationTarget(notice, surface));
+                    IRearNotificationTarget targetCallback = notificationTarget(notice, surface);
+                    String castViewport = RearCastGeometry.encode(viewport);
+                    if (notice.homeOnly) {
+                        status = remote.startLockedRearNotificationHomeCast(surface, path, host, requestedLayoutDensity,
+                                notice.packageName, owner, gestures, castViewport, densityCompatibility,
+                                initialRotation, initialFull, targetCallback);
+                    } else if (notice.locked) {
+                        status = remote.startLockedRearNotificationCast(surface, path, host, requestedLayoutDensity,
+                                notice.packageName, owner, gestures, castViewport, densityCompatibility,
+                                initialRotation, initialFull, targetCallback);
+                    } else {
+                        status = remote.startRearNotificationCast(surface, path, host, requestedLayoutDensity,
+                                notice.packageName, owner, gestures, castViewport, densityCompatibility,
+                                initialRotation, initialFull, targetCallback);
+                    }
                 } else if (operationId == null) {
                     status = remote.startRearVirtualCast(surface, path, target, host,
                             requestedLayoutDensity, getIntent().getStringExtra("component"), owner, gestures,
@@ -1528,7 +1613,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                 }
                 RearNotificationCastRequest notice = notificationCast;
                 if (notice != null) main.post(() -> {
-                    if (isFinishing() || isDestroyed() || ending || !RearNotificationCastRequest.unlocked(this)
+                    if (isFinishing() || isDestroyed() || ending || !notice.powerAndLockUnchanged(this)
                             || !RearAnimationManager.notificationProjectionStarted(this, notice.session)) {
                         finish();
                     }
@@ -1676,7 +1761,16 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         }
         ending = true;
         if (probe == null) {
-            main.post(this::finish);
+            main.post(() -> {
+                RearNotificationCastRequest notice = notificationCast;
+                if (notice != null && notice.locked && !isFinishing() && !isDestroyed()
+                        && getDisplay() != null && getDisplay().getDisplayId() == notice.rearDisplay
+                        && getDisplay().getState() == android.view.Display.STATE_ON && notice.powerAndLockUnchanged(this)) {
+                    android.widget.Toast.makeText(this, R.string.rear_notification_open_unavailable,
+                            android.widget.Toast.LENGTH_SHORT).show();
+                }
+                finish();
+            });
             return;
         }
         // A rejected app need not consume the prepared task. Only reuse it if the backend is clean.
@@ -1752,7 +1846,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     }
     @Override protected void onPostResume() {
         super.onPostResume();
-        if (root == null && wallpaperStandby == null && !isFinishing()) finish();
+        if (root == null && wallpaperStandby == null && !waitingForNotificationStage && !isFinishing()) finish();
     }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
