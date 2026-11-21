@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -83,6 +84,7 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 
 class AiRearWallpaperEditorActivity : ComponentActivity() {
     private data class Slot(val id: String, val title: String, val modified: Long, val available: Boolean)
+    private data class ReplaceConfirmation(val placement: Placement, val legacyTicket: String?)
     private var service by mutableStateOf<ITaskService?>(null)
     private var builtInDraft by mutableStateOf(AiRearShortcutDraft())
     private var modDraft by mutableStateOf(AiRearShortcutDraft())
@@ -111,7 +113,8 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
     private var loading by mutableStateOf(false)
     private var backgroundBusy by mutableStateOf(false)
     private var applying by mutableStateOf(false)
-    private var confirmReplace by mutableStateOf(false)
+    private var checkingWork by mutableStateOf(false)
+    private var confirmReplace by mutableStateOf<ReplaceConfirmation?>(null)
     private var activePlacements by mutableStateOf(emptyList<Placement>())
     private val activePlacement get() = activePlacements.firstOrNull { it.modId == modId && (modId == null || it.id == selected) }
     private var preparing by mutableStateOf(false)
@@ -130,6 +133,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         override fun onServiceDisconnected(name: ComponentName) {
             sequence++
             service = null
+            confirmReplace = null
             slots = null
             loading = false
         }
@@ -382,12 +386,62 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         } finally { media.delete() }
     }
 
-    private fun changeWallpaper(restore: Boolean) {
-        if (!AiRearWallpaperSupport.shellReady(this) || applying || backgroundBusy || preparing) return
+    private fun checkLegacyOwner(ticket: String?) {
+        val owner = ticket?.substringBefore('\n') ?: return
+        if (owner == packageName) return // An earlier install of this same variant may have lost its journal.
+        try {
+            packageManager.getPackageInfo(owner, 0)
+        } catch (_: PackageManager.NameNotFoundException) {
+            return
+        }
+        error("WALLPAPER_LEGACY_OWNER_INSTALLED")
+    }
+
+    private fun requestReplacement() {
+        if (!AiRearWallpaperSupport.shellReady(this) || checkingWork || applying || backgroundBusy || preparing) return
+        val remote = service ?: return
+        val placement = selected?.let { Placement(it, modId) } ?: return
+        checkingWork = true
+        message = ""
+        lifecycleScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        synchronized(AiRearWallpaperInstallations.writeLock) {
+                            check(installations.canInstall(placement)) { "WALLPAPER_USED_BY_OTHER_THEME" }
+                            val ticket = AiRearWallpaperConnection(remote).inspectReplacement(placement.id)
+                            checkLegacyOwner(ticket)
+                            ReplaceConfirmation(placement, ticket)
+                        }
+                    }
+                }
+                if (service != remote || selected != placement.id || modId != placement.modId) return@launch
+                result.onSuccess { confirmReplace = it }
+                    .onFailure { message = wallpaperError(it, R.string.ai_rear_read_error) }
+            } finally {
+                checkingWork = false
+            }
+        }
+    }
+
+    private fun wallpaperError(failure: Throwable, fallback: Int): String = getString(when (failure.message) {
+        "WALLPAPER_USED_BY_OTHER_THEME" -> R.string.ai_rear_theme_occupied
+        "WALLPAPER_LEGACY_OWNER_INSTALLED" -> R.string.ai_rear_legacy_owner_installed
+        "WALLPAPER_LEGACY_BACKUP_INVALID" -> R.string.ai_rear_legacy_backup_invalid
+        "WALLPAPER_LEGACY_UNVERIFIED" -> R.string.ai_rear_legacy_unverified
+        "WALLPAPER_ADOPTION_CHANGED" -> R.string.ai_rear_legacy_changed
+        "WALLPAPER_ADOPTION_NOT_WRITTEN" -> R.string.ai_rear_legacy_not_written
+        else -> fallback
+    })
+
+    private fun changeWallpaper(restore: Boolean, confirmation: ReplaceConfirmation? = null) {
+        if (!AiRearWallpaperSupport.shellReady(this) || applying || checkingWork || backgroundBusy || preparing) return
         val remote = service ?: return
         val owner = modId
         val placement = if (restore) activePlacement else selected?.let { Placement(it, owner) }
         placement ?: return
+        if (!restore && confirmation?.placement != placement) return
+        val legacyTicket = confirmation?.legacyTicket
         val options = apps.associateBy { it.component }
         val artwork = modTheme
         val art = artwork?.takeIf { it.art.isNotEmpty() }
@@ -413,6 +467,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                             restored
                         } else {
                             check(installations.canInstall(placement)) { "WALLPAPER_USED_BY_OTHER_THEME" }
+                            checkLegacyOwner(legacyTicket)
                             if (owner != null) check(ModPackageStore.usableWallpaperTheme(this@AiRearWallpaperEditorActivity, owner) != null)
                             val binding = java.util.UUID.randomUUID().toString().replace("-", "")
                             check(targetsValid {
@@ -438,7 +493,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                                 else -> null
                             }
                             if (owner != null) check(prefs.edit().putString(placement.titleKey, title).commit())
-                            journal.apply(placement.id) { original, destination ->
+                            val renderer = AiRearWallpaperJournal.Renderer { original, destination ->
                                 AiRearWallpaperArchive.write(original, destination, viewport, configuration, badges,
                                     AiRearWallpaperArchive.Badge(getString(R.string.ai_rear_all_apps),
                                         getDrawable(R.drawable.ic_ai_rear_all_apps)?.let(::encodedIcon)),
@@ -446,6 +501,8 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                                     AiRearWallpaperArchive.Activation(packageName,
                                         AiRearWallpaperActivationActivity::class.java.name, binding), art)
                             }
+                            if (legacyTicket == null) journal.apply(placement.id, renderer)
+                            else journal.adopt(placement.id, legacyTicket, renderer)
                             check(prefs.edit().putString(placement.bindingKey,
                                 AiRearWallpaperBinding(placement.id, binding, configuration, artwork?.buttons ?: 6).encode()).commit())
                             true
@@ -469,7 +526,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                 android.util.Log.w("AiRearWallpaper", (if (restore) "restore" else "apply") +
                     " failed: " + it.javaClass.simpleName +
                     (it.message?.takeIf { code -> code.matches(Regex("[A-Z_]{4,60}")) }?.let { code -> " " + code } ?: ""))
-                getString(if (it.message == "WALLPAPER_USED_BY_OTHER_THEME") R.string.ai_rear_theme_occupied else R.string.ai_rear_write_error)
+                wallpaperError(it, R.string.ai_rear_write_error)
             })
         }
     }
@@ -565,7 +622,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
             service != null, active != null, standby == RearWallpaperStandby.Readiness.PREPARED,
             applying, preparing || standby == RearWallpaperStandby.Readiness.PREPARING,
             backgroundBusy, allowUnlocked, message, isModTheme = id != null, modTheme = modTheme,
-            loadingTheme = themeLoading)
+            loadingTheme = themeLoading, checkingWork = checkingWork)
         AiRearWallpaperStudio(model, scroll, ::back, { choosingApps = true },
             {
                 AiRearWallpaperSupport.setUnlockedLaunchEnabled(this, it)
@@ -578,7 +635,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                         choosingWork = true
                         if (slots == null && !loading) loadSlots()
                     }
-                    AiRearStudioAction.REPLACE -> confirmReplace = true
+                    AiRearStudioAction.REPLACE -> requestReplacement()
                     AiRearStudioAction.PREPARE -> prepareShortcuts()
                     AiRearStudioAction.DISARM -> RearWallpaperStandby.disarm()
                     AiRearStudioAction.RESTORE -> changeWallpaper(true)
@@ -594,15 +651,21 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
             },
             thumbnail = { modifier -> WorkThumbnail(work, modifier) })
         if (id == null) AppearanceSheet()
-        WindowDialog(show = confirmReplace, title = getString(R.string.ai_rear_backup_replace),
-            onDismissRequest = { confirmReplace = false }) {
-            Text(getString(R.string.ai_rear_grid_confirm), color = AppPalette.text())
+        val replacement = confirmReplace
+        val legacy = replacement?.legacyTicket != null
+        WindowDialog(show = replacement != null,
+            title = getString(if (legacy) R.string.ai_rear_legacy_title else R.string.ai_rear_backup_replace),
+            onDismissRequest = { confirmReplace = null }) {
+            Text(getString(if (legacy) R.string.ai_rear_legacy_confirm else R.string.ai_rear_grid_confirm),
+                color = AppPalette.text())
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(getString(android.R.string.cancel), { confirmReplace = false }, modifier = Modifier.weight(1f),
+                TextButton(getString(android.R.string.cancel), { confirmReplace = null }, modifier = Modifier.weight(1f),
                     minHeight = 48.dp)
-                TextButton(getString(android.R.string.ok), {
-                    confirmReplace = false
-                    changeWallpaper(false)
+                TextButton(getString(if (legacy) R.string.ai_rear_legacy_continue else android.R.string.ok), {
+                    if (replacement != null && replacement == confirmReplace) {
+                        confirmReplace = null
+                        changeWallpaper(false, replacement)
+                    }
                 }, modifier = Modifier.weight(1f), minHeight = 48.dp, colors = ButtonDefaults.textButtonColorsPrimary())
             }
         }

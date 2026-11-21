@@ -31,9 +31,9 @@ public class TaskService extends ITaskService.Stub {
     private static final String TAG = "TaskService";
     private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
             BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
-    // Replace a Shizuku process left from the pre-lockscreen notification RPC contract.
-    static final int USER_SERVICE_CONTRACT_VERSION = 110;
-    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 114 : USER_SERVICE_CONTRACT_VERSION;
+    // Rebind older Shizuku user services before using the wallpaper adoption RPCs.
+    static final int USER_SERVICE_CONTRACT_VERSION = 111;
+    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 115 : USER_SERVICE_CONTRACT_VERSION;
     private final Object mainTaskFocusLock = new Object();
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {
@@ -102,6 +102,27 @@ public class TaskService extends ITaskService.Stub {
             requireAiWallpaperCaller();
             return aiWallpapers.restore(id, installed, preimage);
         } catch (java.io.IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
+    }
+
+    @Override public String inspectAiRearWallpaperReplacement(String id, android.os.ParcelFileDescriptor destination) {
+        try (java.io.OutputStream out = destination == null ? null :
+                new android.os.ParcelFileDescriptor.AutoCloseOutputStream(destination)) {
+            requireAiWallpaperCaller();
+            return aiWallpapers.inspectReplacement(id, out);
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException(failure.getMessage(), failure);
+        }
+    }
+
+    @Override public String adoptAiRearWallpaper(String id, String ticket, android.os.ParcelFileDescriptor original,
+            android.os.ParcelFileDescriptor replacement) {
+        try (java.io.InputStream expected = new android.os.ParcelFileDescriptor.AutoCloseInputStream(original);
+             java.io.InputStream candidate = new android.os.ParcelFileDescriptor.AutoCloseInputStream(replacement)) {
+            requireAiWallpaperCaller();
+            return aiWallpapers.adopt(id, ticket, expected, candidate);
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException(failure.getMessage(), failure);
+        }
     }
 
     @Override public String getRearCastViewport() {

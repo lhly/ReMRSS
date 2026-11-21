@@ -102,8 +102,9 @@ internal data class AiRearStudioModel(
     val isModTheme: Boolean = false,
     val modTheme: AiRearModWallpaperTheme? = null,
     val loadingTheme: Boolean = false,
+    val checkingWork: Boolean = false,
 ) {
-    val busy get() = applying || preparing || editingImage || loadingTheme
+    val busy get() = applying || preparing || editingImage || loadingTheme || checkingWork
     val usable get() = !isModTheme || modTheme != null
     val customControls get() = modTheme?.art?.isNotEmpty() == true
     val visibleSlots get() = if (customControls) checkNotNull(modTheme).buttons else if (grid.allApps) 5 else 6
@@ -245,6 +246,7 @@ internal data class AiRearStudioModel(
 
 @Composable private fun StudioStatus(model: AiRearStudioModel) {
     val id = when {
+        model.checkingWork -> R.string.ai_rear_checking_work
         model.applying -> if (model.installed) R.string.ai_rear_restoring else R.string.ai_rear_replacing
         model.preparing -> R.string.ai_rear_preparing
         model.loadingTheme -> R.string.ai_rear_loading_theme

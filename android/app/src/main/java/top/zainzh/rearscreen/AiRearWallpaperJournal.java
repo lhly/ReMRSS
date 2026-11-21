@@ -19,6 +19,12 @@ final class AiRearWallpaperJournal {
         void readArchive(String id, File destination) throws IOException;
         void replaceArchive(String id, File expected, File candidate) throws IOException;
         boolean restoreArchive(String id, File applied, File original) throws IOException;
+        default void readOriginalForAdoption(String id, String ticket, File destination) throws IOException {
+            throw new IOException("WALLPAPER_ADOPTION_UNAVAILABLE");
+        }
+        default String adoptArchive(String id, String ticket, File original, File candidate) throws IOException {
+            throw new IOException("WALLPAPER_ADOPTION_UNAVAILABLE");
+        }
     }
 
     enum State { NONE, ORIGINAL, APPLIED, CONFLICT }
@@ -57,13 +63,23 @@ final class AiRearWallpaperJournal {
     }
 
     void apply(String id, Renderer renderer) throws IOException {
+        install(id, null, renderer);
+    }
+
+    void adopt(String id, String ticket, Renderer renderer) throws IOException {
+        if (ticket == null || ticket.isEmpty()) throw new IOException("WALLPAPER_ADOPTION_UNVERIFIED");
+        install(id, ticket, renderer);
+    }
+
+    private void install(String id, String ticket, Renderer renderer) throws IOException {
         if (!AiRearWallpaperFiles.validId(id)) throw new IOException("INVALID_WALLPAPER_ID");
         if (!root.isDirectory() && !root.mkdirs()) throw new IOException("WALLPAPER_BACKUP_UNAVAILABLE");
         if (active().exists()) throw new IOException("RESTORE_WALLPAPER_FIRST");
         File stage = Files.createTempDirectory(root.toPath(), "backup-").toFile();
         try {
             File original = new File(stage, "original.zip");
-            store.readArchive(id, original);
+            if (ticket == null) store.readArchive(id, original);
+            else store.readOriginalForAdoption(id, ticket, original);
             AiRearWallpaperFiles.checkArchive(original);
             try (FileOutputStream sync = new FileOutputStream(original, true)) { sync.getFD().sync(); }
             File replacement = new File(stage, "replacement.zip");
@@ -78,7 +94,15 @@ final class AiRearWallpaperJournal {
             }
             // Publish backup before crossing the device write boundary. The caller may lose the reply.
             Files.move(stage.toPath(), active().toPath(), StandardCopyOption.ATOMIC_MOVE);
-            store.replaceArchive(id, original(), candidate());
+            if (ticket == null) store.replaceArchive(id, original(), candidate());
+            else {
+                String rejection = store.adoptArchive(id, ticket, original(), candidate());
+                if (!rejection.isEmpty()) {
+                    // A definite rejection guarantees no move. Don't reserve an orphaned placement.
+                    discardActive();
+                    throw new IOException(rejection);
+                }
+            }
             if (state() != State.APPLIED) throw new IOException("WALLPAPER_REPLACE_UNVERIFIED");
         } finally { removeWorkspace(stage); }
     }
@@ -101,11 +125,15 @@ final class AiRearWallpaperJournal {
         // Restore is also the recovery entry point if the resource name disappeared during apply.
         if (!store.restoreArchive(id, candidate(), original())) return State.CONFLICT;
         if (state() != State.ORIGINAL) throw new IOException("WALLPAPER_RESTORE_UNVERIFIED");
+        discardActive();
+        return State.ORIGINAL;
+    }
+
+    private void discardActive() throws IOException {
         // Atomically detach the journal before cleaning. A crash cannot leave a half-deleted active backup.
         File cleanup = new File(root, "restored-" + java.util.UUID.randomUUID());
         Files.move(active().toPath(), cleanup.toPath(), StandardCopyOption.ATOMIC_MOVE);
         removeWorkspace(cleanup);
-        return State.ORIGINAL;
     }
 
     private static boolean same(File file, File expected) throws IOException {

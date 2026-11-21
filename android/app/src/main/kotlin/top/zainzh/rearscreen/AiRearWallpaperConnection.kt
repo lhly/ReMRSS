@@ -16,6 +16,29 @@ internal class AiRearWallpaperConnection(private val remote: ITaskService) : AiR
             remote.copyAiRearWallpaper(id, thumbnail, it)
         }
 
+    fun inspectReplacement(id: String): String? {
+        if (!TaskServiceManager.isConnectedServiceCurrent(remote)) throw IOException("SHIZUKU_DISCONNECTED")
+        return remote.inspectAiRearWallpaperReplacement(id, null).takeIf(String::isNotEmpty)
+    }
+
+    override fun readOriginalForAdoption(id: String, ticket: String, destination: File) {
+        if (!TaskServiceManager.isConnectedServiceCurrent(remote)) throw IOException("SHIZUKU_DISCONNECTED")
+        ParcelFileDescriptor.open(destination, ParcelFileDescriptor.MODE_CREATE or
+            ParcelFileDescriptor.MODE_WRITE_ONLY or ParcelFileDescriptor.MODE_TRUNCATE).use {
+            if (remote.inspectAiRearWallpaperReplacement(id, it) != ticket)
+                throw IOException("WALLPAPER_ADOPTION_CHANGED")
+        }
+    }
+
+    override fun adoptArchive(id: String, ticket: String, original: File, replacement: File): String {
+        if (!TaskServiceManager.isConnectedServiceCurrent(remote)) throw IOException("SHIZUKU_DISCONNECTED")
+        return ParcelFileDescriptor.open(original, ParcelFileDescriptor.MODE_READ_ONLY).use { expected ->
+            ParcelFileDescriptor.open(replacement, ParcelFileDescriptor.MODE_READ_ONLY).use { candidate ->
+                remote.adoptAiRearWallpaper(id, ticket, expected, candidate)
+            }
+        }
+    }
+
     override fun replaceArchive(id: String, original: File, replacement: File) {
         if (!TaskServiceManager.isConnectedServiceCurrent(remote)) throw IOException("SHIZUKU_DISCONNECTED")
         ParcelFileDescriptor.open(original, ParcelFileDescriptor.MODE_READ_ONLY).use { expected ->

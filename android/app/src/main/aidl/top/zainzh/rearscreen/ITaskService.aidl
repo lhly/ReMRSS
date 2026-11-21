@@ -359,5 +359,10 @@ interface ITaskService {
     String startLockedRearNotificationHomeCast(in Surface surface, String readerPath, int host, int density,
             String packageName, IBinder owner, IRearGestureListener gestures, String viewport,
             boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) = 101;
+    /** Read-only check of the exact legacy overlay and its original. No archive is copied to a null destination. */
+    String inspectAiRearWallpaperReplacement(String id, in @nullable ParcelFileDescriptor originalDestination) = 102;
+    /** Replace the verified legacy overlay in place. A nonempty reply is a confirmed no-write error. */
+    String adoptAiRearWallpaper(String id, String ticket, in ParcelFileDescriptor original,
+            in ParcelFileDescriptor replacement) = 103;
 }
 

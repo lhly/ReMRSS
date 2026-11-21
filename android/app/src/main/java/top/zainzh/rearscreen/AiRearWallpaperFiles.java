@@ -243,21 +243,8 @@ final class AiRearWallpaperFiles {
             throw new IOException("RESTORE_WALLPAPER_FIRST");
         File staged = Files.createTempFile(slot.toPath(), ".remrss-", ".tmp").toFile();
         try {
-            try (FileOutputStream sink = new FileOutputStream(staged)) {
-                transfer(candidate, sink, MAX_RESOURCE);
-                sink.getFD().sync();
-            }
-            checkArchive(staged);
             PosixFileAttributes before = Files.readAttributes(resource.toPath(), PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            PosixFileAttributes candidateMode = Files.readAttributes(staged.toPath(), PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            // Compare against the untouched OEM metadata owner. A previous Shell-owned 0600
-            // resource is not a readable baseline just because Shell also owns the new candidate.
-            var themeOwner = Files.getOwner(child(slot, "description.xml").toPath(), LinkOption.NOFOLLOW_LINKS);
-            if (!candidateMode.owner().equals(themeOwner) && !before.permissions().contains(PosixFilePermission.OTHERS_READ))
-                throw new IOException("WALLPAPER_ACCESS_UNSUPPORTED");
-            Files.setPosixFilePermissions(staged.toPath(), before.permissions());
-            if (!Files.getPosixFilePermissions(staged.toPath()).equals(before.permissions()))
-                throw new IOException("WALLPAPER_ACCESS_UNVERIFIED");
+            prepareCandidate(slot, staged, candidate, before);
             if (!sameBytes(resource, expected)) throw new IOException("WALLPAPER_CHANGED");
             PosixFileAttributes after = Files.readAttributes(child(slot(id), "rearscreen").toPath(),
                     PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
@@ -278,6 +265,121 @@ final class AiRearWallpaperFiles {
                 throw failure;
             }
         } finally { Files.deleteIfExists(staged.toPath()); }
+    }
+
+    private static void prepareCandidate(File slot, File staged, InputStream candidate,
+            PosixFileAttributes original) throws IOException {
+        try (FileOutputStream sink = new FileOutputStream(staged)) {
+            transfer(candidate, sink, MAX_RESOURCE);
+            sink.getFD().sync();
+        }
+        checkArchive(staged);
+        // A previous Shell-owned 0600 resource is not a readable baseline just because Shell
+        // also owns the candidate. Compare with the untouched OEM description's owner.
+        var themeOwner = Files.getOwner(child(slot, "description.xml").toPath(), LinkOption.NOFOLLOW_LINKS);
+        if (!Files.getOwner(staged.toPath()).equals(themeOwner) &&
+                !original.permissions().contains(PosixFilePermission.OTHERS_READ))
+            throw new IOException("WALLPAPER_ACCESS_UNSUPPORTED");
+        Files.setPosixFilePermissions(staged.toPath(), original.permissions());
+        if (!Files.getPosixFilePermissions(staged.toPath()).equals(original.permissions()))
+            throw new IOException("WALLPAPER_ACCESS_UNVERIFIED");
+    }
+
+    private static PosixFileAttributes attributes(File file) throws IOException {
+        return Files.readAttributes(file.toPath(), PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+    }
+
+    private static String revision(PosixFileAttributes file) {
+        return file.fileKey() + ":" + file.size() + ":" + file.lastModifiedTime() + ":" +
+                file.owner().getName() + ":" + file.group().getName() + ":" +
+                java.nio.file.attribute.PosixFilePermissions.toString(file.permissions());
+    }
+
+    private static final class LegacySnapshot {
+        final File resource;
+        final File original;
+        final PosixFileAttributes resourceAttrs;
+        final PosixFileAttributes originalAttrs;
+        final String ticket;
+
+        LegacySnapshot(String owner, File resource, File original, PosixFileAttributes resourceAttrs,
+                PosixFileAttributes originalAttrs) {
+            this.resource = resource;
+            this.original = original;
+            this.resourceAttrs = resourceAttrs;
+            this.originalAttrs = originalAttrs;
+            ticket = owner + "\n" + resource.getParentFile().getName() + "\n" +
+                    revision(resourceAttrs) + "\n" + revision(originalAttrs);
+        }
+
+        boolean unchanged() throws IOException {
+            return sameRevision(resourceAttrs, attributes(resource)) &&
+                    sameRevision(originalAttrs, attributes(original));
+        }
+
+        private static boolean sameRevision(PosixFileAttributes expected, PosixFileAttributes actual) {
+            return actual.isRegularFile() && !changed(expected, actual)
+                    && expected.owner().equals(actual.owner()) && expected.group().equals(actual.group())
+                    && expected.permissions().equals(actual.permissions());
+        }
+    }
+
+    private LegacySnapshot legacy(File slot) throws IOException {
+        requireRearResource(slot);
+        File resource = child(slot, "rearscreen");
+        PosixFileAttributes live = attributes(resource);
+        File backup = new File(slot, PREIMAGE);
+        PosixFileAttributes saved = null;
+        if (!Files.notExists(backup.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                backup = child(slot, PREIMAGE);
+                saved = attributes(backup);
+            } catch (IOException unavailable) {
+                throw new IOException("WALLPAPER_LEGACY_BACKUP_INVALID", unavailable);
+            }
+        }
+        String owner = AiRearWallpaperLegacy.owner(resource, saved == null ? null : backup);
+        if (owner == null) return null;
+        LegacySnapshot match = new LegacySnapshot(owner, resource, backup, live, saved);
+        if (!match.unchanged()) throw new IOException("WALLPAPER_ADOPTION_CHANGED");
+        return match;
+    }
+
+    /** With no destination this is wholly read-only; a confirmed install can copy the original. */
+    synchronized String inspectReplacement(String id, OutputStream originalDestination) throws IOException {
+        LegacySnapshot match = legacy(slot(id));
+        if (originalDestination == null) return match == null ? "" : match.ticket;
+        if (match == null) throw new IOException("WALLPAPER_ADOPTION_CHANGED");
+        try (InputStream input = new FileInputStream(match.original)) {
+            transfer(input, originalDestination, MAX_RESOURCE);
+        }
+        if (!match.unchanged()) throw new IOException("WALLPAPER_ADOPTION_CHANGED");
+        return match.ticket;
+    }
+
+    /** Swap the old overlay directly. The preimage is never moved or rewritten here. */
+    synchronized String adopt(String id, String ticket, InputStream expectedOriginal,
+            InputStream candidate) throws IOException {
+        File staged = null;
+        try {
+            LegacySnapshot match;
+            try {
+                File slot = slot(id);
+                match = legacy(slot);
+                if (match == null || !match.ticket.equals(ticket) ||
+                        !sameBytes(match.original, expectedOriginal))
+                    return "WALLPAPER_ADOPTION_CHANGED";
+                staged = Files.createTempFile(slot.toPath(), ".remrss-", ".tmp").toFile();
+                prepareCandidate(slot, staged, candidate, match.originalAttrs);
+                if (!match.unchanged()) return "WALLPAPER_ADOPTION_CHANGED";
+            } catch (IOException beforeMove) {
+                // No move was attempted: the journal can be dropped, and the old work stays in place.
+                return "WALLPAPER_ADOPTION_NOT_WRITTEN";
+            }
+            Files.move(staged.toPath(), match.resource.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            return "";
+        } finally { if (staged != null) Files.deleteIfExists(staged.toPath()); }
     }
 
     private static boolean changed(BasicFileAttributes before, BasicFileAttributes after) {

@@ -34,6 +34,15 @@
     <string name="ai_rear_shortcuts_app_failed">無法開啟 App</string>
     <string name="ai_rear_button_settings">快捷啟動選項</string>
     <string name="ai_rear_grid_cast_title">套用到背螢幕</string>
+    <string name="ai_rear_checking_work">正在檢查這張桌布…</string>
+    <string name="ai_rear_legacy_title">替換這張桌布上的舊主題？</string>
+    <string name="ai_rear_legacy_confirm">這張桌布曾由 ReMRSS 替換。繼續會用目前設定更新背屏啟動器，並保留原畫備份。</string>
+    <string name="ai_rear_legacy_continue">繼續替換</string>
+    <string name="ai_rear_legacy_owner_installed">另一個已安裝的 ReMRSS 版本仍在使用這張桌布。請選擇其他桌布，或在原版本還原原畫。</string>
+    <string name="ai_rear_legacy_backup_invalid">這張桌布的原畫備份無法確認。請選擇其他桌布。</string>
+    <string name="ai_rear_legacy_unverified">無法確認這張桌布上的舊主題來自 ReMRSS。請選擇其他桌布。</string>
+    <string name="ai_rear_legacy_changed">確認期間這張桌布發生了變更。請重新檢查後再替換。</string>
+    <string name="ai_rear_legacy_not_written">無法寫入這張桌布，舊主題和原畫備份未變更。</string>
     <string name="ai_rear_grid_confirm">只替換所選作品並保留備份。之後請在妙享背屏重新套用。請選擇適合在主螢幕鎖定時使用的應用程式。</string>
     <string name="ai_rear_complete_grid">目前須填滿 6 格才能替換桌布，「所有應用程式」可占 1 格。</string>
     <string name="ai_rear_search_apps">搜尋應用程式</string>

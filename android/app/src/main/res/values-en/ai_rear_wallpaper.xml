@@ -36,6 +36,15 @@
     <string name="ai_rear_shortcuts_app_failed">Can’t open app</string>
     <string name="ai_rear_button_settings">Shortcut options</string>
     <string name="ai_rear_grid_cast_title">Apply to the rear screen</string>
+    <string name="ai_rear_checking_work">Checking this wallpaper…</string>
+    <string name="ai_rear_legacy_title">Replace the previous theme?</string>
+    <string name="ai_rear_legacy_confirm">ReMRSS has already replaced this wallpaper. Continue to use your current launcher settings and keep the original backup.</string>
+    <string name="ai_rear_legacy_continue">Continue</string>
+    <string name="ai_rear_legacy_owner_installed">Another installed version of ReMRSS still uses this wallpaper. Pick another one or restore it in that version.</string>
+    <string name="ai_rear_legacy_backup_invalid">The original backup could not be verified. Pick another wallpaper.</string>
+    <string name="ai_rear_legacy_unverified">ReMRSS could not verify the previous theme on this wallpaper. Pick another wallpaper.</string>
+    <string name="ai_rear_legacy_changed">This wallpaper changed while you were confirming. Check it and try again.</string>
+    <string name="ai_rear_legacy_not_written">Could not write this wallpaper. The previous theme and the original backup are unchanged.</string>
     <string name="ai_rear_grid_confirm">Only the selected work is replaced, with a backup. Apply it again in Xiaomi rear screen settings. Choose apps you are comfortable using while the main screen is locked.</string>
     <string name="ai_rear_complete_grid">Fill all six tiles to replace the wallpaper. All apps can occupy one tile.</string>
     <string name="ai_rear_search_apps">Find an app</string>

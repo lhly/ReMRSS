@@ -36,6 +36,15 @@
     <string name="ai_rear_shortcuts_app_failed">无法打开应用</string>
     <string name="ai_rear_button_settings">快捷启动选项</string>
     <string name="ai_rear_grid_cast_title">应用到背屏</string>
+    <string name="ai_rear_checking_work">正在检查这张壁纸…</string>
+    <string name="ai_rear_legacy_title">替换这张壁纸上的旧主题？</string>
+    <string name="ai_rear_legacy_confirm">这张壁纸曾由 ReMRSS 替换。继续会用当前配置更新背屏启动器，原画备份会保留。</string>
+    <string name="ai_rear_legacy_continue">继续替换</string>
+    <string name="ai_rear_legacy_owner_installed">这张壁纸仍由已安装的另一版本 ReMRSS 使用。请选择其他壁纸，或在原版本中恢复原画。</string>
+    <string name="ai_rear_legacy_backup_invalid">这张壁纸的原画备份无法确认。请选择其他壁纸。</string>
+    <string name="ai_rear_legacy_unverified">无法确认这张壁纸上的旧主题来自 ReMRSS。请选择其他壁纸。</string>
+    <string name="ai_rear_legacy_changed">确认期间这张壁纸发生了变化。请重新检查后再替换。</string>
+    <string name="ai_rear_legacy_not_written">无法写入这张壁纸，旧主题和原画备份均未改动。</string>
     <string name="ai_rear_grid_confirm">只替换选中的作品，并保留原作备份。替换后请在妙享背屏重新应用。锁屏时也能点按快捷键，请选择适合在锁屏使用的应用。</string>
     <string name="ai_rear_complete_grid">当前需填满 6 格才能替换壁纸，「全部应用」可占 1 格。</string>
     <string name="ai_rear_search_apps">搜索应用</string>
