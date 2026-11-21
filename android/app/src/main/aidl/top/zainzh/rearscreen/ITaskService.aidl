@@ -4,6 +4,7 @@ import android.view.Surface;
 import android.os.ParcelFileDescriptor;
 import top.zainzh.rearscreen.IRearGestureListener;
 import top.zainzh.rearscreen.IRearWallpaperOutputReleased;
+import top.zainzh.rearscreen.IRearNotificationTarget;
 import top.zainzh.rearscreen.ISceneTaskActionGate;
 import top.zainzh.rearscreen.ITaskFocusActionGate;
 import top.zainzh.rearscreen.IPhysicalCastReaderLifecycle;
@@ -343,5 +344,9 @@ interface ITaskService {
             boolean compatibility, int rotation, boolean full, ISceneTaskActionGate launchGate) = 95;
     /** Releases the exact wallpaper cast. The callback is not a terminal cleanup acknowledgement. */
     void stopParkedWallpaperCast(String sessionId, IRearWallpaperOutputReleased receipt) = 96;
+    String getRearNotificationRenderPlan(String packageName, int density, boolean compatibility, boolean full) = 97;
+    String startRearNotificationCast(in Surface surface, String readerPath, int host, int density,
+            String packageName, IBinder owner, IRearGestureListener gestures, String viewport,
+            boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) = 98;
 }
 

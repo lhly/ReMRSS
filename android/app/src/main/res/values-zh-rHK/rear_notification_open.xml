@@ -1,0 +1,5 @@
+<resources>
+    <string name="rear_notification_open_unlock">請先解鎖手機，再開啟通知詳情</string>
+    <string name="rear_notification_open_busy">背螢幕使用中，請先離開目前頁面</string>
+    <string name="rear_notification_open_unavailable">這則通知無法在背螢幕開啟</string>
+</resources>

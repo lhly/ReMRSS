@@ -478,6 +478,10 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private final BroadcastReceiver screenReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
+                if (notificationCast != null) {
+                    finish();
+                    return;
+                }
                 boolean wasPrimaryInteractive = primaryInteractive;
                 primaryInteractive = false;
                 VirtualCastOutputRecoveryPolicy.PrimaryScreenOffDecision decision =
@@ -556,6 +560,8 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
             main.postDelayed(this, 1000);
         }
     };
+    private volatile RearNotificationCastRequest notificationCast;
+
     private final ServiceConnection connection = new ServiceConnection() {
         public void onServiceConnected(ComponentName name, IBinder binder) {
             ITaskService connected = ITaskService.Stub.asInterface(binder);
@@ -567,7 +573,10 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                     RearCastViewport safe = RearCastGeometry.decode(connected.getRearCastViewport());
                     int task = getIntent().getIntExtra("task", -1), dpi = getIntent().getIntExtra("dpi", VirtualCastRequest.DEFAULT_DENSITY_DPI);
                     String component = getIntent().getStringExtra("component");
-                    JSONObject plan = new JSONObject(connected.getRearCastRenderPlan(task, component, dpi, false, false));
+                    RearNotificationCastRequest notice = notificationCast;
+                    JSONObject plan = new JSONObject(notice == null
+                            ? connected.getRearCastRenderPlan(task, component, dpi, false, false)
+                            : connected.getRearNotificationRenderPlan(notice.packageName, dpi, false, false));
                     String pkg = plan.getString("package");
                     boolean compatibility = RearDensityPreferences.enabled(VirtualRearHostActivity.this, pkg);
                     int layoutDpi = RearCastCompatibility.layoutDensity(compatibility, dpi,
@@ -577,8 +586,9 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                     boolean requestedFull = getIntent().hasExtra("fullViewport")
                             ? getIntent().getBooleanExtra("fullViewport", false) : presentation.full;
                     if (compatibility || requestedFull || layoutDpi != dpi)
-                        plan = new JSONObject(connected.getRearCastRenderPlan(task, component, layoutDpi, compatibility,
-                                requestedFull));
+                        plan = new JSONObject(notice == null
+                                ? connected.getRearCastRenderPlan(task, component, layoutDpi, compatibility, requestedFull)
+                                : connected.getRearNotificationRenderPlan(notice.packageName, layoutDpi, compatibility, requestedFull));
                     boolean parkedWallpaper = wallpaperStandby != null;
                     // Parked wallpaper uses its existing lightweight, non-IME render path
                     // unless the user explicitly configured density compatibility for this App.
@@ -1098,6 +1108,10 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         if (!BuildConfig.VIRTUAL_CAST_ENABLED || !RearDisplay.isRear(getDisplay().getDisplayId()) || getIntent().getBooleanExtra("stop", false)) {
             finish(); return;
         }
+        if (getIntent().hasExtra(RearNotificationCastRequest.EXTRA)) {
+            if (!acceptNotificationCast(getIntent())) finish();
+            return;
+        }
         if (getIntent().getBooleanExtra(RearWallpaperStandby.PREPARE, false)) {
             prepareWallpaperStandby(getIntent());
             return;
@@ -1106,6 +1120,41 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         // command to this singleInstance. Reject an empty host only after pending intents arrive.
         if (getIntent().getIntExtra("task", -1) < 0 && getIntent().getStringExtra("component") == null) return;
         initializePresentation();
+    }
+
+    private boolean acceptNotificationCast(Intent intent) {
+        if (root != null || session != null || ending || getDisplay() == null
+                || (instance != null && instance != this) || wallpaperPicker != null) return false;
+        RearNotificationCastRequest request = RearNotificationCastRequest.accept(this,
+                intent.getStringExtra(RearNotificationCastRequest.EXTRA), getDisplay().getDisplayId());
+        if (request == null) return false;
+        if (wallpaperStandby != null) {
+            wallpaperStandby.close();
+            wallpaperStandby = null;
+        }
+        notificationCast = request;
+        setIntent(intent);
+        initializePresentation();
+        return true;
+    }
+
+    private IRearNotificationTarget notificationTarget(RearNotificationCastRequest request, Surface surface) {
+        return new IRearNotificationTarget.Stub() {
+            @Override public boolean launch(int displayId) {
+                if (ending || notificationCast != request || !surface.isValid()) return false;
+                java.util.concurrent.FutureTask<Boolean> send = new java.util.concurrent.FutureTask<>(
+                        () -> !ending && notificationCast == request && surface.isValid()
+                                && request.launch(VirtualRearHostActivity.this, root, displayId));
+                if (!main.post(send)) return false;
+                try { return send.get(1500, java.util.concurrent.TimeUnit.MILLISECONDS); }
+                catch (InterruptedException cancelled) { Thread.currentThread().interrupt(); }
+                catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException unavailable) {
+                    android.util.Log.i("VirtualRearHost", "rear_notification_send_unavailable");
+                }
+                send.cancel(false); // If the main thread has not begun, do not launch after rollback.
+                return false;
+            }
+        };
     }
 
     private void prepareWallpaperStandby(Intent intent) {
@@ -1166,7 +1215,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private void initializePresentation() {
         ending = false;
         instance = this;
-        setShowWhenLocked(true);
+        setShowWhenLocked(notificationCast == null);
         getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         getWindow().setDecorFitsSystemWindows(false);
         if (getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE).getBoolean("flutter.keep_screen_on_enabled", true))
@@ -1433,6 +1482,12 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                     status = remote.startParkedWallpaperCast(surface, path, host,
                             requestedLayoutDensity, getIntent().getStringExtra("component"), owner, gestures,
                             RearCastGeometry.encode(viewport), densityCompatibility, initialRotation, initialFull, gate);
+                } else if (notificationCast != null) {
+                    RearNotificationCastRequest notice = notificationCast;
+                    if (!notice.usable(this)) throw new IllegalStateException("rear_notification_stale");
+                    status = remote.startRearNotificationCast(surface, path, host, requestedLayoutDensity,
+                            notice.packageName, owner, gestures, RearCastGeometry.encode(viewport), densityCompatibility,
+                            initialRotation, initialFull, notificationTarget(notice, surface));
                 } else if (operationId == null) {
                     status = remote.startRearVirtualCast(surface, path, target, host,
                             requestedLayoutDensity, getIntent().getStringExtra("component"), owner, gestures,
@@ -1471,6 +1526,13 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                         if (wallpaperStartCancelled) exitPresentation();
                     });
                 }
+                RearNotificationCastRequest notice = notificationCast;
+                if (notice != null) main.post(() -> {
+                    if (isFinishing() || isDestroyed() || ending || !RearNotificationCastRequest.unlocked(this)
+                            || !RearAnimationManager.notificationProjectionStarted(this, notice.session)) {
+                        finish();
+                    }
+                });
                 main.post(this::updateCameraGapBattery);
                 if (densityCompatibility && !"unrestricted".equals(state.optString("sizePolicy")))
                     main.post(() -> { if (!ending) android.widget.Toast.makeText(this, R.string.rear_density_partial_support,
@@ -1722,6 +1784,11 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     }
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (intent.hasExtra(RearNotificationCastRequest.EXTRA)) {
+            acceptNotificationCast(intent);
+            return;
+        }
+
         if (intent.getBooleanExtra(RearWallpaperStandby.PREPARE, false) && !intent.getBooleanExtra("stop", false)) {
             if (wallpaperStandby == null && root == null && !isFinishing()) prepareWallpaperStandby(intent);
             return;

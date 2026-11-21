@@ -127,6 +127,13 @@ public class RearAnimationManager {
         finishTransientAnimation(context);
     }
 
+    static synchronized boolean notificationProjectionStarted(android.content.Context context, long notificationSession) {
+        if (!isCurrent(AnimationType.NOTIFICATION, notificationSession)) return false;
+        NotificationService.ordinaryNotificationUserHandled(notificationSession);
+        projectionStarted(context);
+        return true;
+    }
+
     /** Existing physical URI/Tile owner, called only after the task move was verified successful. */
     static synchronized void projectionStarted(android.content.Context context, int taskId, String packageName) {
         top.zainzh.rearscreen.platform.RearCapabilityCore.onLegacyProjectionStarted(context, taskId, packageName);

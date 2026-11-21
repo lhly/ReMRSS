@@ -116,6 +116,59 @@ class SettingsComposeTest {
             assertEquals(setOf("outside.app"), prefs.getStringSet("notification_selected_apps", emptySet()))
         } finally { prefs.edit().putStringSet("notification_selected_apps", old).commit() }
     }
+    @Test fun notificationTapModeKeepsLegacyChoicesAndPersistsRearChoice() {
+        val prefs = NativePreferences(compose.activity)
+        val oldRear = prefs.getBoolean(RearNotificationCastRequest.PREF)
+        val oldDismiss = prefs.isNotificationDismissOnly()
+        assertEquals(s(R.string.ui_notification_click_open_rear), s("notification_click_open_rear"))
+        fun openRules() {
+            tab("notifications_title")
+            compose.onNodeWithTag("notifications_list").performScrollToNode(hasText(s("notification_rules")))
+            compose.onNodeWithText(s("notification_rules")).performClick()
+        }
+        fun scrollToChoice() {
+            compose.onNodeWithTag("notification_rules_list")
+                .performScrollToNode(hasText(s("notification_click_action")))
+        }
+        fun openChoices() {
+            scrollToChoice()
+            compose.onNodeWithText(s("notification_click_action")).performClick()
+        }
+        fun pick(index: Int, label: String) {
+            compose.onNodeWithTag("modal_action_$index").assertTextContains(s(label)).performScrollTo().performClick()
+        }
+        try {
+            openRules()
+            openChoices()
+            val folder = "/data/local/tmp/remrss-notification-choice"
+            fun shell(command: String) = android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand(command)).use { it.readBytes().decodeToString().trim() }
+            if (shell("getprop ro.kernel.qemu") == "1") {
+                compose.onNodeWithTag("modal_action_1").assertIsDisplayed()
+                compose.waitForIdle()
+                android.os.SystemClock.sleep(350)
+                shell("mkdir -p $folder")
+                shell("screencap -p $folder/choices.png")
+            }
+            pick(1, "notification_click_open_rear")
+            assertTrue(prefs.getBoolean(RearNotificationCastRequest.PREF))
+            assertFalse(prefs.isNotificationDismissOnly())
+            compose.activityRule.scenario.recreate()
+            scrollToChoice()
+            compose.onNodeWithText(s("notification_click_open_rear")).assertIsDisplayed()
+            openChoices()
+            pick(2, "notification_click_dismiss")
+            assertTrue(prefs.isNotificationDismissOnly())
+            assertFalse(prefs.getBoolean(RearNotificationCastRequest.PREF))
+            openChoices()
+            pick(0, "notification_click_open")
+            assertFalse(prefs.isNotificationDismissOnly())
+            assertFalse(prefs.getBoolean(RearNotificationCastRequest.PREF))
+        } finally {
+            prefs.putBoolean(RearNotificationCastRequest.PREF, oldRear)
+            prefs.putBoolean("notification_dismiss_only", oldDismiss)
+        }
+    }
     @Test fun notificationDurationDraftSurvivesRecreationAndInvalidInputStaysOpen() {
         tab("notifications_title")
         compose.onNodeWithText(s("notification_rules")).performClick()

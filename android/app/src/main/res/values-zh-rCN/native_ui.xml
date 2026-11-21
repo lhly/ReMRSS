@@ -13,8 +13,9 @@
     <string name="ui_notification_never_close" formatted="false">不自动关闭</string>
     <string name="ui_notification_never_close_help" formatted="false">通知仍有效时持续显示。保持屏幕开启会增加耗电；通知撤回或关闭此功能时仍会结束。</string>
     <string name="ui_notification_click_action" formatted="false">点击通知</string>
-    <string name="ui_notification_click_action_help" formatted="false">选择点按背屏提醒后的操作。</string>
+    <string name="ui_notification_click_action_help" formatted="false">在背屏打开详情前需先解锁手机。投放期间，点按通知胶囊仍只会关闭提醒。</string>
     <string name="ui_notification_click_open" formatted="false">在主屏打开应用</string>
+    <string name="ui_notification_click_open_rear">在背屏打开详情</string>
     <string name="ui_notification_click_dismiss" formatted="false">仅关闭背屏提醒</string>
     <string name="ui_minutes_value" formatted="false">{0} 分钟</string>
     <string name="ui_unit_seconds" formatted="false">秒</string>

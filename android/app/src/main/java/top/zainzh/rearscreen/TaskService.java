@@ -31,8 +31,8 @@ public class TaskService extends ITaskService.Stub {
     private static final String TAG = "TaskService";
     private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
             BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
-    static final int USER_SERVICE_CONTRACT_VERSION = 104;
-    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 108 : USER_SERVICE_CONTRACT_VERSION;
+    static final int USER_SERVICE_CONTRACT_VERSION = 105;
+    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 109 : USER_SERVICE_CONTRACT_VERSION;
     private final Object mainTaskFocusLock = new Object();
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {
@@ -116,6 +116,23 @@ public class TaskService extends ITaskService.Stub {
         try { return virtualCast.start(surface, path, task, host, density, component, owner, gestures, viewport, compatibility, rotation, full); }
         catch (Exception e) { throw new IllegalStateException("Rear virtual cast: " + e, e); }
     }
+    @Override public String getRearNotificationRenderPlan(String packageName, int density, boolean compatibility,
+            boolean full) {
+        if (!isHostApplicationCaller()) throw new SecurityException("Invalid notification cast caller");
+        try { return virtualCast.renderPlanForPackage(packageName, density, compatibility, full); }
+        catch (Exception e) { throw new IllegalStateException("Notification cast render plan", e); }
+    }
+
+    @Override public String startRearNotificationCast(android.view.Surface surface, String path,
+            int host, int density, String packageName, android.os.IBinder owner, IRearGestureListener gestures,
+            String viewport, boolean compatibility, int rotation, boolean full, IRearNotificationTarget target) {
+        if (!isHostApplicationCaller()) throw new SecurityException("Invalid notification cast caller");
+        try {
+            return virtualCast.startNotification(surface, path, host, density, packageName, owner, gestures,
+                    viewport, compatibility, rotation, full, target);
+        } catch (Exception e) { throw new IllegalStateException("Notification cast startup", e); }
+    }
+
     @Override public String startParkedWallpaperCast(android.view.Surface surface, String path,
             int host, int density, String component, android.os.IBinder owner, IRearGestureListener gestures,
             String viewport, boolean compatibility, int rotation, boolean full, ISceneTaskActionGate launchGate) {
@@ -3185,7 +3202,8 @@ public class TaskService extends ITaskService.Stub {
     
     @Override
     public boolean executeShellCommand(String cmd) throws RemoteException {
-        boolean notificationLaunch = cmd != null && NOTIFICATION_LAUNCH.matcher(cmd).lookingAt();
+        boolean notificationLaunch = cmd != null && (NOTIFICATION_LAUNCH.matcher(cmd).lookingAt()
+                || (cmd.startsWith("am start ") && cmd.contains(" --es " + RearNotificationCastRequest.EXTRA + " ")));
         try {
             ProcessBuilder pb = new ProcessBuilder("sh", "-c", cmd);
             Process process = pb.start();

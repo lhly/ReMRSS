@@ -25,6 +25,7 @@ final class NativePreferences {
         BOOLEAN_DEFAULTS.put("notification_dark_mode", false);
         BOOLEAN_DEFAULTS.put("notification_never_auto_close", false);
         BOOLEAN_DEFAULTS.put("notification_dismiss_only", false);
+        BOOLEAN_DEFAULTS.put(RearNotificationCastRequest.PREF, false);
     }
 
     NativePreferences(Context context) {

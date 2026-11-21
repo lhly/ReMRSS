@@ -244,6 +244,7 @@ public class RearScreenNotificationActivity extends Activity {
         
         // 点击跳转到应用（优先在背屏启动）
         container.setOnClickListener(v -> {
+            if (tryOpenOnRear()) return;
             handleOrdinaryNotificationUserAction();
             if (finishIfDismissOnly()) return;
             long clickTime = System.currentTimeMillis();
@@ -560,6 +561,7 @@ public class RearScreenNotificationActivity extends Activity {
                 
                 // 设置点击事件和自动关闭
                 container.setOnClickListener(v -> {
+                    if (tryOpenOnRear()) return;
                     handleOrdinaryNotificationUserAction();
                     if (finishIfDismissOnly()) return;
                     long clickTime = System.currentTimeMillis();
@@ -875,6 +877,44 @@ public class RearScreenNotificationActivity extends Activity {
                 : NotificationDisplayOptions.configuredDurationMillis(
                         getSharedPreferences("mrss_settings", MODE_PRIVATE).getInt("notification_duration", 10));
         lifecycleHandler.postDelayed(autoFinish, durationMs);
+    }
+
+    private long pendingRearOpenSession = Long.MIN_VALUE;
+
+    private boolean tryOpenOnRear() {
+        if (isOwnedNotification()) return false;
+        var settings = getSharedPreferences("mrss_settings", MODE_PRIVATE);
+        if (!BuildConfig.VIRTUAL_CAST_ENABLED || settings.getBoolean("notification_dismiss_only", false)
+                || !settings.getBoolean(RearNotificationCastRequest.PREF, false)) return false;
+        if (!isRearPresentationReadyOnMain() || pendingRearOpenSession == acceptedAnimationId) return true;
+        if (!RearNotificationCastRequest.unlocked(this)) {
+            showRearOpenMessage(R.string.rear_notification_open_unlock);
+            return true;
+        }
+        // Never replace a Scene or another physical owner that is temporarily under this notice.
+        if (rearTaskId > 0 || RearScreenKeeperService.physicalCastTask() != null) {
+            showRearOpenMessage(R.string.rear_notification_open_busy);
+            return true;
+        }
+        long sessionId = acceptedAnimationId;
+        pendingRearOpenSession = sessionId;
+        if (autoFinish != null) lifecycleHandler.removeCallbacks(autoFinish);
+        Runnable rejected = () -> {
+            if (isFinishing() || isDestroyed() || pendingRearOpenSession != sessionId
+                    || acceptedAnimationId != sessionId
+                    || !RearAnimationManager.isCurrent(RearAnimationManager.AnimationType.NOTIFICATION, sessionId)) return;
+            pendingRearOpenSession = Long.MIN_VALUE;
+            showRearOpenMessage(R.string.rear_notification_open_unavailable);
+            scheduleAutomaticFinish();
+        };
+        lifecycleHandler.postDelayed(rejected, 9_000L);
+        NotificationService.prepareRearNotificationCast(sessionId, currentDisplayId(), getTaskId(),
+                android.os.SystemClock.uptimeMillis(), rejected);
+        return true;
+    }
+
+    private void showRearOpenMessage(int label) {
+        android.widget.Toast.makeText(this, label, android.widget.Toast.LENGTH_SHORT).show();
     }
 
     private void handleOrdinaryNotificationUserAction() {

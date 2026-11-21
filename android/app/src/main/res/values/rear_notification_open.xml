@@ -1,0 +1,5 @@
+<resources>
+    <string name="rear_notification_open_unlock">Unlock your phone to open the notification</string>
+    <string name="rear_notification_open_busy">The rear screen is already in use</string>
+    <string name="rear_notification_open_unavailable">This notification couldn’t open on the rear screen</string>
+</resources>

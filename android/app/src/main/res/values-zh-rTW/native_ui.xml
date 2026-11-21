@@ -13,8 +13,9 @@
     <string name="ui_notification_never_close" formatted="false">不自動關閉</string>
     <string name="ui_notification_never_close_help" formatted="false">通知仍有效時持續顯示。保持螢幕開啟會增加耗電；通知撤回或關閉此功能時仍會結束。</string>
     <string name="ui_notification_click_action" formatted="false">點擊通知</string>
-    <string name="ui_notification_click_action_help" formatted="false">選擇點按背螢提醒後的操作。</string>
+    <string name="ui_notification_click_action_help" formatted="false">在背螢幕開啟詳細資訊前，請先解鎖手機。投放期間，點按通知膠囊只會關閉提醒。</string>
     <string name="ui_notification_click_open" formatted="false">在主螢幕開啟應用程式</string>
+    <string name="ui_notification_click_open_rear">在背螢幕開啟詳細資訊</string>
     <string name="ui_notification_click_dismiss" formatted="false">僅關閉背螢提醒</string>
     <string name="ui_minutes_value" formatted="false">{0} 分鐘</string>
     <string name="ui_unit_seconds" formatted="false">秒</string>

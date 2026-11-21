@@ -18,6 +18,7 @@ package top.zainzh.rearscreen;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -297,6 +298,69 @@ public class NotificationService extends NotificationListenerService {
     static void ordinaryNotificationActivityDetachedForRecreation(long sessionId, Object window) {
         ORDINARY_SESSION_FINALIZER.activityDetachedForRecreation(sessionId, window);
     }
+    /**
+     * Read the real notification again rather than accepting a PendingIntent from an exported
+     * presentation Activity. Match the exact displayed instance and the notification's own UID.
+     */
+    static PendingIntent originalActivityAction(long sessionId) {
+        NotificationService service = instance;
+        if (service == null || !service.isOrdinaryTapCurrent(sessionId)) return null;
+        String key = service.activeOrdinaryNotificationKey;
+        long postTime = service.activeOrdinaryNotificationPostTime;
+        String packageName = service.activeOrdinaryNotificationPackage;
+        if (key == null || packageName == null) return null;
+        try {
+            StatusBarNotification[] notifications = service.getActiveNotifications(new String[]{key});
+            if (notifications == null || !service.isOrdinaryTapCurrent(sessionId)) return null;
+            for (StatusBarNotification item : notifications) {
+                if (!key.equals(item.getKey()) || postTime != item.getPostTime()
+                        || !packageName.equals(item.getPackageName())
+                        || !android.os.Process.myUserHandle().equals(item.getUser())) continue;
+                PendingIntent action = item.getNotification().contentIntent;
+                if (action != null && action.isActivity() && action.getCreatorUid() == item.getUid()
+                        && packageName.equals(action.getCreatorPackage())) return action;
+            }
+        } catch (RuntimeException unavailable) {
+            Log.i(TAG, "rear_notification_action_unavailable");
+        }
+        return null;
+    }
+
+    private boolean isOrdinaryTapCurrent(long sessionId) {
+        return sessionId == activeOrdinaryNotificationSession && !taskServiceReleased
+                && RearAnimationManager.isCurrent(RearAnimationManager.AnimationType.NOTIFICATION, sessionId);
+    }
+
+    static void prepareRearNotificationCast(long sessionId, int rearDisplay, int notificationTask,
+            long clickedAt, Runnable rejected) {
+        NotificationService service = instance;
+        if (service == null) { rejected.run(); return; }
+        try {
+            service.animationWorker.execute(() -> {
+                boolean dispatched = false;
+                try {
+                    PendingIntent action = originalActivityAction(sessionId);
+                    ITaskService remote = service.taskService;
+                    if (action == null || remote == null) return;
+                    if (VirtualRearHostActivity.instance != null || RearScreenKeeperService.physicalCastTask() != null
+                            || !RearAnimationManager.isAnimationActivityTask(sessionId, notificationTask)
+                            || rearDisplay != RearDisplay.requireId()
+                            || !(BuildConfig.APPLICATION_ID + ":" + notificationTask)
+                                    .equals(remote.getForegroundAppOnDisplay(rearDisplay))) return;
+                    RearNotificationCastRequest request = new RearNotificationCastRequest(sessionId, rearDisplay, clickedAt, action);
+                    if (!request.usable(service)) return;
+                    dispatched = request.dispatch(remote, service.getPackageName());
+                } catch (Exception unavailable) {
+                    Log.i(TAG, "rear_notification_host_dispatch_failed type=" + unavailable.getClass().getSimpleName());
+                } finally {
+                    if (!dispatched) service.mainHandler.post(rejected);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException stopped) {
+            rejected.run();
+        }
+    }
+
     /** Called synchronously from real user controls, before Activity finish or app-launch work begins. */
     static void ordinaryNotificationUserHandled(long sessionId) {
         NotificationService service = instance;

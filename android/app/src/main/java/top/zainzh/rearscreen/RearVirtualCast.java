@@ -341,13 +341,22 @@ final class RearVirtualCast {
 
     private String renderPlan(int task, String component, int density, boolean compatibility, boolean full,
             boolean disposableWallpaperCast) throws Exception {
-        if (!BuildConfig.VIRTUAL_CAST_ENABLED) throw new SecurityException("Virtual casting is unavailable");
-        VirtualCastRequest.density(Integer.toString(density));
         if (component != null) VirtualCastRequest.component(component);
         if (task >= 0 ? !service.isTaskOnDisplay(task, 0) : component == null)
             throw new IllegalStateException("Source task unavailable");
         String pkg = component == null ? service.getPackageNameFromTaskId(task) : component.substring(0, component.indexOf('/'));
+        return renderPlanForPackage(pkg, density, compatibility, full, task, component, disposableWallpaperCast);
+    }
+
+    String renderPlanForPackage(String pkg, int density, boolean compatibility, boolean full) throws Exception {
+        return renderPlanForPackage(pkg, density, compatibility, full, -1, null, false);
+    }
+
+    private String renderPlanForPackage(String pkg, int density, boolean compatibility, boolean full,
+            int task, String component, boolean disposableWallpaperCast) throws Exception {
+        if (!BuildConfig.VIRTUAL_CAST_ENABLED) throw new SecurityException("Virtual casting is unavailable");
         VirtualCastRequest.packageName(pkg);
+        VirtualCastRequest.density(Integer.toString(density));
         int source = RearCastGeometry.displayDensity(0);
         RearCastViewport safe = RearCastGeometry.read();
         int actual = compatibility || disposableWallpaperCast
@@ -364,7 +373,27 @@ final class RearVirtualCast {
             IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility, int rotation,
             boolean full) throws Exception {
         return start(surface, reader, task, host, density, component, owner, gestures, viewport, compatibility,
-                rotation, full, null);
+                rotation, full, null, null);
+    }
+
+    String startNotification(Surface surface, String reader, int host, int density, String packageName,
+            IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility, int rotation,
+            boolean full, IRearNotificationTarget target) throws Exception {
+        if (target == null || !target.asBinder().isBinderAlive()
+                || BuildConfig.APPLICATION_ID.equals(VirtualCastRequest.packageName(packageName)))
+            throw new SecurityException("Invalid rear notification target");
+        return start(surface, reader, -1, host, density, null, owner, gestures, viewport, compatibility,
+                rotation, full, null, new NotificationTarget(packageName, target));
+    }
+
+    private static final class NotificationTarget {
+        final String packageName;
+        final IRearNotificationTarget action;
+
+        NotificationTarget(String packageName, IRearNotificationTarget action) {
+            this.packageName = packageName;
+            this.action = action;
+        }
     }
 
     String startDisposableWallpaperCast(Surface surface, String reader, int host, int density, String component,
@@ -372,12 +401,13 @@ final class RearVirtualCast {
             boolean full, ISceneTaskActionGate launchGate) throws Exception {
         if (launchGate == null) throw new SecurityException("Missing parked wallpaper action gate");
         return start(surface, reader, -1, host, density, component, owner, gestures, viewport, compatibility,
-                rotation, full, launchGate);
+                rotation, full, launchGate, null);
     }
 
     private synchronized String start(Surface surface, String reader, int task, int host, int density,
             String component, IBinder owner, IRearGestureListener gestures, String viewport,
-            boolean compatibility, int rotation, boolean full, ISceneTaskActionGate wallpaperLaunchGate) throws Exception {
+            boolean compatibility, int rotation, boolean full, ISceneTaskActionGate wallpaperLaunchGate,
+            NotificationTarget notificationTarget) throws Exception {
         boolean disposableWallpaperCast = wallpaperLaunchGate != null;
         if (!BuildConfig.VIRTUAL_CAST_ENABLED) throw new SecurityException("Virtual casting is unavailable");
         if (replacement != null || controlledStartInProgress != null) throw new IllegalStateException("replacement_in_progress");
@@ -386,11 +416,14 @@ final class RearVirtualCast {
         if (component != null) VirtualCastRequest.component(component);
         RearCastViewport safe = RearCastGeometry.read();
         if (!(full ? safe.full() : safe).key().equals(RearCastGeometry.decode(viewport).key())) throw new IllegalStateException("Rear output area changed before start");
-        JSONObject plan = new JSONObject(renderPlan(task, component, density, compatibility, full, disposableWallpaperCast));
+        JSONObject plan = new JSONObject(notificationTarget == null
+                ? renderPlan(task, component, density, compatibility, full, disposableWallpaperCast)
+                : renderPlanForPackage(notificationTarget.packageName, density, compatibility, full));
         if (!RearCastGeometry.decode(plan.toString()).renderKey().equals(RearCastGeometry.decode(viewport).renderKey()))
             throw new IllegalStateException("Rear render plan changed before start");
         if (surface == null || !surface.isValid() || owner == null || !owner.isBinderAlive()
-                || (task < 0 ? component == null : !service.isTaskOnDisplay(task, 0)) || !service.isTaskOnDisplay(host, RearDisplay.requireId()))
+                || (task < 0 ? component == null && notificationTarget == null : !service.isTaskOnDisplay(task, 0))
+                || !service.isTaskOnDisplay(host, RearDisplay.requireId()))
             throw new IllegalStateException("Main task / rear host unavailable");
         if (disposableWallpaperCast) {
             ComponentName target = ComponentName.unflattenFromString(component);
@@ -407,6 +440,12 @@ final class RearVirtualCast {
                 throw new IllegalStateException("parked_wallpaper_cast_or_input_busy");
             if (!wallpaperLaunchGate.isCurrent())
                 throw new IllegalStateException("parked_wallpaper_authorization_changed");
+        } else if (notificationTarget != null) {
+            if (current != null || !"stopped".equals(new JSONObject(input.status()).optString("state")))
+                throw new IllegalStateException("rear_notification_cast_busy");
+            int rear = RearDisplay.requireId();
+            if (!(BuildConfig.APPLICATION_ID + ":" + host).equals(service.getForegroundAppOnDisplay(rear)))
+                throw new IllegalStateException("rear_notification_host_not_foreground");
         } else {
             stop(null);
             input.stop(null);
@@ -415,7 +454,8 @@ final class RearVirtualCast {
         if (!surface.isValid() || !owner.isBinderAlive() || !service.isTaskOnDisplay(host, RearDisplay.requireId()))
             throw new IllegalStateException("Rear host changed during previous session cleanup");
         Session s = new Session(surface, reader, task, host, density, component, owner, gestures, safe,
-                plan.getInt("renderDensity"), compatibility, rotation, full, null, 0L, null, disposableWallpaperCast);
+                plan.getInt("renderDensity"), compatibility, rotation, full, null, 0L, null,
+                disposableWallpaperCast, notificationTarget);
         s.wallpaperLaunchGate = wallpaperLaunchGate;
         current = s;
         try { s.begin(true); return s.status(); }
@@ -659,6 +699,7 @@ final class RearVirtualCast {
         final String coordinatorOwnerIdentity;
         final boolean densityCompatibility;
         final boolean disposableWallpaperCast;
+        final NotificationTarget notificationTarget;
         ISceneTaskActionGate wallpaperLaunchGate;
         // A separate-task launch must not dispose a pre-existing user task, even if an OEM reuses it.
         Map<Integer, Integer> tasksBeforeWallpaperLaunch = Collections.emptyMap();
@@ -723,6 +764,16 @@ final class RearVirtualCast {
                 IRearGestureListener gestures, RearCastViewport safe, int renderDensity, boolean compatibility,
                 int rotation, boolean full, String coordinatorOperationId, long coordinatorOwnerGeneration,
                 String coordinatorOwnerIdentity, boolean disposableWallpaperCast) {
+            this(surface, reader, task, host, density, component, owner, gestures, safe, renderDensity, compatibility,
+                    rotation, full, coordinatorOperationId, coordinatorOwnerGeneration, coordinatorOwnerIdentity,
+                    disposableWallpaperCast, null);
+        }
+
+        Session(Surface surface, String reader, int task, int host, int density, String component, IBinder owner,
+                IRearGestureListener gestures, RearCastViewport safe, int renderDensity, boolean compatibility,
+                int rotation, boolean full, String coordinatorOperationId, long coordinatorOwnerGeneration,
+                String coordinatorOwnerIdentity, boolean disposableWallpaperCast, NotificationTarget notificationTarget) {
+            this.notificationTarget = notificationTarget;
             this.disposableWallpaperCast = disposableWallpaperCast;
             this.surface = surface; this.reader = reader; this.task = task; this.host = host; this.owner = owner;
             this.gestures = gestures;
@@ -733,7 +784,8 @@ final class RearVirtualCast {
             this.coordinatorOperationId = coordinatorOperationId;
             this.coordinatorOwnerGeneration = coordinatorOwnerGeneration;
             this.coordinatorOwnerIdentity = coordinatorOwnerIdentity;
-            this.packageName = component == null ? service.getPackageNameFromTaskId(task) : component.substring(0, component.indexOf('/'));
+            this.packageName = notificationTarget != null ? notificationTarget.packageName
+                    : component != null ? component.substring(0, component.indexOf('/')) : service.getPackageNameFromTaskId(task);
             RearDisplayUserActivity.Sink activitySink = null;
             try { activitySink = RearDisplayUserActivity.shell(); }
             catch (Exception unavailable) {
@@ -794,6 +846,9 @@ final class RearVirtualCast {
             // Keep the cast interactive when the main display locks; never dismiss the main keyguard.
             int displayFlags = CAST_DISPLAY_FLAGS | (disposableWallpaperCast
                     ? VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL : 0);
+            // A notification can open private content; unlike wallpaper shortcuts, this cast
+            // participates in Android's lock screen instead of requesting an always-unlocked display.
+            if (notificationTarget != null) displayFlags &= ~VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED;
             builderType.getMethod("setFlags", int.class).invoke(builder, displayFlags);
             builderType.getMethod("setSurface", Surface.class).invoke(builder, surface);
             RearCastResizePolicy.Result resizePolicy = RearCastResizePolicy.build(builder, densityCompatibility);
@@ -841,9 +896,14 @@ final class RearVirtualCast {
                     expectedBaseComponent, task, service.getTaskBaseComponent(task, display),
                     service.isTaskOnDisplay(task, display))))
                 throw new IllegalStateException("controlled_target_changed_after_move");
-            if (component != null) {
+            if (component != null || notificationTarget != null) {
                 ensureControlledStartCurrent("before_target_launch");
-                if (disposableWallpaperCast) launchWallpaperTarget();
+                if (notificationTarget != null) {
+                    if (!physicalIdentity.equals(RearDisplay.identity())
+                            || !(BuildConfig.APPLICATION_ID + ":" + host).equals(service.getForegroundAppOnDisplay(physicalRearId))
+                            || !notificationTarget.action.launch(display))
+                        throw new IOException("rear_notification_target_rejected");
+                } else if (disposableWallpaperCast) launchWallpaperTarget();
                 else if (!service.executeShellCommand("am start --display " + display + (launcherEntry ? " -a android.intent.action.MAIN -c android.intent.category.LAUNCHER" : "") + " -n '" + component + "'"))
                     throw new IOException("Activity launch failed");
                 long end = SystemClock.uptimeMillis() + 4000;

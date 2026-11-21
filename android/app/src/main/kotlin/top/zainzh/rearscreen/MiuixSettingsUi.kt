@@ -107,7 +107,7 @@ class MiuixSettingsUi(
     private var state by mutableStateOf(HomeState())
     private data class SettingsState(val selected: Int = 0, val listener: Boolean = false, val posting: Boolean = true,
         val duration: Int = 8, val updates: String = "", val checking: Boolean = false, val proxy: Boolean = false,
-        val neverAutoClose: Boolean = false, val dismissOnly: Boolean = false)
+        val neverAutoClose: Boolean = false, val dismissOnly: Boolean = false, val openOnRear: Boolean = false)
     private var settings by mutableStateOf(SettingsState())
     private var durationSheetVisible by mutableStateOf(false)
     private var durationValue by mutableIntStateOf(savedState?.getInt("notification_duration_draft_value", 10) ?: 10)
@@ -255,8 +255,8 @@ class MiuixSettingsUi(
         if (page in 0..3 && target in 0..3) page = target
     }
     fun updateSettings(selected: Int, listener: Boolean, posting: Boolean, duration: Int, updates: String, checking: Boolean, proxy: Boolean,
-                       neverAutoClose: Boolean = false, dismissOnly: Boolean = false) {
-        settings = SettingsState(selected, listener, posting, duration, updates, checking, proxy, neverAutoClose, dismissOnly)
+                       neverAutoClose: Boolean = false, dismissOnly: Boolean = false, openOnRear: Boolean = false) {
+        settings = SettingsState(selected, listener, posting, duration, updates, checking, proxy, neverAutoClose, dismissOnly, openOnRear)
     }
     fun updateUriConflict(conflict: Boolean) { uriConflict = conflict }
     fun showPage(target: Int) {
@@ -1000,7 +1000,11 @@ class MiuixSettingsUi(
                                 trailing = { Text(durationSummary(settings.duration), fontSize = 15.sp, color = AppPalette.accent(), modifier = Modifier.widthIn(max = 130.dp)) })
                             AppDivider()
                             AppRow(s("notification_click_action"), null, action = actions::clickAction,
-                                trailing = { Text(s(if (settings.dismissOnly) "notification_click_dismiss" else "notification_click_open"),
+                                trailing = { Text(s(when {
+                                    settings.dismissOnly -> "notification_click_dismiss"
+                                    settings.openOnRear -> "notification_click_open_rear"
+                                    else -> "notification_click_open"
+                                }),
                                     fontSize = 14.sp, color = AppPalette.accent(), modifier = Modifier.widthIn(max = 150.dp)) })
                         }
                     }

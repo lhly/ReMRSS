@@ -405,7 +405,8 @@ final class SettingsController {
                 .getStringSet("notification_selected_apps", Collections.emptySet()).size();
         composeUi.updateSettings(selected, listenerGranted(), Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
                 preferences.getDuration(), updateSummaryText(), checkingUpdates, UpdateNetwork.proxyEnabled(activity),
-                preferences.isNotificationNeverAutoClose(), preferences.isNotificationDismissOnly());
+                preferences.isNotificationNeverAutoClose(), preferences.isNotificationDismissOnly(),
+                preferences.getBoolean(RearNotificationCastRequest.PREF));
     }
 
     private void toggle(String key, String method, boolean enabled) {
@@ -682,11 +683,15 @@ final class SettingsController {
     private void showNotificationClickAction() {
         String title = s("notification_click_action");
         modal.show(title, s("notification_click_action_help"),
-                new String[]{s("notification_click_open"), s("notification_click_dismiss"), s("cancel")},
-                new Runnable[]{() -> setNotificationDismissOnly(false), () -> setNotificationDismissOnly(true), null});
+                new String[]{s("notification_click_open"), s("notification_click_open_rear"),
+                        s("notification_click_dismiss"), s("cancel")},
+                new Runnable[]{() -> setNotificationClickAction(false, false),
+                        () -> setNotificationClickAction(false, true),
+                        () -> setNotificationClickAction(true, false), null});
     }
 
-    private void setNotificationDismissOnly(boolean dismissOnly) {
+    private void setNotificationClickAction(boolean dismissOnly, boolean openOnRear) {
+        preferences.putBoolean(RearNotificationCastRequest.PREF, openOnRear);
         preferences.putBoolean("notification_dismiss_only", dismissOnly);
         activity.sendBroadcast(new Intent(BuildConfig.APPLICATION_ID + ".RELOAD_NOTIFICATION_SETTINGS").setPackage(activity.getPackageName()));
         updateHome();
