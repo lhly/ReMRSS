@@ -35,3 +35,9 @@
 - 全部 Android 设备执行（包括模拟器）由 root 独占；Luna 只可编辑源码、构建/编译、运行 JVM 与 fake-device 测试，Sol 只读审查。未经 root 明确安排不得访问设备或 AVD。
 - 禁止裸 `adb`、直接运行 `connected*AndroidTest`、`deviceCheck`、`install*` 或 `uninstall*` Gradle 任务；设备操作必须经 `tools/guarded_device.py` 显式绑定 root 提供的私有 ADB server endpoint 与唯一 serial。
 - 受限入口只接受私有 loopback server，拒绝默认端口 5037 和 `127.0.0.1:15001`；每次设备操作前核对唯一 ready 目标及身份。不得通过宽泛任务筛选或注入串号绕过。
+
+## 真机验证产物
+
+- 每轮验证先分配唯一标识 `remrss-validation-<YYYYMMDD>-<任务短名>-<轮次>`，例如 `remrss-validation-20261121-notification-tap-r01`。同一轮的截图、录屏、日志、界面转储、脚本、临时 APK、测试模组和其他文件，一律命名为 `<标识>-<用途>.<扩展名>`；不使用 `ui.xml`、`shot.png` 等无法追溯的名称。
+- 优先把产物直接保存到本机被忽略的验证记录目录。必须留在手机时，用户可见文件放在 `/storage/emulated/0/Download/<标识>/`，Shell 临时文件放在 `/data/local/tmp/<标识>/`。需要验证系统自动命名时，只核对并重命名本轮新增的确切文件；不得整理或重命名用户原有文件，也不改变正式功能的默认文件名。
+- 在本轮 `.planning/<任务目录>/` 记录标识、设备目标和本轮实际写入的确切路径。从验证流程退出时（含失败或中断）按名单清理并回读；若设备断连或用户要求留存，则在交接中写明剩余路径及用途。清理须走设备守卫，不以通配符扫删共享目录；正式版数据、备份和运行设施不属于验证产物。
