@@ -31,6 +31,8 @@ import android.util.Log;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.view.Display;
 
 import rikka.shizuku.Shizuku;
 
@@ -61,6 +63,7 @@ public class MainActivity extends androidx.activity.ComponentActivity {
     }
     UpdateDownloadTask createUpdateTask(UpdatePackage update) { return new UpdateDownloadTask(getApplicationContext(), update); }
     boolean canInstallUpdates() { return Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls(); }
+    protected boolean hasWallpaperEditor() { return AiRearWallpaperSupport.supported(); }
     void checkForUpdates() { if (nativeUi != null) nativeUi.checkForUpdates(); }
     private final java.util.concurrent.ExecutorService commandExecutor =
             java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -135,12 +138,6 @@ public class MainActivity extends androidx.activity.ComponentActivity {
         if (intent == null || !intent.hasExtra(EXTRA_NAVIGATION_TARGET) || nativeUi == null) return;
         nativeUi.openNavigationTarget(intent.getIntExtra(EXTRA_NAVIGATION_TARGET, 0));
         intent.removeExtra(EXTRA_NAVIGATION_TARGET);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (nativeUi != null) nativeUi.onActivityResult(requestCode, resultCode, data);
     }
 
     /**
@@ -260,6 +257,28 @@ public class MainActivity extends androidx.activity.ComponentActivity {
     protected void onSaveInstanceState(Bundle state) {
         if (nativeUi != null) nativeUi.saveState(state);
         super.onSaveInstanceState(state);
+    }
+
+    /** Updates only the current, app-owned main task; back-screen and foreign tasks keep their flags. */
+    boolean setMainTaskShownInRecents(boolean shown) {
+        Display display = getDisplay();
+        if (display == null || display.getDisplayId() != Display.DEFAULT_DISPLAY) return false;
+        ActivityManager manager = getSystemService(ActivityManager.class);
+        ComponentName main = new ComponentName(this, MainActivity.class);
+        if (manager == null) return false;
+        try {
+            for (ActivityManager.AppTask task : manager.getAppTasks()) {
+                ActivityManager.RecentTaskInfo info = task.getTaskInfo();
+                if (info == null || info.taskId != getTaskId() || !main.equals(info.baseIntent.getComponent())) continue;
+                boolean excluded = (info.baseIntent.getFlags() & Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS) != 0;
+                boolean shouldExclude = !shown;
+                if (excluded != shouldExclude) task.setExcludeFromRecents(shouldExclude);
+                return true;
+            }
+        } catch (IllegalArgumentException | SecurityException unavailable) {
+            Log.w(TAG, "Could not change visibility of the main task in Recents", unavailable);
+        }
+        return false;
     }
 
     boolean isTaskServiceReady() {

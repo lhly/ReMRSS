@@ -14,8 +14,12 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.onPlaced
@@ -31,6 +35,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import top.yukonga.miuix.kmp.basic.Checkbox
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 
@@ -51,7 +56,10 @@ class AppPickerModel(
     internal var selected by mutableStateOf(preferences.getStringSet(selectedKey, emptySet()).orEmpty().toSet())
         private set
     internal var includeSystem by mutableStateOf(saved?.getBoolean("native_include_system", false) ?: false)
-    internal var search by mutableStateOf(saved?.getString("native_search", "") ?: "")
+    private val searchInput = TextFieldState(saved?.getString("native_search", "").orEmpty())
+    internal var search: String
+        get() = searchInput.text.toString()
+        set(query) { if (query != search) searchInput.setTextAndPlaceCursorAtEnd(query) }
     internal var loading by mutableStateOf(false)
     internal var failure by mutableStateOf<String?>(null)
     internal var apps by mutableStateOf(emptyList<App>())
@@ -100,7 +108,7 @@ class AppPickerModel(
     }
     internal val queryPackagesGranted: Boolean get() = granted
     internal val canInteract: Boolean get() = !destroyed
-    internal fun renderState() = AppPickerRenderState(apps, selected, includeSystem, search, loading, failure, list)
+    internal fun renderState() = AppPickerRenderState(apps, selected, includeSystem, searchInput, loading, failure, list)
     internal fun choose(packages: List<String>, enabled: Boolean) {
         if (lockedHome && (packages.size != 1 || apps.none { it.info.packageName == packages.single() })) return
         selected = if (enabled) selected + packages else selected - packages.toSet()
@@ -151,15 +159,18 @@ internal data class AppPickerRenderState(
     val apps: List<AppPickerModel.App>,
     val selected: Set<String>,
     val includeSystem: Boolean,
-    val search: String,
+    val searchInput: TextFieldState,
     val loading: Boolean,
     val failure: String?,
     val list: LazyListState,
-)
+) {
+    val search: String get() = searchInput.text.toString()
+}
 
 @Composable internal fun AppPickerSlot(model: AppPickerModel?, snapshot: AppPickerExitSnapshot?) {
     val state = model?.renderState() ?: snapshot?.let {
-        AppPickerRenderState(it.apps, it.selected, it.includeSystem, it.search, it.loading, it.failure, it.list)
+        val input = remember(it) { TextFieldState(it.search) }
+        AppPickerRenderState(it.apps, it.selected, it.includeSystem, input, it.loading, it.failure, it.list)
     } ?: return
     val interactive = model?.canInteract == true
     val granted = model?.queryPackagesGranted ?: snapshot?.granted ?: false
@@ -169,7 +180,6 @@ internal data class AppPickerRenderState(
         interactive = interactive,
         granted = granted,
         onBack = { model?.takeIf { it.canInteract }?.backFromContent() },
-        onSearch = { query -> model?.takeIf { it.canInteract }?.let { it.search = query } },
         onIncludeSystem = { included -> model?.takeIf { it.canInteract }?.let { it.includeSystem = included } },
         onChoose = { packages, enabled -> model?.takeIf { it.canInteract }?.choose(packages, enabled) },
         onRefresh = { model?.takeIf { it.canInteract }?.load() },
@@ -196,7 +206,6 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
     interactive: Boolean,
     granted: Boolean,
     onBack: () -> Unit,
-    onSearch: (String) -> Unit,
     onIncludeSystem: (Boolean) -> Unit,
     onChoose: (List<String>, Boolean) -> Unit,
     onRefresh: () -> Unit,
@@ -206,8 +215,9 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
     val context = LocalContext.current
     fun s(key: String) = NativeStrings.get(context, key)
     val locale = LocalConfiguration.current.locales[0]
-    val visible = remember(state.apps, state.search, state.includeSystem, state.selected, locale, lockedHome) {
-        val query = state.search.trim().lowercase(Locale.ROOT)
+    val search = state.search
+    val visible = remember(state.apps, search, state.includeSystem, state.selected, locale, lockedHome) {
+        val query = search.trim().lowercase(Locale.ROOT)
         val collator = Collator.getInstance(locale)
         state.apps.filter { (lockedHome || state.includeSystem || !it.system) && (query.isEmpty() || it.name.lowercase(Locale.ROOT).contains(query) || it.info.packageName.lowercase(Locale.ROOT).contains(query)) }
             .sortedWith { a, b ->
@@ -220,6 +230,19 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
     var selectionAnimationGeneration by remember { mutableIntStateOf(-1) }
     var placementAnimationsSuppressed by remember { mutableStateOf(false) }
     var placementBarrierPhase by remember { mutableIntStateOf(2) }
+    var laidOutSearch by remember { mutableStateOf(search) }
+    val searchChanged = search != laidOutSearch
+    fun cancelPlacementAnimations() {
+        filterGeneration++
+        selectionAnimationGeneration = -1
+        placementAnimationsSuppressed = true
+        placementBarrierPhase = 0
+    }
+    // The IME owns editing state; filtering must never send an older string back to it.
+    if (searchChanged) SideEffect {
+        laidOutSearch = search
+        cancelPlacementAnimations()
+    }
     val expectedLayoutKeys = remember(visible) {
         buildList<Any> {
             add("title")
@@ -240,7 +263,7 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
         if (!interactive) return
         val next = if (enabled) state.selected + packages else state.selected - packages.toSet()
         if (next != state.selected) {
-            if (placementBarrierPhase == 2 && !placementAnimationsSuppressed) {
+            if (!searchChanged && placementBarrierPhase == 2 && !placementAnimationsSuppressed) {
                 selectionAnimationGeneration = filterGeneration
             } else {
                 selectionAnimationGeneration = -1
@@ -269,34 +292,38 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
         }, state = state.list,
             contentPadding = PaddingValues(20.dp, headerInset + 12.dp, 20.dp, 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item("title") {
-                Text(if (lockedHome) s("notification_locked_home_warning") else
-                    s("apps_summary").replace("{0}", state.selected.size.toString()).replace("{1}", visible.size.toString()),
-                    fontSize = 13.sp, color = AppPalette.secondary())
+                if (lockedHome) {
+                    Text(s("notification_locked_home_warning"), fontSize = 13.sp, color = AppPalette.secondary())
+                } else {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(s("apps_summary").replace("{0}", state.selected.size.toString()).replace("{1}", visible.size.toString()),
+                            Modifier.weight(1f), fontSize = 13.sp, color = AppPalette.secondary())
+                        TextButton(s("refresh"), { if (interactive) onRefresh() }, minHeight = 48.dp,
+                            enabled = interactive && !state.loading, colors = ButtonDefaults.textButtonColors().copy(
+                                color = Color.Transparent, textColor = AppPalette.accent()))
+                    }
+                }
             }
             item("filters") {
-                AppCatalogSearchField(state.search, {
-                    filterGeneration++
-                    selectionAnimationGeneration = -1
-                    placementAnimationsSuppressed = true
-                    placementBarrierPhase = 0
-                    onSearch(it)
-                }, label = s("search_apps"), modifier = Modifier.testTag("app_search"), interactive = interactive)
+                AppCatalogSearchField(state.searchInput, label = s("search_apps"),
+                    modifier = Modifier.testTag("app_search"), interactive = interactive)
                 if (!lockedHome) {
                     AppToggle(s("system_apps"), null, state.includeSystem, enabled = interactive,
                         modifier = Modifier.testTag("picker_system_apps_toggle")) {
                         if (interactive) {
-                            filterGeneration++
-                            selectionAnimationGeneration = -1
-                            placementAnimationsSuppressed = true
-                            placementBarrierPhase = 0
+                            cancelPlacementAnimations()
                             onIncludeSystem(it)
                         }
                     }
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(s("select_all"), { choose(visible.map { it.info.packageName }, true) }, minHeight = 48.dp, enabled = interactive)
-                        TextButton(s("deselect_all"), { choose(visible.map { it.info.packageName }, false) }, minHeight = 48.dp, enabled = interactive)
-                        TextButton(s("refresh"), { if (interactive) onRefresh() }, minHeight = 48.dp, enabled = interactive && !state.loading)
-                    }
+                    val canChoose = interactive && visible.isNotEmpty()
+                    AppActionPair(s("deselect_all").replace("{0}", visible.size.toString()),
+                        { choose(visible.map { it.info.packageName }, false) },
+                        s("select_all").replace("{0}", visible.size.toString()),
+                        { choose(visible.map { it.info.packageName }, true) },
+                        secondaryModifier = Modifier.testTag("picker_clear_visible"),
+                        primaryModifier = Modifier.testTag("picker_select_visible"),
+                        secondaryEnabled = canChoose, primaryEnabled = canChoose, emphasizePrimary = false)
                 }
                 if (!granted) TextButton(s("apps_access_help"), { if (interactive) onRequestAccess() }, minHeight = 48.dp,
                     enabled = interactive, modifier = Modifier.testTag("apps_access_help"))
@@ -304,7 +331,7 @@ private val pickerReorderEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
             if (visible.isEmpty()) item("empty") { Text(state.failure ?: s(if (state.loading) "loading_apps" else if (lockedHome && state.search.isBlank())
                 "notification_locked_home_empty" else "no_apps_found"), color = AppPalette.secondary()) }
             items(visible, key = { it.info.packageName }) { app ->
-                val placementModifier = if (placementAnimationsSuppressed) Modifier else Modifier.animateItem(
+                val placementModifier = if (searchChanged || placementAnimationsSuppressed) Modifier else Modifier.animateItem(
                     fadeInSpec = null,
                     placementSpec = if (selectionAnimationGeneration == filterGeneration)
                         tween<IntOffset>(180, easing = pickerReorderEasing) else snap(),

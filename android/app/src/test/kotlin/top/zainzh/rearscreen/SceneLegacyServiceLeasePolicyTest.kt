@@ -24,24 +24,24 @@ class SceneLegacyServiceLeasePolicyTest {
     @Test fun activeSceneBlackCoverCannotContinueOldGlobalWakeAndMatchingCloseRestoresOnlyPriorPreference() {
         // Both user-selected legacy keepers were already running before this Scene began.
         assertTrue(LegacyDisplayKeeperPolicy.mayWake(
-            true, false, false, false, false))
+            true, false, false))
 
         // A near/black Scene cover changes its renderer, not ownership; the old 100 ms loop and
         // keeper wake path remain suppressed for the entire exact scene lease.
         assertFalse(LegacyDisplayKeeperPolicy.mayWake(
-            true, false, true, false, true))
+            true, true, true))
         assertFalse(LegacyDisplayKeeperPolicy.mayWake(
-            true, false, false, false, true))
+            true, false, true))
 
         // Matching close restores only a mode that the user had enabled; stale close and a newer
         // lease cannot reclaim its loops.
         assertTrue(LegacyDisplayKeeperPolicy.mayRestoreAfterScene(
-            true, true, true, false, false))
+            true, true, true, false))
         assertFalse(LegacyDisplayKeeperPolicy.mayRestoreAfterScene(
-            true, false, true, false, false))
+            true, false, true, false))
         assertFalse(LegacyDisplayKeeperPolicy.mayRestoreAfterScene(
-            true, true, false, false, false))
+            true, true, false, false))
         assertFalse(LegacyDisplayKeeperPolicy.mayRestoreAfterScene(
-            true, true, true, true, false))
+            true, true, true, true))
     }
 }

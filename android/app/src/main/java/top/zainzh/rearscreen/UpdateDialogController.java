@@ -388,9 +388,10 @@ final class UpdateDialogController {
         String status = "", details = summary(activity, result);
         int percent = -1;
         boolean verifying = false;
+        boolean busy = false;
         if (available) {
             UpdateDownloadTask.State state = session.task == null ? null : session.task.state();
-            boolean busy = state != null && (state.phase == UpdateDownloadTask.Phase.DOWNLOADING || state.phase == UpdateDownloadTask.Phase.VERIFYING);
+            busy = state != null && (state.phase == UpdateDownloadTask.Phase.DOWNLOADING || state.phase == UpdateDownloadTask.Phase.VERIFYING);
             int primary = R.string.ui_download_update;
             details = activity.getString(R.string.ui_update_size).replace("{0}", Formatter.formatShortFileSize(activity, result.apk.size));
             if (state != null) {
@@ -418,7 +419,7 @@ final class UpdateDialogController {
             if (failed) { labels.add(activity.getString(R.string.ui_retry)); actions.add(() -> { cancel(); retryCheck.run(); }); }
             labels.add(activity.getString(R.string.ui_view_releases)); actions.add(() -> { cancel(); openRelease(failed ? ProjectInfo.RELEASES : result.releaseUrl()); });
         }
-        labels.add(activity.getString(R.string.ui_cancel)); actions.add(this::cancel);
+        labels.add(activity.getString(busy ? R.string.ui_cancel_download : R.string.ui_cancel)); actions.add(this::cancel);
         ReleaseNotes notes = result.notes;
         ui.update(available ? summary(activity, result) : activity.getString(R.string.ui_check_updates),
                 activity.getString(R.string.ui_current_version).replace("{0}", BuildConfig.VERSION_NAME), status, details,

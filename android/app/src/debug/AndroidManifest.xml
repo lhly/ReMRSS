@@ -1,5 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
+        <activity
+            android:name=".RecordingControlsDiagnosticActivity"
+            android:enabled="${uxPhoneValidation}"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.Transparent" />
         <receiver
             android:name=".DebugCastAdmissionDiagnosticReceiver"
             android:exported="true"
@@ -9,8 +17,43 @@
             </intent-filter>
         </receiver>
         <activity
-            android:name=".NativeModuleRendererTestHostActivity"
+            android:name=".ComposeTestHostActivity"
             android:exported="false"
+            android:theme="@style/MiuixHostTheme" />
+        <activity
+            android:name=".CastApprovalTestHostActivity"
+            android:exported="false"
+            android:theme="@style/MiuixCastOverlayTheme" />
+        <activity
+            android:name=".FixtureNotificationActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="${applicationId}.fixtureNotification"
+            android:theme="@style/Theme.Transparent"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode|smallestScreenSize|density" />
+        <activity
+            android:name=".FixtureRearScreenshotActivity"
+            android:exported="false"
+            android:theme="@style/MiuixHostTheme" />
+        <activity
+            android:name=".FixtureWallpaperSettingsActivity"
+            android:windowSoftInputMode="adjustResize"
+            android:exported="false"
+            android:theme="@style/MiuixHostTheme" />
+        <activity
+            android:name=".FixtureWallpaperEditorActivity"
+            android:exported="false"
+            android:theme="@style/MiuixHostTheme" />
+        <activity
+            android:name=".FixtureChargingActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode|smallestScreenSize|density"
+            android:theme="@style/Theme.Transparent" />
+        <activity
+            android:name=".FixtureCastNotificationActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
             android:theme="@style/MiuixHostTheme" />
         <activity
             android:name=".NotificationConsentPreviewActivity"

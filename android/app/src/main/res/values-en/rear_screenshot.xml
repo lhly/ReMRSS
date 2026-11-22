@@ -25,7 +25,7 @@
     <string name="rear_screenshot_preview_failed">Frame preview is unavailable. Please try again.</string>
     <string name="rear_screenshot_retry">Retry</string>
     <string name="rear_screenshot_download_help">The frame needs an internet connection once, then works offline.</string>
-    <string name="rear_screenshot_save_help">The screenshot tile and screenshot URI use these settings. Saved in Pictures/RearDisplay.</string>
+    <string name="rear_screenshot_save_help">The screenshot tile and URI use these settings.\nSave location: Pictures/RearDisplay</string>
     <string name="rear_screenshot_saving">Saving screenshot…</string>
     <string name="rear_screenshot_saved_shell">Framed rear-screen screenshot saved</string>
     <string name="rear_screenshot_saved_both">Framed screenshot and original saved</string>

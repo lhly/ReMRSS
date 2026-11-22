@@ -489,7 +489,7 @@ class ModPackageReaderTest {
         }
     }
 
-    private fun signedArchiveWithCapability(capability: String): ByteArray {
+    private fun signedArchiveWithCapability(capability: String, minimumVersion: Int = 1): ByteArray {
         val raw = context.assets.open("platform/mods/generic-counter.zip").use { it.readBytes() }
         val entries = linkedMapOf<String, ByteArray>()
         ZipInputStream(ByteArrayInputStream(raw)).use { zip ->
@@ -499,27 +499,9 @@ class ModPackageReaderTest {
             }
         }
         val manifest = JSONObject(entries.getValue("manifest.json").toString(Charsets.UTF_8))
-        val pair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
-        val fingerprint = java.security.MessageDigest.getInstance("SHA-256").digest(pair.public.encoded)
-            .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
-        manifest.getJSONObject("author").put("keyFingerprint", fingerprint)
         manifest.getJSONObject("capabilities").getJSONArray("required")
-            .put(JSONObject().put("name", capability).put("minimumVersion", 1))
-        val manifestBytes = manifest.toString().toByteArray(Charsets.UTF_8)
-        val signer = java.security.Signature.getInstance("SHA256withRSA").apply { initSign(pair.private); update(manifestBytes) }
-        val publicPem = "-----BEGIN PUBLIC KEY-----\n" +
-            android.util.Base64.encodeToString(pair.public.encoded, android.util.Base64.NO_WRAP) +
-            "\n-----END PUBLIC KEY-----\n"
-        entries["manifest.json"] = manifestBytes
-        entries["manifest.sig"] = signer.sign()
-        entries["author.pub"] = publicPem.toByteArray(Charsets.US_ASCII)
-        val output = ByteArrayOutputStream()
-        ZipOutputStream(output).use { zip ->
-            entries.forEach { (name, bytes) ->
-                zip.putNextEntry(java.util.zip.ZipEntry(name)); zip.write(bytes); zip.closeEntry()
-            }
-        }
-        return output.toByteArray()
+            .put(JSONObject().put("name", capability).put("minimumVersion", minimumVersion))
+        return signModTestArchive(manifest, entries)
     }
 
     private fun signedActionArchive(ref: JSONObject, requireActionConfig: Boolean = false, actionIdPattern: String = "^[a-f0-9]{48}$"): ByteArray {
@@ -551,15 +533,7 @@ class ModPackageReaderTest {
             val payload = payloads.getJSONObject(i); val bytes = entries.getValue(payload.getString("path"))
             payload.put("bytes", bytes.size).put("sha256", java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') })
         }
-        val pair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
-        val fingerprint = java.security.MessageDigest.getInstance("SHA-256").digest(pair.public.encoded)
-            .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
-        manifest.getJSONObject("author").put("keyFingerprint", fingerprint)
-        val manifestBytes = manifest.toString().toByteArray(Charsets.UTF_8)
-        val signer = java.security.Signature.getInstance("SHA256withRSA").apply { initSign(pair.private); update(manifestBytes) }
-        val publicPem = "-----BEGIN PUBLIC KEY-----\n" + android.util.Base64.encodeToString(pair.public.encoded, android.util.Base64.NO_WRAP) + "\n-----END PUBLIC KEY-----\n"
-        entries["manifest.json"] = manifestBytes; entries["manifest.sig"] = signer.sign(); entries["author.pub"] = publicPem.toByteArray(Charsets.US_ASCII)
-        return ByteArrayOutputStream().also { output -> ZipOutputStream(output).use { zip -> entries.forEach { (name, bytes) -> zip.putNextEntry(java.util.zip.ZipEntry(name)); zip.write(bytes); zip.closeEntry() } } }.toByteArray()
+        return signModTestArchive(manifest, entries)
     }
 
     @Test fun registeredActionPickerBindingRequiresOptionalOwnerOpaqueConfig() {
@@ -590,6 +564,13 @@ class ModPackageReaderTest {
     @Test fun rearCastCapabilityIsRejectedByHostParser() {
         val error = assertThrows(ModPackageException::class.java) {
             ModPackageReader.read(ByteArrayInputStream(signedArchiveWithCapability("rear.cast")))
+        }
+        assertEquals(ModPackageError.UNKNOWN_CAPABILITY, error.code)
+    }
+
+    @Test fun rearSceneCapabilityRejectsNewerMinimumVersion() {
+        val error = assertThrows(ModPackageException::class.java) {
+            ModPackageReader.read(signedArchiveWithCapability("rear.scene", minimumVersion = 2).inputStream())
         }
         assertEquals(ModPackageError.UNKNOWN_CAPABILITY, error.code)
     }

@@ -2,6 +2,8 @@ package top.zainzh.rearscreen.platform.mods
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -45,17 +48,21 @@ import android.os.SystemClock
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.window.WindowDialog
+import top.zainzh.rearscreen.AppActionPair
 import top.zainzh.rearscreen.AppCard
+import top.zainzh.rearscreen.AppDialogDecisionContent
 import top.zainzh.rearscreen.AppPalette
 import top.zainzh.rearscreen.AppRow
 import top.zainzh.rearscreen.AppSection
 import top.zainzh.rearscreen.AppToggle
-import top.zainzh.rearscreen.PageFrame
+import top.zainzh.rearscreen.AppPageContent
+import top.zainzh.rearscreen.AppPageWindow
 import top.zainzh.rearscreen.platform.actions.RegisteredActionRef
 
 private val LocalModSceneVisible = staticCompositionLocalOf { true }
@@ -81,6 +88,7 @@ fun ModNativeScene(
     registeredActionDrafts: Map<String, RegisteredActionRef> = emptyMap(),
     onSelectRegisteredAction: (String, RegisteredActionRef?) -> Unit = { _, _ -> },
     onClearRegisteredActionDrafts: () -> Unit = {},
+    standaloneWindow: Boolean = true,
 ) {
     val root = scene.getJSONObject("root")
     var drafts by rememberSaveable(mod.id, scene.optString("scene")) { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -93,13 +101,20 @@ fun ModNativeScene(
             Node(mod, root, state, config, data, drafts, setDraft, clearDrafts, "root", rear, onEvent, onSaveConfig)
         }
     } else {
-        PageFrame(title = mod.name, back = onBack, backTag = "mod_back_${mod.id}") { body, header ->
-            Column(body.padding(start = 20.dp, end = 20.dp, top = header + 12.dp, bottom = 24.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                if (!notice.isNullOrBlank()) Text(notice, Modifier.fillMaxWidth(), fontSize = 13.sp, color = AppPalette.secondary())
-                AppCard { Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) { Node(mod, root, state, config, data, drafts, setDraft, clearDrafts, "root", false, onEvent, onSaveConfig) } }
+        val scroll = rememberScrollState()
+        val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+        val content: @Composable () -> Unit = {
+            AppPageContent(title = mod.name, back = onBack, backTag = "mod_back_${mod.id}",
+                bodyScrollState = scroll, fadeEnabled = !imeVisible) { body, header ->
+                Column(body.padding(start = 20.dp, end = 20.dp).verticalScroll(scroll)
+                    .padding(top = header + 12.dp, bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (!notice.isNullOrBlank()) Text(notice, Modifier.fillMaxWidth(), fontSize = 13.sp, color = AppPalette.secondary())
+                    AppCard { Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) { Node(mod, root, state, config, data, drafts, setDraft, clearDrafts, "root", false, onEvent, onSaveConfig) } }
+                }
             }
         }
+        if (standaloneWindow) AppPageWindow(content) else content()
     } }
 }
 
@@ -211,7 +226,7 @@ private fun Node(
             val binding = node.getJSONObject("value").getString("bind")
             val raw = drafts[binding] ?: resolve(binding)
             val ref = registeredActionDrafts[binding] ?: runCatching { JSONObject(raw).let { RegisteredActionRef(it.getString("id"), it.getInt("version")) } }.getOrNull()
-            AppRow(node.getString("label"), ref?.let { "已选择：${it.id}" } ?: node.optString("hint").ifEmpty { "选择已登记动作" }, action = {
+            AppRow(node.getString("label"), ref?.let { "已选择快捷操作" } ?: node.optString("hint").ifEmpty { "选择已登记动作" }, action = {
                 onSelectRegisteredAction(binding, ref)
             })
         }
@@ -246,10 +261,13 @@ private fun Node(
         "ui.confirm" -> {
             AppRow(node.getString("label"), null, action = { dialogNode = path })
             WindowDialog(show = dialogNode == path, title = node.getString("title"), onDismissRequest = { dialogNode = null }) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                AppDialogDecisionContent(footer = {
+                    AppActionPair("取消", { dialogNode = null }, "确认", {
+                        dialogNode = null
+                        action(node.getJSONObject("onConfirm"))
+                    })
+                }) {
                     Text(node.getString("message"), color = AppPalette.secondary())
-                    TextButton("取消", { dialogNode = null }, Modifier.fillMaxWidth(), minHeight = 48.dp)
-                    TextButton("确认", { dialogNode = null; action(node.getJSONObject("onConfirm")) }, Modifier.fillMaxWidth(), minHeight = 48.dp)
                 }
             }
         }
@@ -267,7 +285,7 @@ private fun Node(
                     else localError = error ?: "设置保存失败"
                 }
             } catch (e: Exception) { localError = e.message ?: "设置值无效" }
-        }, Modifier.fillMaxWidth(), minHeight = 48.dp)
+        }, Modifier.fillMaxWidth(), minHeight = 48.dp, colors = ButtonDefaults.textButtonColorsPrimary())
         "settings.discard" -> TextButton("取消更改", { clearDrafts(); clearRegisteredActionDrafts(); localError = "" }, Modifier.fillMaxWidth(), minHeight = 48.dp)
         else -> Unit
     }

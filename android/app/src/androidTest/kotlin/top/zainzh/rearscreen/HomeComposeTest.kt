@@ -20,21 +20,14 @@ class HomeComposeTest {
     private fun tab(key: String) = compose.onNodeWithContentDescription(s(key))
 
     @Test fun tutorialEntryOpensOfflinePage() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val monitor = instrumentation.addMonitor(TutorialActivity::class.java.name, null, false)
-        var tutorial: TutorialActivity? = null
-        try {
-            compose.onNodeWithTag("home_list").performScrollToNode(hasText(s("tutorial")))
-            aboveNavigation(compose.onNodeWithText(s("tutorial"))).performClick()
-            tutorial = monitor.waitForActivityWithTimeout(5000) as? TutorialActivity
-            assertNotNull(tutorial)
-            compose.onNodeWithTag("tutorial_scroll").performScrollToNode(hasTestTag("tutorial_section_setup"))
-            compose.onNodeWithTag("tutorial_section_setup").assertExists()
-            compose.onNodeWithTag("tutorial_back").performClick()
-        } finally {
-            instrumentation.removeMonitor(monitor)
-            instrumentation.runOnMainSync { tutorial?.finish() }
-        }
+        tab("nav_settings").performClick()
+        compose.onNodeWithTag("settings_list").performScrollToNode(hasText(s("tutorial")))
+        aboveNavigation(compose.onNodeWithText(s("tutorial"))).performClick()
+        compose.onNodeWithTag("tutorial_scroll").performScrollToNode(hasTestTag("tutorial_section_setup"))
+        compose.onNodeWithTag("tutorial_section_setup").assertIsDisplayed()
+        compose.onNodeWithTag("tutorial_back").performClick()
+        compose.onNodeWithTag("settings_list").assertIsDisplayed()
+        tab("nav_settings").assertIsSelected()
     }
     private fun swipe(left: Boolean) {
         compose.onNodeWithTag("main_pager").performTouchInput {

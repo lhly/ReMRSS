@@ -104,25 +104,20 @@ class Rc5SignedModNativeSceneProbeTest {
         val mainActivities = CopyOnWriteArrayList<MainActivity>()
         val resumedMainActivities = CopyOnWriteArrayList<MainActivity>()
         val createdActivities = CopyOnWriteArrayList<ModRearSceneActivity>()
-        val settingsActivities = CopyOnWriteArrayList<ModSettingsActivity>()
         val resumedScenes = CopyOnWriteArrayList<ModRearSceneActivity>()
-        val resumedSettings = CopyOnWriteArrayList<ModSettingsActivity>()
         val lifecycle = object : Application.ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, state: android.os.Bundle?) {
                 if (activity is MainActivity) mainActivities += activity
                 if (activity is ModRearSceneActivity) createdActivities += activity
-                if (activity is ModSettingsActivity) settingsActivities += activity
             }
             override fun onActivityStarted(activity: Activity) = Unit
             override fun onActivityResumed(activity: Activity) {
                 if (activity is MainActivity) resumedMainActivities += activity
                 if (activity is ModRearSceneActivity) resumedScenes += activity
-                if (activity is ModSettingsActivity) resumedSettings += activity
             }
             override fun onActivityPaused(activity: Activity) {
                 if (activity is MainActivity) resumedMainActivities.remove(activity)
                 if (activity is ModRearSceneActivity) resumedScenes.remove(activity)
-                if (activity is ModSettingsActivity) resumedSettings.remove(activity)
             }
             override fun onActivityStopped(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) = Unit
@@ -132,9 +127,7 @@ class Rc5SignedModNativeSceneProbeTest {
                     resumedMainActivities.remove(activity)
                 }
                 if (activity is ModRearSceneActivity) createdActivities.remove(activity)
-                if (activity is ModSettingsActivity) settingsActivities.remove(activity)
                 if (activity is ModRearSceneActivity) resumedScenes.remove(activity)
-                if (activity is ModSettingsActivity) resumedSettings.remove(activity)
             }
         }
         var lifecycleRegistered = false
@@ -148,14 +141,14 @@ class Rc5SignedModNativeSceneProbeTest {
             check("rear.scene.keep_visible" in installed.grantedCapabilities) {
                 "本次隔离验收必须只为私有签名夹具明确授权保持显示能力"
             }
-            // Same exact owner tuple as ModSettingsActivity.openRear(); capture before any Scene action
+            // Same exact owner tuple as ModSettingsPage.openRear(); capture before any Scene action
             // so finally can close an accepted lease even if its Activity route was never observed.
             fixtureOwner = core.modDataOwner(installed.id)
                 ?: error("启用且获信任的 R37 fixture 未能解析精确 Mod owner")
             app.registerActivityLifecycleCallbacks(lifecycle)
             lifecycleRegistered = true
             Log.i(TAG, "stage=fixture_enabled")
-            openModSettingsFromMain(context, instrumentation, verified.name, resumedMainActivities, resumedSettings)
+            openModSettingsFromMain(context, instrumentation, verified.name, resumedMainActivities)
             waitFor("test Mod 的宿主设置行") {
                 clickScopedAction(instrumentation, context.packageName, Display.DEFAULT_DISPLAY,
                     listOf("Mod 管理", verified.name), "显示到背屏")
@@ -373,9 +366,6 @@ class Rc5SignedModNativeSceneProbeTest {
                     }
                 }
             }
-            settingsActivities.toList().forEach { activity ->
-                cleanup { instrumentation.runOnMainSync { if (!activity.isFinishing && !activity.isDestroyed) activity.finish() } }
-            }
             mainActivities.toList().forEach { activity ->
                 cleanup { instrumentation.runOnMainSync { if (!activity.isFinishing && !activity.isDestroyed) activity.finish() } }
             }
@@ -451,8 +441,7 @@ class Rc5SignedModNativeSceneProbeTest {
         instrumentation: android.app.Instrumentation,
         modName: String,
         resumedMainActivities: List<MainActivity>,
-        resumedSettings: List<ModSettingsActivity>,
-    ): ModSettingsActivity {
+    ): MainActivity {
         val request = ++fixtureMainRequest
         val runId = fixtureRunId()
         Log.i(TAG, "stage=fixture_needs_main request=$request run=$runId")
@@ -474,13 +463,11 @@ class Rc5SignedModNativeSceneProbeTest {
         assertEquals("ZIP Mods entry is unique on the visible host window", 1, findTexts(root, zipMods).size)
         check(clickMainAction(instrumentation, context.packageName, zipMods)) { "主屏 ZIP Mods 入口不可用" }
         Log.i(TAG, "stage=fixture_main_ready request=$request display=${main.window.decorView.display?.displayId} run=$runId")
-        val settings = waitForActivity(resumedSettings) { activity ->
-            activity.hasWindowFocus() && activity.window.decorView.display?.displayId == Display.DEFAULT_DISPLAY
-        }
-        assertEquals(Display.DEFAULT_DISPLAY, settings.window.decorView.display?.displayId)
         waitForHostTexts(instrumentation, context.packageName, listOf("Mod 管理", modName))
         requireUniqueModEntry(instrumentation, context.packageName, modName)
-        return settings
+        check(main in resumedMainActivities && main.hasWindowFocus() &&
+            main.window.decorView.display?.displayId == Display.DEFAULT_DISPLAY)
+        return main
     }
 
     private fun waitForMainActivity(
@@ -1263,19 +1250,6 @@ class Rc5SignedModNativeSceneProbeTest {
             SystemClock.sleep(200)
         }
         error("超时：$description")
-    }
-
-    private fun waitForActivity(
-        activities: List<ModSettingsActivity>,
-        timeoutMs: Long = 15_000,
-        predicate: (ModSettingsActivity) -> Boolean,
-    ): ModSettingsActivity {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            activities.toList().asReversed().firstOrNull(predicate)?.let { return it }
-            SystemClock.sleep(100)
-        }
-        error("超时：主屏 Mod 设置 Activity 未就绪")
     }
 
     private fun waitForSceneActivity(

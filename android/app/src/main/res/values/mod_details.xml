@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mod_detail_title">Mod details</string>
+    <string name="mod_detail_actions">Actions</string>
+    <string name="mod_detail_permissions">Capabilities</string>
+    <string name="mod_detail_management">Manage</string>
+    <string name="mod_list_enable">Enable %1$s</string>
+</resources>

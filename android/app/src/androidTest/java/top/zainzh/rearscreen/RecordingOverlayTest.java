@@ -17,8 +17,7 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import java.io.File;
-import java.io.FileOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.concurrent.CountDownLatch;
@@ -87,8 +86,20 @@ public class RecordingOverlayTest {
     }
     void screenshot(String name) throws Exception {
         instrumentation.waitForIdleSync(); Thread.sleep(120);
-        try (FileOutputStream output = new FileOutputStream(new File(context.getCacheDir(), name + ".png"))) {
-            instrumentation.getUiAutomation().takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output);
+        android.graphics.Bitmap screenshot = instrumentation.getUiAutomation().takeScreenshot();
+        assertNotNull("The emulator must return a screenshot", screenshot);
+        int width = Math.min(screenshot.getWidth(), 540);
+        android.graphics.Bitmap preview = android.graphics.Bitmap.createScaledBitmap(
+                screenshot, width, screenshot.getHeight() * width / screenshot.getWidth(), true);
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            assertTrue(preview.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, output));
+            android.os.Bundle bundle = new android.os.Bundle();
+            bundle.putString("rc6_jpg_" + name,
+                    android.util.Base64.encodeToString(output.toByteArray(), android.util.Base64.NO_WRAP));
+            instrumentation.addResults(bundle);
+        } finally {
+            if (preview != screenshot) preview.recycle();
+            screenshot.recycle();
         }
     }
     @Test public void themeUpdatesExistingWindowAndKeepsRecordingUiState() throws Exception {
@@ -107,15 +118,16 @@ public class RecordingOverlayTest {
         instrumentation.runOnMainSync(() -> {
             try {
                 // Model an already-running recorder without requiring a physical rear display.
-                java.lang.reflect.Method render = ScreenRecordService.class.getDeclaredMethod("updateRecordButtonState", View.class, boolean.class);
-                render.setAccessible(true); render.invoke(service, toggle, true); close.setVisibility(View.GONE);
+                setField("phase", RecordingPhase.RECORDING);
+                java.lang.reflect.Method render = ScreenRecordService.class.getDeclaredMethod("renderControls");
+                render.setAccessible(true); render.invoke(service);
                 WindowManager.LayoutParams copy = new WindowManager.LayoutParams(); copy.copyFrom((WindowManager.LayoutParams) panel.getLayoutParams()); position.set(copy);
             } catch (Exception error) { throw new AssertionError(error); }
         });
         shell("cmd uimode night no");
         waitFor(() -> (service.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_YES);
         instrumentation.runOnMainSync(() -> {
-            assertSame(panel, field(service, "floatingView")); assertTrue(toggle.isActivated()); assertEquals(View.GONE, close.getVisibility());
+            assertSame(panel, field(service, "floatingView")); assertTrue(toggle.isActivated()); assertEquals(View.INVISIBLE, close.getVisibility());
             assertEquals(service.getString(R.string.ui_recording_stop), toggle.getContentDescription());
             assertEquals(position.get().x, ((WindowManager.LayoutParams) panel.getLayoutParams()).x);
             assertEquals(position.get().y, ((WindowManager.LayoutParams) panel.getLayoutParams()).y);
@@ -140,6 +152,40 @@ public class RecordingOverlayTest {
         waitFor(() -> !ScreenRecordService.isRunning()); assertFalse(panel.isAttachedToWindow());
     }
 
+    @Test public void failedPreparationKeepsButtonInPlaceAndAllowsRetry() throws Exception {
+        View toggle = panel.findViewWithTag("recording_toggle"), close = panel.findViewWithTag("recording_close");
+        CountDownLatch backend = new CountDownLatch(1);
+        ITaskService remote = (ITaskService) Proxy.newProxyInstance(ITaskService.class.getClassLoader(),
+                new Class<?>[]{ITaskService.class}, (mock, method, args) -> {
+                    if (method.getName().equals("executeShellCommand")) return true;
+                    if (method.getName().equals("getRearPhysicalDisplayId")) {
+                        backend.await(3, TimeUnit.SECONDS);
+                        return "";
+                    }
+                    throw new AssertionError(method.getName());
+                });
+        int[] initial = new int[2];
+        instrumentation.runOnMainSync(() -> {
+            setField("taskService", remote);
+            toggle.getLocationOnScreen(initial);
+            toggle.performClick();
+            assertEquals(RecordingPhase.PREPARING, ScreenRecordService.currentPhase());
+            assertFalse(toggle.isEnabled());
+            assertFalse(toggle.isActivated());
+            assertEquals(View.INVISIBLE, close.getVisibility());
+        });
+        backend.countDown();
+        waitFor(() -> ScreenRecordService.currentPhase() == RecordingPhase.START_FAILED);
+        instrumentation.runOnMainSync(() -> {
+            int[] position = new int[2];
+            toggle.getLocationOnScreen(position);
+            assertArrayEquals(initial, position);
+            assertTrue(toggle.isEnabled());
+            assertEquals(View.VISIBLE, close.getVisibility());
+        });
+        screenshot("recording-overlay-start-failed");
+    }
+
     @Test public void stoppingOverlayFinalizesInFlightRecordingBeforeDisconnecting() throws Exception {
         String output = "/storage/emulated/0/Movies/ReMRSS_20261118_120000.mp4";
         int pid = 4242;
@@ -148,7 +194,8 @@ public class RecordingOverlayTest {
         CountDownLatch scanned = new CountDownLatch(1);
         ITaskService remote = (ITaskService) Proxy.newProxyInstance(ITaskService.class.getClassLoader(),
                 new Class<?>[]{ITaskService.class}, (mock, method, args) -> {
-                    if (method.getName().equals("executeShellCommandWithResult")) return output;
+                    if (method.getName().equals("executeShellCommandWithResult"))
+                        return signalled.getCount() > 0 ? "active" : "stopped";
                     if (!method.getName().equals("executeShellCommand")) throw new AssertionError(method.getName());
                     if (stopCommand.equals(args[0])) signalled.countDown();
                     if (("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + output)

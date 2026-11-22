@@ -115,14 +115,18 @@ internal class AiRearShortcutOrder(private val gap: Float) {
 @Composable internal fun KeepShortcutDragInView(order: AiRearShortcutOrder, keys: List<Int>, list: LazyListState) {
     val density = LocalDensity.current
     val edge = with(density) { 36.dp.toPx() }
-    val step = with(density) { 10.dp.toPx() }
+    val nominalStep = with(density) { 10.dp.toPx() }
     LaunchedEffect(order.movingKey, list, keys) {
         if (order.movingKey == null) return@LaunchedEffect
-        snapshotFlow { order.autoscroll(keys, edge, step) }.collectLatest { pixels ->
-            if (pixels == 0f) return@collectLatest
+        snapshotFlow { order.autoscroll(keys, edge, nominalStep) != 0f }.collectLatest { active ->
+            if (!active) return@collectLatest
+            var previousFrame = withFrameNanos { it }
             while (order.movingKey != null) {
-                withFrameNanos { }
-                if (list.scrollBy(pixels) == 0f) break
+                val now = withFrameNanos { it }
+                val step = nominalStep * ((now - previousFrame) / 16_666_667f).coerceIn(0f, 2f)
+                previousFrame = now
+                val delta = order.autoscroll(keys, edge, step)
+                if (delta == 0f || list.scrollBy(delta) == 0f) break
             }
         }
     }

@@ -11,14 +11,12 @@ final class RearAnimationDisplay {
 
     static void prepare(ITaskService service, RearAnimationManager.Session session, String ownPackage) throws Exception {
         String foreground = service.getForegroundAppOnDisplay(RearDisplay.requireId());
-        if (foreground != null && (!foreground.startsWith(ownPackage + ":") || RearInfoSession.owns(foreground, ownPackage)
-                || RearModuleSession.INSTANCE.owns(foreground, ownPackage))
+        if (foreground != null && (!foreground.startsWith(ownPackage + ":") || RearInfoSession.owns(foreground, ownPackage))
                 && !foreground.startsWith("com.xiaomi.subscreencenter:")
                 && !foreground.startsWith("com.xiaomi.mirror:")) {
             try { session.rearTaskId = Integer.parseInt(foreground.substring(foreground.lastIndexOf(':') + 1)); }
             catch (NumberFormatException ignored) { }
         }
-        RearModuleSession.INSTANCE.captureAnimationTask(session.id, session.rearTaskId);
         // 先唤醒，让系统退出Doze，再将动画置前。force-stop会触发官方延迟重睡眠。
         service.executeShellCommand("input -d " + RearDisplay.requireId() + " keyevent KEYCODE_WAKEUP");
     }

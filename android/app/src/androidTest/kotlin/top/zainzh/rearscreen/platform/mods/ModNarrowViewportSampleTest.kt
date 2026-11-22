@@ -46,14 +46,14 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import top.zainzh.rearscreen.AppTheme
-import top.zainzh.rearscreen.NativeModuleRendererTestHostActivity
+import top.zainzh.rearscreen.ComposeTestHostActivity
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 
 /** Renderer-only layout/event checks; the exported frames are for root's manual final glyph review. */
 @RunWith(AndroidJUnit4::class)
 class ModNarrowViewportSampleTest {
-    @get:Rule val compose = createAndroidComposeRule<NativeModuleRendererTestHostActivity>()
+    @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     private data class LocalMode(val densityFontScale: Float, val configurationFontScale: Float, val nightMode: Int)
 

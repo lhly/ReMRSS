@@ -8,7 +8,7 @@
     <string name="ai_rear_all_apps_hint">占用右下角第六格；开启后锁屏也可查看应用列表。</string>
     <string name="ai_rear_empty_slot">未绑定</string>
     <string name="ai_rear_pick_wallpaper">选择替换对象</string>
-    <string name="ai_rear_pick_hint">请选择一张以后不打算再用的 AI 壁纸。替换前会备份，之后可恢复原壁纸。</string>
+    <string name="ai_rear_pick_hint">选择一张 AI 壁纸。原图会先备份。</string>
     <string name="ai_rear_connect">请在背屏首页连接 Shizuku 后查看本机 AI 壁纸。</string>
     <string name="ai_rear_loading">正在读取本机 AI 壁纸…</string>
     <string name="ai_rear_no_wallpapers">没有可读取的本机 AI 壁纸。</string>
@@ -26,7 +26,7 @@
     <string name="ai_rear_write_error">未确认写入或恢复完成。请保持 Shizuku 连接，从这里重试恢复；恢复前请勿卸载 ReMRSS。</string>
 
     <string name="ai_rear_allow_unlocked">主屏解锁时也可启动</string>
-    <string name="ai_rear_allow_unlocked_hint">关闭时，只能在主屏锁定时使用背屏快捷键。</string>
+    <string name="ai_rear_allow_unlocked_hint">适用于所有背屏快捷键。关闭时，仅主屏锁定时可用。</string>
     <string name="ai_rear_unlocked_blocked">请先锁定主屏</string>
     <string name="ai_rear_shortcuts_connect">请连接 Shizuku</string>
     <string name="ai_rear_shortcuts_not_prepared">请准备快捷启动</string>
@@ -35,7 +35,7 @@
     <string name="ai_rear_shortcuts_virtual">请开启虚拟投放</string>
     <string name="ai_rear_shortcuts_app_failed">无法打开应用</string>
     <string name="ai_rear_button_settings">快捷启动选项</string>
-    <string name="ai_rear_grid_cast_title">应用到背屏</string>
+    <string name="ai_rear_grid_cast_title">快捷启动设置</string>
     <string name="ai_rear_checking_work">正在检查这张壁纸…</string>
     <string name="ai_rear_legacy_title">替换这张壁纸上的旧主题？</string>
     <string name="ai_rear_legacy_confirm">这张壁纸曾由 ReMRSS 替换。继续会用当前配置更新背屏启动器，原画备份会保留。</string>
@@ -59,7 +59,7 @@
     <string name="ai_rear_backup_replace">备份并替换</string>
     <string name="ai_rear_prepare">准备快捷启动</string>
     <string name="ai_rear_prepared">快捷启动已就绪。</string>
-    <string name="ai_rear_prepare_hint">在妙享背屏应用所选作品后，解锁主屏，点此准备。</string>
+    <string name="ai_rear_prepare_hint">请先在「妙享背屏」重新应用此作品。</string>
     <string name="ai_rear_prepare_failed">未能准备快捷启动。请确认 Shizuku 已连接、主屏已解锁，且官方背屏没有其他投放。</string>
     <string name="ai_rear_virtual_required">请先在「投放与显示」开启虚拟投放。</string>
     <string name="ai_rear_disarm">停用快捷启动</string>
@@ -70,14 +70,14 @@
     <string name="ai_rear_restoring">正在恢复原壁纸…</string>
     <string name="ai_rear_replacing">正在备份并替换…</string>
     <string name="ai_rear_preparing">正在准备快捷启动…</string>
-    <string name="ai_rear_replace_ready">替换会保留原作备份。随后到妙享背屏重新应用这张作品。</string>
+    <string name="ai_rear_replace_ready">备份并替换后，请在「妙享背屏」重新应用同一作品。</string>
     <string name="ai_rear_slot_summary">第 %1$d 格，%2$s</string>
     <string name="ai_rear_back_to_wallpaper">返回壁纸</string>
     <string name="ai_rear_app_unavailable_short">不支持投放</string>
-    <string name="ai_rear_edit_draft">点任一格可改草稿。更换已应用的布局前，请先恢复原壁纸。</string>
+    <string name="ai_rear_edit_draft">这是布局草稿。应用新版前，请先恢复原壁纸。</string>
     <string name="ai_rear_shortcuts_title">快捷应用</string>
-    <string name="ai_rear_configured_shortcuts">已添加 %1$d / %2$d</string>
     <string name="ai_rear_available_shortcuts">未添加</string>
+    <string name="ai_rear_shortcut_can_park">可暂存第六个应用，关闭「全部应用」后显示。</string>
     <string name="ai_rear_shortcut_parked">暂不显示 · 第六格由「全部应用」占用</string>
     <string name="ai_rear_shortcuts_empty">勾选下方的应用即可添加。</string>
     <string name="ai_rear_shortcuts_full">最多添加 6 个应用，移除一个后可继续添加。</string>
@@ -109,4 +109,5 @@
     <string name="ai_rear_uninstall_restore_first">未卸载 Mod：未能确认壁纸恢复。备份仍可在背屏启动器中处理。</string>
     <string name="ai_rear_mod_uninstalled">已卸载 %1$s，并恢复原壁纸。请在妙享背屏重新应用原作。</string>
     <string name="ai_rear_written_work">已备份并替换「%1$s」。请在妙享背屏重新应用这张作品。</string>
+    <string name="ai_rear_current_work">当前作品</string>
 </resources>

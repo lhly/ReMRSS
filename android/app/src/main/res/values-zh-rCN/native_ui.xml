@@ -11,7 +11,7 @@
     <string name="ui_auto_destroy_time" formatted="false">自动销毁时间</string>
     <string name="ui_notification_duration_title" formatted="false">通知显示时长</string>
     <string name="ui_notification_never_close" formatted="false">不自动关闭</string>
-    <string name="ui_notification_never_close_help" formatted="false">通知仍有效时持续显示。保持屏幕开启会增加耗电；通知撤回或关闭此功能时仍会结束。</string>
+    <string name="ui_notification_never_close_help" formatted="false">更耗电；通知撤回或关闭背屏通知时结束。</string>
     <string name="ui_notification_click_action" formatted="false">点击通知</string>
     <string name="ui_notification_click_action_help" formatted="false">主屏锁定且熄屏或处于息屏显示时，优先打开通知详情，不支持时尝试打开来源应用。投放期间，点按通知胶囊只会关闭提醒。</string>
     <string name="ui_notification_click_open" formatted="false">在主屏打开应用</string>
@@ -40,10 +40,10 @@
     <string name="ui_connection_ready" formatted="false">Shizuku 已就绪</string>
     <string name="ui_copied" formatted="false">已复制</string>
     <string name="ui_dark_notification_help" formatted="false">背屏通知使用深色背景</string>
-    <string name="ui_deselect_all" formatted="false">全不选</string>
+    <string name="ui_deselect_all" formatted="false">取消当前 {0} 项</string>
     <string name="ui_diagnostics" formatted="false">诊断信息</string>
     <string name="ui_display_wake" formatted="false">显示与唤醒</string>
-    <string name="ui_dnd_help" formatted="false">系统开启勿扰时，暂停背屏通知</string>
+    <string name="ui_dnd_help" formatted="false">系统勿扰期间暂停背屏通知。</string>
     <string name="ui_dpi_caption" formatted="false">背屏 DPI</string>
     <string name="ui_dpi_help" formatted="false">调整背屏上内容的大小</string>
     <string name="ui_dpi_range" formatted="false">请输入正整数，建议 260–350</string>
@@ -95,7 +95,7 @@
     <string name="ui_screen_title" formatted="false">背屏</string>
     <string name="ui_search_apps" formatted="false">搜索应用</string>
     <string name="ui_seconds_value" formatted="false">{0} 秒</string>
-    <string name="ui_select_all" formatted="false">全选</string>
+    <string name="ui_select_all" formatted="false">选择当前 {0} 项</string>
     <string name="ui_selected_count" formatted="false">已选择 {0} 个应用</string>
     <string name="ui_shizuku_not_running" formatted="false">Shizuku 未运行</string>
     <string name="ui_shizuku_permission_denied" formatted="false">Shizuku 权限被拒绝</string>
@@ -103,7 +103,7 @@
     <string name="ui_toast_duration_set" formatted="false">已设置为 {0} 秒</string>
     <string name="ui_toast_rotation_failed" formatted="false">旋转失败</string>
     <string name="ui_tutorial" formatted="false">使用教程</string>
-    <string name="ui_upside_help" formatted="false">主屏朝下且被遮盖时才投送通知</string>
+    <string name="ui_upside_help" formatted="false">仅主屏朝下被遮盖时投送。</string>
     <string name="ui_uri_copy" formatted="false">复制当前版本 URI</string>
     <string name="ui_uri_help" formatted="false">使用 mrss:// 调用切屏、返回、截图和显示配置。可接入自动化工具。</string>
     <string name="ui_uri_title" formatted="false">自动化入口</string>
@@ -159,7 +159,7 @@
     <string name="ui_current_version" formatted="false">当前版本：{0}</string>
     <string name="ui_update_size" formatted="false">安装包大小：{0}</string>
     <string name="ui_nav_modules" formatted="false">模块</string>
-    <string name="ui_nav_settings" formatted="false">设置</string>
+    <string name="ui_nav_settings" formatted="false">更多</string>
     <string name="ui_nav_cast" formatted="false">投放与显示</string>
     <string name="ui_nav_cast_help" formatted="false">选择背屏投放方式并查看显示选项。</string>
     <string name="ui_nav_wake" formatted="false">唤醒与息屏</string>
@@ -178,4 +178,12 @@
     <string name="ui_settings_runtime" formatted="false">运行状态</string>
     <string name="ui_settings_usage" formatted="false">使用</string>
     <string name="ui_settings_support" formatted="false">版本与支持</string>
+    <string name="ui_wake_behavior">唤醒模式</string>
+    <string name="ui_rotation_unavailable">未读取到当前方向</string>
+    <string name="ui_charging_standby">待生效</string>
+    <string name="ui_charging_requires_animation">开启充电动画后，常亮偏好才会生效。</string>
+    <string name="ui_notification_duration_scope">适用于转发通知。SDK 和 Mod 通知按各自的期限关闭。</string>
+    <string name="ui_cancel_download">取消下载</string>
+    <string name="ui_number_range_error">请输入 %1$d 到 %2$d 之间的数字。</string>
+    <string name="ui_notification_duration_current">当前：%1$s</string>
 </resources>

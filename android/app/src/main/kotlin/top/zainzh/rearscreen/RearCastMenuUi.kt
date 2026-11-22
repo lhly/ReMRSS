@@ -5,13 +5,14 @@ import android.view.View
 import android.view.animation.PathInterpolator
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ViewCompositionStrategy
@@ -20,13 +21,19 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Text
 
 /** Compact drawer inside the physical safe area; all input is dispatched locally. */
 class RearCastMenuUi(activity: ComponentActivity, exit: Runnable, left: Runnable, right: Runnable, viewport: Runnable, dismiss: Runnable) {
     private var animationGeneration = 0
-    private var controlsBusy by mutableStateOf(false)
+    private var operationLabel by mutableIntStateOf(0)
+    private val controlsBusy get() = operationLabel != 0
     private var gestureY by mutableFloatStateOf(Float.NaN)
     private var fullViewport by mutableStateOf(false)
     private val content = ComposeView(activity).apply {
@@ -39,24 +46,46 @@ class RearCastMenuUi(activity: ComponentActivity, exit: Runnable, left: Runnable
                 )) {
                     val density = LocalDensity.current
                     val inset = with(density) { 8.dp.roundToPx() }
-                    val drawerHeight = with(density) { 56.dp.roundToPx() }
                     val availableHeight = with(density) { maxHeight.roundToPx() }
-                    val drawerWidth = minOf(212.dp, (maxWidth - 16.dp).coerceAtLeast(48.dp))
+                    val usableWidth = (maxWidth - 16.dp).coerceAtLeast(0.dp)
+                    val columns = when {
+                        usableWidth >= 212.dp -> 4
+                        usableWidth >= 108.dp -> 2
+                        else -> 1
+                    }
+                    val drawerWidth = if (controlsBusy) minOf(212.dp, usableWidth) else minOf(usableWidth, (4 + columns * 52).dp)
+                    val heightLimit = (maxHeight - 16.dp).coerceAtLeast(0.dp)
+                    var measuredHeight by remember { mutableIntStateOf(0) }
+                    val approximateHeight = minOf(heightLimit, (4 + (4 / columns) * 52).dp)
+                    val drawerHeight = measuredHeight.takeIf { it > 0 } ?: with(density) { approximateHeight.roundToPx() }
                     AppCard(Modifier.align(Alignment.TopEnd).padding(end = 8.dp).width(drawerWidth)
                         .offset {
                             val center = gestureY.takeIf { it.isFinite() } ?: (availableHeight / 2f)
                             IntOffset(0, (center - drawerHeight / 2f).toInt()
                                 .coerceIn(inset, (availableHeight - drawerHeight - inset).coerceAtLeast(inset)))
-                        }.clickable(
+                        }.onSizeChanged { measuredHeight = it.height }.clickable(
                             interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}
                         )) {
-                        Row(Modifier.horizontalScroll(rememberScrollState()).padding(4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            DrawerAction(R.drawable.ic_rear_cast_exit, R.string.rear_cast_menu_exit, controlsBusy, exit)
-                            DrawerAction(R.drawable.ic_rear_cast_rotate_left, R.string.rear_cast_menu_left, controlsBusy, left)
-                            DrawerAction(R.drawable.ic_rear_cast_rotate_right, R.string.rear_cast_menu_right, controlsBusy, right)
-                            DrawerAction(if (fullViewport) R.drawable.ic_rear_cast_avoid_camera else R.drawable.ic_rear_cast_full,
-                                if (fullViewport) R.string.rear_cast_menu_avoid_camera else R.string.rear_cast_menu_full, controlsBusy, viewport)
+                        if (controlsBusy) {
+                            Text(stringResource(operationLabel),
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                                    .semantics { liveRegion = LiveRegionMode.Polite },
+                                color = AppPalette.text(), fontSize = 13.sp)
+                        } else {
+                            val actions = listOf(
+                                Triple(R.drawable.ic_rear_cast_exit, R.string.rear_cast_menu_exit, exit),
+                                Triple(R.drawable.ic_rear_cast_rotate_left, R.string.rear_cast_menu_left, left),
+                                Triple(R.drawable.ic_rear_cast_rotate_right, R.string.rear_cast_menu_right, right),
+                                Triple(if (fullViewport) R.drawable.ic_rear_cast_avoid_camera else R.drawable.ic_rear_cast_full,
+                                    if (fullViewport) R.string.rear_cast_menu_avoid_camera else R.string.rear_cast_menu_full, viewport))
+                            Column(Modifier.heightIn(max = heightLimit).verticalScroll(rememberScrollState()).padding(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                actions.chunked(columns).forEach { row ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        row.forEach { (icon, label, action) -> DrawerAction(icon, label, false, action) }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -77,7 +106,7 @@ class RearCastMenuUi(activity: ComponentActivity, exit: Runnable, left: Runnable
         }
     }
     fun anchor(y: Float) { gestureY = y }
-    fun setBusy(value: Boolean) { controlsBusy = value }
+    fun showOperation(label: Int) { operationLabel = label }
     fun updateViewportMode(value: Boolean) { fullViewport = value }
     fun show(open: Boolean) {
         val generation = ++animationGeneration
@@ -96,7 +125,7 @@ class RearCastMenuUi(activity: ComponentActivity, exit: Runnable, left: Runnable
             } else { view.visibility = View.INVISIBLE; content.alpha = 0f }
             return
         }
-        controlsBusy = false
+        operationLabel = 0
         view.visibility = View.VISIBLE
         if (animate) {
             if (!wasVisible) { content.alpha = 0f; content.translationX = distance }

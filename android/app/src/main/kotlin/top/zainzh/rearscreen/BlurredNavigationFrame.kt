@@ -43,13 +43,14 @@ internal fun navigationLightAngle(gravityX: Float, gravityY: Float): Float =
         (atan2(gravityY, gravityX) / (PI / 60)).roundToInt() * (PI / 60).toFloat()
     else (-PI / 2).toFloat()
 
-/** The content capture excludes navigation overlays, avoiding recursive glass sampling. */
+/** Capture only the tabs' background; both the rail and the incoming page are separate layers. */
 @RequiresApi(33)
 @Composable
 internal fun BlurredNavigationFrame(
     modifier: Modifier,
     content: @Composable (Modifier) -> Unit,
     navigation: @Composable BoxScope.() -> Unit,
+    foreground: @Composable BoxScope.() -> Unit,
 ) {
     val background = AppPalette.background()
     val backdrop = rememberLayerBackdrop { drawRect(background); drawContent() }
@@ -94,9 +95,16 @@ internal fun BlurredNavigationFrame(
             }.filterNotNull().collect { angle.floatValue = it }
         }
     }
-    val material = remember(backdrop, tabsBackdrop, dark) { GlassNavigationMaterial(backdrop, tabsBackdrop, dark, angle) }
+    val surfaceColor = AppPalette.navigationSurface()
+    val material = remember(backdrop, tabsBackdrop, dark, surfaceColor) {
+        GlassNavigationMaterial(backdrop, tabsBackdrop, dark, surfaceColor, angle)
+    }
     CompositionLocalProvider(LocalNavigationMaterial provides material) {
-        Box(modifier.then(press.modifier)) { content(Modifier.layerBackdrop(backdrop)); navigation() }
+        Box(modifier.then(press.modifier)) {
+            content(Modifier.layerBackdrop(backdrop))
+            navigation()
+            foreground()
+        }
     }
 }
 
@@ -105,27 +113,27 @@ private class GlassNavigationMaterial(
     private val backdrop: Backdrop,
     private val tabs: LayerBackdrop,
     private val dark: Boolean,
+    private val surface: Color,
     private val angle: State<Float>,
 ) : NavigationMaterial {
     override val samplesContent = true
-    private val combined = NavigationCombinedBackdrop(backdrop, tabs)
+    private val railTint = surface.copy(alpha = if (dark) .78f else .88f)
+    private val combined = NavigationCombinedBackdrop(backdrop, tabs, railTint)
     override fun Modifier.captureTabs() = this.alpha(0f).layerBackdrop(tabs)
 
-    @Composable override fun Modifier.surface(shape: Shape, press: () -> Float, indicator: Boolean, compact: Boolean): Modifier {
-        val surface = AppPalette.navigationSurface()
-        val tint = surface.copy(alpha = if (dark) .44f else .38f)
+    @Composable override fun Modifier.surface(shape: Shape, press: () -> Float, indicator: Boolean): Modifier {
         return this.drawBackdrop(
             backdrop = if (indicator) combined else backdrop,
             shape = { shape },
             effects = {
-                padding = maxOf(padding, if (compact) 20.dp.toPx() else 40.dp.toPx())
+                padding = maxOf(padding, 40.dp.toPx())
                 if (indicator) {
                     val p = .12f + .88f * press()
                     navigationLens(10.dp.toPx() * p, 14.dp.toPx() * p, depthEffect = true, chromaticAberration = .3f * press())
                 } else {
                     colorControls(saturation = 1.5f)
                     blur(4.dp.toPx(), 4.dp.toPx())
-                    val depth = if (compact) 8.dp.toPx() else 24.dp.toPx()
+                    val depth = 24.dp.toPx()
                     navigationLens(depth, depth * (1f + .15f * press()))
                 }
             },
@@ -138,10 +146,10 @@ private class GlassNavigationMaterial(
             onDrawSurface = {
                 if (indicator) {
                     drawRect((if (dark) Color.White else Color.Black).copy(alpha = .08f * (1f - press())))
-                } else drawRect(tint)
+                } else drawRect(railTint)
             },
         ).innerShadow(shape) {
-            radius = (if (compact) 3.dp else 6.dp).toPx()
+            radius = 6.dp.toPx()
             color = Color.Black
             alpha = (if (dark) .12f else .06f) + .05f * press()
             offset = androidx.compose.ui.geometry.Offset(0f, 1.dp.toPx())
@@ -151,13 +159,19 @@ private class GlassNavigationMaterial(
 
 /** Composite the emphasized tabs over the page before the indicator refracts them. */
 @RequiresApi(33)
-private class NavigationCombinedBackdrop(private val page: Backdrop, private val tabs: Backdrop) : Backdrop {
+private class NavigationCombinedBackdrop(
+    private val page: Backdrop,
+    private val tabs: Backdrop,
+    private val pageTint: Color,
+) : Backdrop {
     override val isCoordinatesDependent = true
     override val offsetResidualX get() = page.offsetResidualX
     override val offsetResidualY get() = page.offsetResidualY
     override fun DrawScope.drawBackdrop(density: Density, coordinates: LayoutCoordinates?,
         layerBlock: (GraphicsLayerScope.() -> Unit)?, downscaleFactor: Int) {
         with(page) { drawBackdrop(density, coordinates, layerBlock, downscaleFactor) }
+        // Tint only the busy page pixels; emphasized tab labels must stay saturated.
+        drawRect(pageTint)
         with(tabs) { drawBackdrop(density, coordinates, layerBlock, downscaleFactor) }
     }
 }

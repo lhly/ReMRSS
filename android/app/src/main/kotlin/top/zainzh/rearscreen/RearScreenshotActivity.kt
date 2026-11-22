@@ -27,105 +27,130 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.window.WindowDialog
 import java.util.concurrent.Executors
 
-/** Settings and preview share the same template parser and compositor as real exports. */
+/** Standalone screenshot settings entry; Debug can provide a fixture shell model. */
 open class RearScreenshotActivity : ComponentActivity() {
-    // Overridden only by the debug preview fixture; capture always uses the real Build.DEVICE.
     protected open fun templateDevice(): String = android.os.Build.DEVICE
-    private fun supported() = RearShellRepository.resourceId(templateDevice(), "BK") != 0L
-    private fun savedOptions() = RearScreenshotPreferences.readForDevice(this, templateDevice())
-    private val worker = Executors.newSingleThreadExecutor()
-    private var revision by mutableIntStateOf(0)
-    private var preview by mutableStateOf<Bitmap?>(null)
-    private var loading by mutableStateOf(false)
-    private var failed by mutableStateOf(false)
-    private var picker by mutableStateOf<String?>(null)
-    private var request = 0
-    private lateinit var list: androidx.compose.foundation.lazy.LazyListState
+    private lateinit var page: RearScreenshotPage
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        list = state.listState("rear_screenshot_list")
-        picker = state?.getString("rear_screenshot_picker")
-        if (savedOptions().shell && supported()) loadPreview()
-        miuixContent {
-            val options = remember(revision) { savedOptions() }
-            PageFrame(getString(R.string.rear_screenshot_title), ::finish, "screenshot_back") { pageModifier, headerInset ->
-                LazyColumn(state = list, modifier = pageModifier.testTag("screenshot_scroll"),
-                    contentPadding = PaddingValues(20.dp, headerInset + 8.dp, 20.dp, 28.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    item("switch") {
+        page = RearScreenshotPage(this, state, ::templateDevice)
+        miuixContent { AppPageWindow { page.Content(::finish) } }
+    }
+
+    override fun onSaveInstanceState(out: Bundle) {
+        page.save(out)
+        super.onSaveInstanceState(out)
+    }
+
+    override fun onDestroy() { page.close(); super.onDestroy() }
+}
+
+/** Settings and preview share the same template parser and compositor as real exports. */
+internal class RearScreenshotPage(
+    private val host: ComponentActivity,
+    saved: Bundle?,
+    private val templateDevice: () -> String = { android.os.Build.DEVICE },
+) {
+    private fun getString(id: Int) = host.getString(id)
+    private fun getString(id: Int, vararg args: Any) = host.getString(id, *args)
+    private fun supported() = RearShellRepository.resourceId(templateDevice(), "BK") != 0L
+    private fun savedOptions() = RearScreenshotPreferences.readForDevice(host, templateDevice())
+    private val worker = Executors.newSingleThreadExecutor()
+    private var revision by mutableIntStateOf(0)
+    private data class PreviewFrame(val bitmap: Bitmap, val color: String, val style: String)
+    private var preview by mutableStateOf<PreviewFrame?>(null)
+    private var loading by mutableStateOf(false)
+    private var failed by mutableStateOf(false)
+    private var picker by mutableStateOf(saved?.getString("rear_screenshot_picker"))
+    private var request = 0
+    private val list = saved.listState("rear_screenshot_list")
+    private var closed = false
+
+
+    @Composable fun Content(back: () -> Unit, active: Boolean = true) {
+        if (active) LaunchedEffect(Unit) {
+            revision++
+            if (savedOptions().shell && supported()) loadPreview()
+        }
+        val options = remember(revision) { savedOptions() }
+        AppPageContent(getString(R.string.rear_screenshot_title), back, "screenshot_back", scrollState = list) { pageModifier, headerInset ->
+            LazyColumn(state = list, modifier = pageModifier.testTag("screenshot_scroll"),
+                contentPadding = PaddingValues(20.dp, headerInset + 8.dp, 20.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                item("switch") {
+                    AppCard {
+                        AppToggle(getString(R.string.rear_screenshot_shell),
+                            getString(if (supported()) R.string.rear_screenshot_shell_help else R.string.rear_screenshot_unsupported),
+                            options.shell, enabled = supported(), onChange = {
+                                RearScreenshotPreferences.preferences(host).edit().putBoolean("shell", it).apply()
+                                revision++
+                                if (it) loadPreview() else { request++; preview = null; loading = false; failed = false }
+                            })
+                    }
+                }
+                if (options.shell && supported()) {
+                    item("options") {
                         AppCard {
-                            AppToggle(getString(R.string.rear_screenshot_shell),
-                                getString(if (supported()) R.string.rear_screenshot_shell_help else R.string.rear_screenshot_unsupported),
-                                options.shell, enabled = supported(), onChange = {
-                                    RearScreenshotPreferences.preferences(this@RearScreenshotActivity).edit().putBoolean("shell", it).apply()
+                            AppRow(getString(R.string.rear_screenshot_style), styleLabel(options.style),
+                                Modifier.testTag("screenshot_style"), action = { picker = "style" })
+                            AppDivider()
+                            AppRow(getString(R.string.rear_screenshot_color), colorLabel(options.color),
+                                Modifier.testTag("screenshot_color"), action = { picker = "color" })
+                            AppDivider()
+                            AppToggle(getString(R.string.rear_screenshot_keep_original), getString(R.string.rear_screenshot_keep_original_help),
+                                options.keepOriginal, onChange = {
+                                    RearScreenshotPreferences.preferences(host).edit().putBoolean("keep_original", it).apply()
                                     revision++
-                                    if (it) loadPreview() else { request++; preview = null; loading = false; failed = false }
                                 })
                         }
                     }
-                    if (options.shell && supported()) {
-                        item("options") {
-                            AppCard {
-                                AppRow(getString(R.string.rear_screenshot_style), styleLabel(options.style),
-                                    Modifier.testTag("screenshot_style"), action = { picker = "style" })
-                                AppDivider()
-                                AppRow(getString(R.string.rear_screenshot_color), colorLabel(options.color),
-                                    Modifier.testTag("screenshot_color"), action = { picker = "color" })
-                                AppDivider()
-                                AppToggle(getString(R.string.rear_screenshot_keep_original), getString(R.string.rear_screenshot_keep_original_help),
-                                    options.keepOriginal, onChange = {
-                                        RearScreenshotPreferences.preferences(this@RearScreenshotActivity).edit().putBoolean("keep_original", it).apply()
-                                        revision++
-                                    })
-                            }
-                        }
-                        item("preview") {
-                            AppCard {
-                                Column(Modifier.fillMaxWidth().padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text(getString(R.string.rear_screenshot_preview), fontSize = 16.sp, color = AppPalette.text(),
-                                        modifier = Modifier.align(Alignment.Start).semantics { heading() })
-                                    if (loading) {
-                                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                                        Text(getString(R.string.rear_screenshot_preparing), fontSize = 13.sp, color = AppPalette.secondary(),
-                                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                                    } else if (failed) {
-                                        Text(getString(R.string.rear_screenshot_preview_failed), fontSize = 13.sp, color = AppPalette.secondary(),
-                                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                                        TextButton(getString(R.string.rear_screenshot_retry), ::loadPreview, minHeight = 48.dp)
+                    item("preview") {
+                        AppCard {
+                            Column(Modifier.fillMaxWidth().padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text(getString(R.string.rear_screenshot_preview), fontSize = 16.sp, color = AppPalette.text(),
+                                    modifier = Modifier.align(Alignment.Start).semantics { heading() })
+                                Box(Modifier.fillMaxWidth().height(260.dp), contentAlignment = Alignment.Center) {
+                                    preview?.let { frame ->
+                                        Image(frame.bitmap.asImageBitmap(), getString(R.string.rear_screenshot_preview_description,
+                                            colorLabel(frame.color), styleLabel(frame.style)),
+                                            Modifier.fillMaxSize().testTag("screenshot_preview"))
                                     }
-                                    preview?.let {
-                                        Image(it.asImageBitmap(), getString(R.string.rear_screenshot_preview_description, colorLabel(options.color), styleLabel(options.style)),
-                                            Modifier.fillMaxWidth().height(260.dp).testTag("screenshot_preview"))
-                                    }
+                                    if (loading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter))
+                                }
+                                if (loading || failed) {
+                                    Text(getString(if (loading) R.string.rear_screenshot_preparing else R.string.rear_screenshot_preview_failed),
+                                        fontSize = 13.sp, color = AppPalette.secondary(),
+                                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                                    if (failed) TextButton(getString(R.string.rear_screenshot_retry), ::loadPreview, minHeight = 48.dp)
                                 }
                             }
                         }
-                        item("offline") {
-                            Text(getString(R.string.rear_screenshot_download_help), fontSize = 13.sp, color = AppPalette.secondary())
-                        }
                     }
-                    item("save") {
-                        Text(getString(R.string.rear_screenshot_save_help), fontSize = 13.sp, color = AppPalette.secondary())
+                    item("offline") {
+                        Text(getString(R.string.rear_screenshot_download_help), fontSize = 13.sp, color = AppPalette.secondary())
                     }
                 }
+                item("save") {
+                    Text(getString(R.string.rear_screenshot_save_help), fontSize = 13.sp, color = AppPalette.secondary())
+                }
             }
-            WindowDialog(show = picker != null, title = getString(if (picker == "color") R.string.rear_screenshot_color else R.string.rear_screenshot_style),
-                onDismissRequest = { picker = null }) {
-                Column(Modifier.fillMaxWidth().heightIn(max = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() * .6f })
-                    .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val values = if (picker == "color") RearShellCatalog.colors(templateDevice()).toList() else listOf("full", "half")
-                    values.forEach { value ->
-                        val selected = value == if (picker == "color") options.color else options.style
-                        TextButton(if (picker == "color") colorLabel(value) else styleLabel(value), {
-                            val key = picker ?: return@TextButton
-                            picker = null
-                            RearScreenshotPreferences.preferences(this@RearScreenshotActivity).edit().putString(key, value).apply()
-                            revision++; loadPreview()
-                        }, Modifier.fillMaxWidth().semantics { this.selected = selected }, minHeight = 48.dp,
-                            colors = if (selected) ButtonDefaults.textButtonColorsPrimary() else ButtonDefaults.textButtonColors())
-                    }
+        }
+        WindowDialog(show = active && picker != null, title = getString(if (picker == "color") R.string.rear_screenshot_color else R.string.rear_screenshot_style),
+            onDismissRequest = { picker = null }) {
+            Column(Modifier.fillMaxWidth().heightIn(max = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() * .6f })
+                .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val values = if (picker == "color") RearShellCatalog.colors(templateDevice()).toList() else listOf("full", "half")
+                values.forEach { value ->
+                    val selected = value == if (picker == "color") options.color else options.style
+                    TextButton(if (picker == "color") colorLabel(value) else styleLabel(value), {
+                        val key = picker ?: return@TextButton
+                        picker = null
+                        RearScreenshotPreferences.preferences(host).edit().putString(key, value).apply()
+                        revision++; loadPreview()
+                    }, Modifier.fillMaxWidth().semantics { this.selected = selected }, minHeight = 48.dp,
+                        colors = if (selected) ButtonDefaults.textButtonColorsPrimary() else ButtonDefaults.textButtonColors())
                 }
             }
         }
@@ -140,10 +165,10 @@ open class RearScreenshotActivity : ComponentActivity() {
     private fun loadPreview() {
         val token = ++request
         val options = savedOptions()
-        loading = true; failed = false; preview = null
+        loading = true; failed = false
         worker.execute {
             val result = runCatching {
-                RearShellRepository.loadForDevice(applicationContext, templateDevice(), options.style, options.color).use { asset ->
+                RearShellRepository.loadForDevice(host.applicationContext, templateDevice(), options.style, options.color).use { asset ->
                     val g = asset.geometry
                     val sample = Bitmap.createBitmap(g.width.toInt(), g.height.toInt(), Bitmap.Config.ARGB_8888)
                     try {
@@ -161,16 +186,23 @@ open class RearScreenshotActivity : ComponentActivity() {
                 }
             }
             result.exceptionOrNull()?.let { android.util.Log.w("RearScreenshot", "Frame preview unavailable", it) }
-            runOnUiThread {
-                if (!isDestroyed && !isFinishing && token == request) {
-                    preview = result.getOrNull(); failed = result.isFailure; loading = false
+            host.runOnUiThread {
+                if (!closed && !host.isDestroyed && !host.isFinishing && token == request) {
+                    result.getOrNull()?.let { preview = PreviewFrame(it, options.color, options.style) }
+                    failed = result.isFailure; loading = false
                 } else result.getOrNull()?.recycle()
             }
         }
     }
-    override fun onSaveInstanceState(out: Bundle) {
-        out.saveList("rear_screenshot_list", list); out.putString("rear_screenshot_picker", picker)
-        super.onSaveInstanceState(out)
+
+    fun save(out: Bundle) {
+        out.saveList("rear_screenshot_list", list)
+        out.putString("rear_screenshot_picker", picker)
     }
-    override fun onDestroy() { request++; worker.shutdownNow(); super.onDestroy() }
+
+    fun close() {
+        closed = true
+        request++
+        worker.shutdownNow()
+    }
 }

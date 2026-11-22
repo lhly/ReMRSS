@@ -43,6 +43,7 @@ android {
         versionName = project.findProperty("mrssVersionName")?.toString() ?: versionProperties.getProperty("versionName")
         manifestPlaceholders["appLabel"] = "ReMRSS"
         manifestPlaceholders["mrssScheme"] = "mrss"
+        manifestPlaceholders["recordTileLabel"] = "@string/tile_record_label"
         buildConfigField("String", "URI_SCHEME", "\"mrss\"")
         buildConfigField("String", "SOURCE_TAG", "\"v${versionName}\"")
         buildConfigField("boolean", "VIRTUAL_CAST_ENABLED", "true")
@@ -79,15 +80,34 @@ android {
     buildTypes {
         debug {
             val rootValidation = providers.gradleProperty("mrssRootValidation").orNull == "true"
+            val uxPhoneValidation = providers.gradleProperty("mrssUxPhoneValidation").orNull == "true"
+            require(!(rootValidation && uxPhoneValidation)) { "Choose one isolated debug package" }
+            val debugScheme = when {
+                rootValidation -> "mrss-root-debug"
+                uxPhoneValidation -> "mrss-ux-debug"
+                else -> "mrss-debug"
+            }
             isMinifyEnabled = rootValidation && providers.gradleProperty("mrssRootValidationMinify").orNull == "true"
             isDebuggable = !isMinifyEnabled
             isShrinkResources = isMinifyEnabled
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            applicationIdSuffix = if (rootValidation) ".rootdebug" else ".debug"
+            applicationIdSuffix = when {
+                rootValidation -> ".rootdebug"
+                uxPhoneValidation -> ".uxdebug"
+                else -> ".debug"
+            }
             versionNameSuffix = "-debug"
-            manifestPlaceholders["appLabel"] = if (rootValidation) "ReMRSS Root 测试" else "ReMRSS 调试版"
-            manifestPlaceholders["mrssScheme"] = if (rootValidation) "mrss-root-debug" else "mrss-debug"
-            buildConfigField("String", "URI_SCHEME", if (rootValidation) "\"mrss-root-debug\"" else "\"mrss-debug\"")
+            manifestPlaceholders["appLabel"] = when {
+                rootValidation -> "ReMRSS Root 测试"
+                uxPhoneValidation -> "ReMRSS UX 验收"
+                else -> "ReMRSS 调试版"
+            }
+            manifestPlaceholders["mrssScheme"] = debugScheme
+            manifestPlaceholders["uxPhoneValidation"] = uxPhoneValidation.toString()
+            if (uxPhoneValidation) {
+                manifestPlaceholders["recordTileLabel"] = "背屏录屏 · UX 验收"
+            }
+            buildConfigField("String", "URI_SCHEME", "\"$debugScheme\"")
             buildConfigField("boolean", "INPUT_PROXY_PROTOTYPE", inputProxyPrototype.get().toString())
         }
         release {
@@ -115,10 +135,6 @@ android {
             buildConfigField("String", "URI_SCHEME", "\"mrss-compat\"")
         }
     }
-
-    // Compatibility APK uses the exact Release-only stubs and manifest removals. It must not
-    // inherit Debug-only .remodule sources or expose their legacy settings Activity.
-    sourceSets.getByName("compatibility").manifest.srcFile("src/release/AndroidManifest.xml")
 
 }
 
@@ -168,9 +184,6 @@ val prepareLegalAssets = tasks.register<PrepareLegalAssets>("prepareLegalAssets"
 }
 androidComponents.onVariants { variant ->
     variant.sources.kotlin?.addStaticSourceDirectory(file("../../scene-geometry/src/main/kotlin").absolutePath)
-    if (variant.buildType == "compatibility") {
-        variant.sources.kotlin?.addStaticSourceDirectory(file("src/release/kotlin").absolutePath)
-    }
     variant.sources.assets?.addGeneratedSourceDirectory(prepareLegalAssets) { it.outputDirectory }
     variant.sources.jniLibs?.addGeneratedSourceDirectory(inputReader) { it.outputDirectory }
     variant.packaging.jniLibs.useLegacyPackaging.set(true)

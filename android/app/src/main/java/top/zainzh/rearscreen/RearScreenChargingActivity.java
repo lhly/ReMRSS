@@ -41,6 +41,7 @@ public class RearScreenChargingActivity extends Activity {
     private static final long DISPLAY_DURATION_MS = 8000;
     private static final long EXIT_DURATION_MS = 250;
     static final String EXTRA_REQUEST_ID = "chargingRequestId";
+    static final String EXTRA_RESUME_CHARGING = "resumeCharging";
     private static volatile RearScreenChargingActivity currentInstance;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable autoFinish = this::finish;
@@ -161,10 +162,21 @@ public class RearScreenChargingActivity extends Activity {
         text.setText(String.format(java.util.Locale.getDefault(), "%d%%", level));
         ChargingLiquidView liquid = findViewById(R.id.full_screen_liquid);
         liquid.setAnimationActive(resumed);
-        liquid.restartMotion();
         updateStatus(level);
-        startFullScreenLiquidAnimation(liquid, level);
-        startCenterTextAnimation(findViewById(R.id.charging_text_group));
+        View textGroup = findViewById(R.id.charging_text_group);
+        boolean restore = getIntent().getBooleanExtra(EXTRA_RESUME_CHARGING, false);
+        if (restore || !android.animation.ValueAnimator.areAnimatorsEnabled()) {
+            liquid.setFillLevel(level / 100f);
+            if (restore) liquid.resumeAmbientMotion(); else liquid.restartMotion();
+            textGroup.animate().cancel();
+            textGroup.setAlpha(1f);
+            textGroup.setScaleX(1f);
+            textGroup.setScaleY(1f);
+        } else {
+            liquid.restartMotion();
+            startFullScreenLiquidAnimation(liquid, level);
+            startCenterTextAnimation(textGroup);
+        }
         scheduleAutoFinish();
     }
 

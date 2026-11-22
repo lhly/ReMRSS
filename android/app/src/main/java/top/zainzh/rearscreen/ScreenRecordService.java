@@ -42,6 +42,8 @@ import android.view.WindowManager;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.LinearLayout;
 import android.widget.ImageView;
+import android.widget.TextView;
+import android.service.quicksettings.TileService;
 import android.widget.Toast;
 import androidx.core.app.NotificationCompat;
 import java.util.concurrent.ExecutorService;
@@ -59,11 +61,15 @@ public class ScreenRecordService extends Service {
     private static final String CHANNEL_ID = "rear_screen_keeper"; // 使用ReMRSS内核服务通道
     private static final int NOTIFICATION_ID = 10004; // 避免与KeeperService冲突
     
-    private static ScreenRecordService instance = null;
+    private static volatile ScreenRecordService instance = null;
     private WindowManager windowManager;
     private View floatingView;
     private View recordButton;
     private ImageView closeButton;
+    private TextView statusLabel;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private volatile RecordingPhase phase = RecordingPhase.IDLE;
+    private boolean closeAfterSave;
     private volatile boolean isRecording;
     // Finish stop/cleanup before releasing the privileged connection, even if the overlay is gone.
     private final ExecutorService recorder = Executors.newSingleThreadExecutor();
@@ -92,6 +98,50 @@ public class ScreenRecordService extends Service {
         return instance != null;
     }
     
+    static RecordingPhase currentPhase() {
+        return instance == null ? null : instance.phase;
+    }
+
+    static boolean closeFromTile() {
+        ScreenRecordService service = instance;
+        if (service == null) return false;
+        if (service.phase.canStart()) service.stopSelf();
+        else {
+            service.closeAfterSave = true;
+            if (service.phase.canStop()) service.requestStop();
+        }
+        return true;
+    }
+
+    static int phaseLabel(RecordingPhase phase) {
+        switch (phase) {
+            case PREPARING: return R.string.ui_recording_preparing;
+            case RECORDING: return R.string.ui_recording_running;
+            case SAVING: return R.string.ui_recording_saving;
+            case SAVED: return R.string.ui_recording_saved;
+            case START_FAILED: return R.string.ui_recording_start_failed;
+            case STOP_FAILED: return R.string.ui_recording_stop_failed;
+            case SAVE_FAILED: return R.string.ui_recording_save_failed;
+            default: return R.string.ui_recording_idle;
+        }
+    }
+
+    private void updatePhase(RecordingPhase value) {
+        if (taskServiceReleased) return;
+        phase = value;
+        renderControls();
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) manager.notify(NOTIFICATION_ID, buildNotification());
+        refreshTile();
+        if (closeAfterSave && value.canStart()) stopSelf();
+        else if (closeAfterSave && value == RecordingPhase.RECORDING) requestStop();
+        else if (value == RecordingPhase.STOP_FAILED) closeAfterSave = false;
+    }
+
+    private void refreshTile() {
+        TileService.requestListeningState(this, new ComponentName(this, RearScreenRecordTileService.class));
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -115,6 +165,7 @@ public class ScreenRecordService extends Service {
                 showFloatingWindow();
                 if (floatingView != null) {
                     bindTaskService();
+                    refreshTile();
                     return START_STICKY;
                 }
             } catch (RuntimeException error) {
@@ -144,8 +195,8 @@ public class ScreenRecordService extends Service {
         
         // 统一使用ReMRSS内核服务的通知样式
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("ReMRSS内核服务")
-            .setContentText("ReMRSS目前正在运行")
+            .setContentTitle(getString(R.string.tile_record_label))
+            .setContentText(getString(phaseLabel(phase)))
             .setSmallIcon(R.drawable.ic_stat_mrss)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -209,7 +260,7 @@ public class ScreenRecordService extends Service {
         Log.d(TAG, "→ 开始创建悬浮窗布局");
         
         LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.HORIZONTAL);
+        layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(dp(8), dp(8), dp(8), dp(8));
         layout.setGravity(android.view.Gravity.CENTER); // 上下左右居中
         
@@ -228,46 +279,33 @@ public class ScreenRecordService extends Service {
         closeParams.leftMargin = dp(8);
         closeButton.setLayoutParams(closeParams);
         
-        closeButton.setOnClickListener(v -> {
-            // 录制中不允许关闭
-            if (isRecording) {
-                Toast.makeText(this, "请先停止录制", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            // 停止服务（关闭悬浮窗）
-            stopSelf();
-        });
-        
-        // 录制/停止按钮（圆形，红色）
+        closeButton.setOnClickListener(v -> { if (phase.canStart()) stopSelf(); });
+
         recordButton = new View(this);
         recordButton.setTag("recording_toggle");
         buttonSemantics(recordButton);
-        int buttonSize = dp(48);
-        LinearLayout.LayoutParams recordParams = new LinearLayout.LayoutParams(buttonSize, buttonSize);
-        recordParams.gravity = android.view.Gravity.CENTER; // 上下居中
-        recordButton.setLayoutParams(recordParams);
-        
-        // 状态保存在控件上，切换主题时不重建窗口或丢失录屏状态。
-        styleFloatingWindow(layout);
-        updateRecordButtonState(recordButton, false);
-        
-        // 点击事件
+        recordButton.setLayoutParams(new LinearLayout.LayoutParams(dp(48), dp(48)));
         recordButton.setOnClickListener(v -> {
-            if (!isRecording) {
-                startRecording();
-                updateRecordButtonState(recordButton, true);
-                // 录制时隐藏关闭按钮
-                closeButton.setVisibility(View.GONE);
-            } else {
-                stopRecordingInternal(closeButton);
-                updateRecordButtonState(recordButton, false);
-                // 注意：关闭按钮会在停止录制完成后才显示（在stopRecordingInternal的Toast回调中）
-            }
+            if (phase.canStart()) {
+                updatePhase(RecordingPhase.PREPARING);
+                recorder.execute(this::startRecording);
+            } else if (phase.canStop()) requestStop();
         });
-        
-        layout.addView(recordButton);
-        layout.addView(closeButton);
-        
+
+        LinearLayout controls = new LinearLayout(this);
+        controls.setGravity(Gravity.CENTER);
+        controls.addView(recordButton);
+        controls.addView(closeButton);
+        layout.addView(controls);
+        statusLabel = new TextView(this);
+        statusLabel.setTag("recording_status");
+        statusLabel.setGravity(Gravity.CENTER);
+        statusLabel.setTextSize(12);
+        statusLabel.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        layout.addView(statusLabel, new LinearLayout.LayoutParams(dp(104), LinearLayout.LayoutParams.WRAP_CONTENT));
+        styleFloatingWindow(layout);
+        renderControls();
+
         Log.d(TAG, "✓ 按钮已添加到布局");
         
         // 拖动功能
@@ -307,21 +345,28 @@ public class ScreenRecordService extends Service {
         return layout;
     }
     
-    /**
-     * 更新录制按钮状态
-     */
-    private void updateRecordButtonState(View button, boolean recording) {
+    private void renderControls() {
+        if (recordButton == null) return;
+        boolean stop = phase.canStop();
+        boolean pending = phase.isBusy();
         GradientDrawable shape = new GradientDrawable();
-        shape.setShape(recording ? GradientDrawable.RECTANGLE : GradientDrawable.OVAL);
-        if (recording) shape.setCornerRadius(dp(4));
-        shape.setColor(getColor(R.color.remrss_recording_red));
-        int inset = dp(recording ? 14 : 8);
+        shape.setShape(stop ? GradientDrawable.RECTANGLE : GradientDrawable.OVAL);
+        if (stop) shape.setCornerRadius(dp(4));
+        if (pending) {
+            shape.setColor(android.graphics.Color.TRANSPARENT);
+            shape.setStroke(dp(2), getColor(R.color.remrss_overlay_foreground));
+        } else shape.setColor(getColor(R.color.remrss_recording_red));
         LayerDrawable content = new LayerDrawable(new android.graphics.drawable.Drawable[]{
-                controlBackground(), new InsetDrawable(shape, inset)});
-        button.setBackground(new RippleDrawable(ColorStateList.valueOf(getColor(R.color.remrss_overlay_ripple)),
+                controlBackground(), new InsetDrawable(shape, dp(stop || pending ? 14 : 8))});
+        recordButton.setBackground(new RippleDrawable(ColorStateList.valueOf(getColor(R.color.remrss_overlay_ripple)),
                 content, controlBackground()));
-        button.setActivated(recording);
-        button.setContentDescription(getString(recording ? R.string.ui_recording_stop : R.string.ui_recording_start));
+        recordButton.setActivated(stop);
+        recordButton.setEnabled(!pending);
+        recordButton.setContentDescription(getString(pending ? phaseLabel(phase)
+                : stop ? R.string.ui_recording_stop : R.string.ui_recording_start));
+        closeButton.setVisibility(phase.canStart() ? View.VISIBLE : View.INVISIBLE);
+        statusLabel.setTextColor(getColor(R.color.remrss_overlay_foreground));
+        statusLabel.setText(phaseLabel(phase));
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
@@ -360,7 +405,7 @@ public class ScreenRecordService extends Service {
         super.onConfigurationChanged(newConfig);
         if (floatingView != null && closeButton != null && recordButton != null) {
             styleFloatingWindow(floatingView);
-            updateRecordButtonState(recordButton, recordButton.isActivated());
+            renderControls();
         }
     }
     
@@ -443,221 +488,162 @@ public class ScreenRecordService extends Service {
         }
     }
     
-    /**
-     * 开始录制
-     */
     private void startRecording() {
-        recorder.execute(() -> {
-            if (taskServiceReleased || recordPid > 0 || isRecording) return;
-            // 确保TaskService已连接
-            if (!ensureTaskServiceConnected()) {
-                Log.e(TAG, "TaskService未连接");
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    Toast.makeText(this, "服务未就绪，请稍后重试", Toast.LENGTH_SHORT).show();
-                });
+        if (taskServiceReleased) return;
+        String pidFile = null, logFile = null;
+        ITaskService remote = null;
+        try {
+            if (!ensureTaskServiceConnected() || taskServiceReleased) {
+                completePhase(RecordingPhase.START_FAILED);
                 return;
             }
+            remote = taskService;
+            if (remote == null) throw new IllegalStateException("Control service disconnected");
+            try {
+                remote.executeShellCommand("input -d " + RearDisplay.requireId() + " keyevent KEYCODE_WAKEUP");
+                Thread.sleep(200);
+            } catch (Exception error) {
+                Log.w(TAG, "Unable to wake rear display before recording", error);
+            }
             if (taskServiceReleased) return;
-            
-            // 启动录制前先发送一次keycode wakeup到背屏
-            try {
-                taskService.executeShellCommand("input -d " + RearDisplay.requireId() + " keyevent KEYCODE_WAKEUP");
-                Thread.sleep(200); // 等待wakeup生效
-            } catch (Exception e) {
-                Log.w(TAG, "启动前背屏keycode wakeup失败: " + e.getMessage());
+            String displayId = remote.getRearPhysicalDisplayId();
+            if (displayId == null || !displayId.matches("[0-9]+"))
+                throw new IllegalStateException("Rear physical display unavailable");
+            String executable = remote.executeShellCommandWithResult("command -v screenrecord").trim();
+            if (!executable.matches("/[^\\s]+/screenrecord"))
+                throw new IllegalStateException("Screen recording not available");
+            String token = java.util.UUID.randomUUID().toString();
+            String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.ROOT).format(new java.util.Date());
+            currentVideoPath = "/storage/emulated/0/Movies/ReMRSS_" + timestamp + "_" + token.substring(0, 8) + ".mp4";
+            String scratch = "/data/local/tmp/" + getPackageName() + "-record-" + token;
+            pidFile = scratch + ".pid";
+            logFile = scratch + ".log";
+            if (!remote.executeShellCommand("mkdir -p /storage/emulated/0/Movies || exit 1; "
+                    + PrivilegedShellArguments.quote(executable) + " --display-id " + displayId
+                    + " --bit-rate 20000000 " + PrivilegedShellArguments.quote(currentVideoPath)
+                    + " > " + PrivilegedShellArguments.quote(logFile) + " 2>&1 & echo $! > "
+                    + PrivilegedShellArguments.quote(pidFile)))
+                throw new IllegalStateException("Could not launch the recorder");
+
+            // Read the PID for this recording, not other screenrecord processes on the device.
+            String pid = remote.executeShellCommandWithResult("cat " + PrivilegedShellArguments.quote(pidFile)).trim();
+            recordPid = Integer.parseInt(pid);
+            Thread.sleep(800);
+            if (!recordingAlive(remote)) {
+                String startupLog = remote.executeShellCommandWithResult("cat " + PrivilegedShellArguments.quote(logFile));
+                Log.w(TAG, "Recorder exited during startup: " + startupLog);
+                completePhase(completeVideo(remote, RecordingPhase.START_FAILED));
+                return;
             }
-            
-            try {
-                // 生成文件名
-                String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.ROOT)
-                    .format(new java.util.Date());
-                currentVideoPath = "/storage/emulated/0/Movies/ReMRSS_" + timestamp + ".mp4";
-                
-                // 创建保存目录
-                taskService.executeShellCommand("mkdir -p /storage/emulated/0/Movies");
-                Log.d(TAG, "✓ 目录已创建");
-                
-                // Physical address belongs to the selected rear panel, not SurfaceFlinger's list order.
-                String displayId = taskService.getRearPhysicalDisplayId();
-                if (displayId == null || !displayId.matches("[0-9]+")) throw new IllegalStateException("Rear physical display unavailable");
-                // 先测试screenrecord命令是否可用
-                String testCmd = "which screenrecord";
-                String testResult = taskService.executeShellCommandWithResult(testCmd);
-                Log.d(TAG, "screenrecord路径: " + testResult);
-                
-                if (testResult == null || testResult.trim().isEmpty()) {
-                    Log.e(TAG, "❌ screenrecord命令不存在");
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        Toast.makeText(this, "系统不支持screenrecord命令", Toast.LENGTH_LONG).show();
-                    });
-                    return;
-                }
-                
-                // 使用完整路径启动录屏
-                String screenrecordPath = testResult.trim();
-                String recordToken = java.util.UUID.randomUUID().toString();
-                String pidFile = "/data/local/tmp/" + getPackageName() + "-record-" + recordToken + ".pid";
-                String logFile = "/data/local/tmp/" + getPackageName() + "-record-" + recordToken + ".log";
-                
-                // 后台启动录屏并保存输出到日志
-                String recordCmd = String.format(
-                    "%s --display-id %s --bit-rate 20000000 %s > %s 2>&1 & echo $! > %s",
-                    screenrecordPath, displayId, currentVideoPath, logFile, pidFile
-                );
-                
-                Log.d(TAG, "→ 执行录屏命令: " + recordCmd);
-                
-                // 通过TaskService执行（有Shizuku权限）
-                boolean cmdSuccess = taskService.executeShellCommand(recordCmd);
-                Log.d(TAG, "命令执行结果: " + cmdSuccess);
-                
-                if (!cmdSuccess) {
-                    Log.e(TAG, "❌ 启动录屏命令失败");
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        Toast.makeText(this, "启动录屏失败", Toast.LENGTH_SHORT).show();
-                    });
-                    return;
-                }
-                
-                // 等待进程启动和PID文件生成
-                Thread.sleep(800);
-                
-                // 读取PID
-                String pidStr = taskService.executeShellCommandWithResult("cat " + pidFile);
-                Log.d(TAG, "PID文件内容: " + pidStr);
-                
-                if (pidStr != null && !pidStr.trim().isEmpty()) {
-                    try {
-                        recordPid = Integer.parseInt(pidStr.trim());
-                        Log.d(TAG, "✓ 录屏进程PID: " + recordPid);
-                    } catch (NumberFormatException e) {
-                        Log.w(TAG, "⚠ 解析PID失败: " + pidStr);
-                    }
-                } else {
-                    Log.e(TAG, "❌ 无法读取PID文件");
-                }
-                
-                // 读取启动日志查看错误
-                String logContent = taskService.executeShellCommandWithResult("cat " + logFile);
-                if (logContent != null && !logContent.trim().isEmpty()) {
-                    Log.d(TAG, "录屏进程日志: " + logContent);
-                }
-                
-                taskService.executeShellCommand("rm -f " + PrivilegedShellArguments.quote(pidFile) + " " + PrivilegedShellArguments.quote(logFile));
-                // 验证进程是否真的在运行（多种方式）
-                Log.d(TAG, "→ 验证录屏进程...");
-                
-                // 方法1: ps aux
-                String checkCmd1 = "ps -A | grep screenrecord";
-                String checkResult1 = taskService.executeShellCommandWithResult(checkCmd1);
-                Log.d(TAG, "ps -A结果: " + checkResult1);
-                
-                // 方法2: ps -p
-                String checkCmd2 = "ps -p " + recordPid;
-                String checkResult2 = taskService.executeShellCommandWithResult(checkCmd2);
-                Log.d(TAG, "ps -p结果: " + checkResult2);
-                
-                // 方法3: 检查文件是否开始生成
-                Thread.sleep(500);
-                String checkFile = "ls -l " + currentVideoPath;
-                String fileCheck = taskService.executeShellCommandWithResult(checkFile);
-                Log.d(TAG, "文件检查: " + fileCheck);
-                
-                // 如果进程在运行 或 文件已开始生成，认为成功
-                boolean processRunning = (checkResult1 != null && checkResult1.contains("screenrecord")) ||
-                                       (checkResult2 != null && checkResult2.contains(String.valueOf(recordPid)));
-                boolean fileExists = (fileCheck != null && !fileCheck.contains("No such file"));
-                
-                if (processRunning || fileExists) {
-                    Log.d(TAG, "✓ 录屏已启动 (进程运行=" + processRunning + ", 文件存在=" + fileExists + ")");
-                    isRecording = true;
-                    
-                    // 录制成功启动后，开始持续唤醒背屏
-                    startRearScreenWakeup();
-                } else {
-                    Log.e(TAG, "❌ 录屏进程未启动");
-                    
-                    // 检查错误原因
-                    String errorCheck = "screenrecord --help 2>&1 | head -n 5";
-                    String errorMsg = taskService.executeShellCommandWithResult(errorCheck);
-                    Log.e(TAG, "错误信息: " + errorMsg);
-                    
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        Toast.makeText(this, "录屏进程启动失败", Toast.LENGTH_SHORT).show();
-                    });
-                    return;
-                }
-                
-                // 更新通知和Toast
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    if (taskServiceReleased) return;
-                    Notification notification = buildNotification();
-                    NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                    if (nm != null) {
-                        nm.notify(NOTIFICATION_ID, notification);
-                    }
-                    
-                    Toast.makeText(this, "开始录制背屏", Toast.LENGTH_SHORT).show();
-                });
-                
-                Log.d(TAG, "✅ 录屏已开始: " + currentVideoPath);
-                
-            } catch (Exception e) {
-                Log.e(TAG, "录屏失败", e);
-                e.printStackTrace();
-                isRecording = false;
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    Toast.makeText(this, "录屏失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                });
-            }
-        });
-    }
-    
-    /**
-     * 停止录制（带按钮引用，用于更新状态）
-     */
-    private void stopRecordingInternal(final View closeButton) {
-        recorder.execute(() -> finishRecording(closeButton));
-    }
-
-    private void finishRecording(final View closeButton) {
-        if (recordPid <= 0) return;
-        if (!ensureTaskServiceConnected()) {
-            Log.e(TAG, "Cannot stop recording: control service disconnected");
-            new Handler(Looper.getMainLooper()).post(() ->
-                    Toast.makeText(this, "服务未就绪，无法停止录制", Toast.LENGTH_SHORT).show());
-            return;
-        }
-        ITaskService remote = taskService;
-        if (remote == null) return;
-
-        try {
-            boolean stopped = remote.executeShellCommand(
-                    PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 2));
-            if (!stopped) remote.executeShellCommand(
-                    PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 15));
-
-            Thread.sleep(1000); // Allow screenrecord to finish writing the video.
-            isRecording = false;
-            recordPid = -1;
-            stopRearScreenWakeup();
-
-            String fileInfo = remote.executeShellCommandWithResult("ls -lh " + currentVideoPath);
-            remote.executeShellCommand(
-                    "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + currentVideoPath);
-            new Handler(Looper.getMainLooper()).post(() -> {
-                if (!taskServiceReleased) {
-                    NotificationManager manager = getSystemService(NotificationManager.class);
-                    if (manager != null) manager.notify(NOTIFICATION_ID, buildNotification());
-                    if (closeButton != null) closeButton.setVisibility(View.VISIBLE);
-                }
-                String message = fileInfo != null && !fileInfo.contains("No such file")
-                        ? "录屏已保存到Movies文件夹" : "录屏可能失败，请检查Movies文件夹";
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            isRecording = true;
+            main.post(() -> {
+                if (taskServiceReleased) return;
+                updatePhase(RecordingPhase.RECORDING);
+                startRearScreenWakeup();
+                scheduleProcessCheck();
             });
         } catch (Exception error) {
-            Log.e(TAG, "停止录屏失败", error);
+            Log.w(TAG, "Could not start rear recording", error);
+            // If the launch got as far as a known PID, keep a stop/retry path on ambiguous readback.
+            completePhase(recordPid > 0 ? RecordingPhase.STOP_FAILED : RecordingPhase.START_FAILED);
+        } finally {
+            if (remote != null && pidFile != null) {
+                try {
+                    remote.executeShellCommand("rm -f " + PrivilegedShellArguments.quote(pidFile)
+                            + " " + PrivilegedShellArguments.quote(logFile));
+                } catch (Exception error) { Log.w(TAG, "Could not remove recorder temp files", error); }
+            }
         }
+    }
+
+    private boolean recordingAlive(ITaskService remote) throws Exception {
+        String result = remote.executeShellCommandWithResult(PrivilegedShellArguments.recordingStatus(recordPid, currentVideoPath));
+        if ("active".equals(result.trim())) return true;
+        if ("stopped".equals(result.trim())) return false;
+        throw new IllegalStateException("Recording process status unavailable");
+    }
+
+    private void requestStop() {
+        updatePhase(RecordingPhase.SAVING);
+        main.removeCallbacks(checkProcess);
+        recorder.execute(this::finishRecording);
+    }
+
+    /** A screenrecord process may end by itself (including the platform time limit). */
+    private final Runnable checkProcess = () -> {
+        if (taskServiceReleased || phase != RecordingPhase.RECORDING) return;
+        recorder.execute(() -> {
+            try {
+                ITaskService remote = taskService;
+                if (recordPid > 0 && remote != null && !recordingAlive(remote)) {
+                    completePhase(completeVideo(remote, RecordingPhase.SAVE_FAILED));
+                    return;
+                }
+            } catch (Exception error) {
+                Log.w(TAG, "Could not confirm recording status", error);
+            }
+            main.post(this::scheduleProcessCheck);
+        });
+    };
+
+    private void scheduleProcessCheck() {
+        if (!taskServiceReleased && phase == RecordingPhase.RECORDING) main.postDelayed(checkProcess, 2000);
+    }
+
+    private void finishRecording() {
+        if (recordPid <= 0) return;  // Already finalized by the process check.
+        try {
+            if (!ensureTaskServiceConnected()) throw new IllegalStateException("Control service disconnected");
+            ITaskService remote = taskService;
+            if (remote == null) throw new IllegalStateException("Control service disconnected");
+            if (recordingAlive(remote)) {
+                boolean stopped = remote.executeShellCommand(
+                        PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 2));
+                if (!stopped) remote.executeShellCommand(
+                        PrivilegedShellArguments.stopRecording(recordPid, currentVideoPath, 15));
+                for (int i = 0; i < 12; i++) {
+                    Thread.sleep(250);
+                    if (!recordingAlive(remote)) {
+                        completePhase(completeVideo(remote, RecordingPhase.SAVE_FAILED));
+                        return;
+                    }
+                }
+                throw new IllegalStateException("Recorder still running after stop");
+            }
+            completePhase(completeVideo(remote, RecordingPhase.SAVE_FAILED));
+        } catch (Exception error) {
+            Log.w(TAG, "Could not stop rear recording", error);
+            completePhase(RecordingPhase.STOP_FAILED);
+        }
+    }
+
+    private RecordingPhase completeVideo(ITaskService remote, RecordingPhase ifUnavailable) {
+        isRecording = false;
+        recordPid = -1;
+        stopRearScreenWakeup();
+        try {
+            if (remote.executeShellCommand("test -s " + PrivilegedShellArguments.quote(currentVideoPath))) {
+                try {
+                    remote.executeShellCommand("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + currentVideoPath);
+                } catch (Exception error) { Log.w(TAG, "Saved video could not be indexed", error); }
+                return RecordingPhase.SAVED;
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Could not verify saved video", error);
+        }
+        return ifUnavailable;
+    }
+
+    private void completePhase(RecordingPhase value) {
+        main.post(() -> {
+            if (taskServiceReleased) {
+                if (value == RecordingPhase.SAVED) Toast.makeText(this, R.string.ui_recording_saved, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            updatePhase(value);
+            if (closeAfterSave && value == RecordingPhase.SAVED)
+                Toast.makeText(this, R.string.ui_recording_saved, Toast.LENGTH_SHORT).show();
+        });
     }
 
     @Override
@@ -667,10 +653,11 @@ public class ScreenRecordService extends Service {
         
         // 停止背屏持续唤醒
         stopRearScreenWakeup();
+        main.removeCallbacks(checkProcess);
         
         recorder.execute(() -> {
             try {
-                finishRecording(null);
+                finishRecording();
             } finally {
                 TaskServiceManager.release(taskServiceConnection);
                 taskService = null;
@@ -689,6 +676,7 @@ public class ScreenRecordService extends Service {
         }
         
         instance = null;
+        refreshTile();
         Log.d(TAG, "⚠ Service已销毁");
     }
 }

@@ -147,9 +147,8 @@ public final class TaskServiceManager {
         boolean localBusy = ScreenRecordService.isRunning() || RearScreenKeeperService.isRunning()
                 || RearCapabilityCore.hasActiveSceneSessions();
         for (String owner : consumers.values()) {
-            if (owner.contains("VirtualRearHostActivity") || owner.contains("ModuleRearActivity")
-                    || owner.contains("RearInfoActivity") || owner.contains("RearInfoSession")
-                    || owner.contains("NativeModuleLaunchActivity")) localBusy = true;
+            if (owner.contains("VirtualRearHostActivity")
+                    || owner.contains("RearInfoActivity") || owner.contains("RearInfoSession")) localBusy = true;
         }
         final boolean busy = localBusy;
         long sequence = ++switchSequence;

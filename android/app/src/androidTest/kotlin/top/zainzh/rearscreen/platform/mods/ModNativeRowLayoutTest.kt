@@ -22,13 +22,13 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import top.zainzh.rearscreen.AppTheme
-import top.zainzh.rearscreen.NativeModuleRendererTestHostActivity
+import top.zainzh.rearscreen.ComposeTestHostActivity
 import java.io.ByteArrayInputStream
 
 /** Generic two-column Row layout regression at the small landscape preview size. */
 @RunWith(AndroidJUnit4::class)
 class ModNativeRowLayoutTest {
-    @get:Rule val compose = createAndroidComposeRule<NativeModuleRendererTestHostActivity>()
+    @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     @Test fun nestedColumnsAndButtonsStayBoundedAndReachableAt347By212Dp() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

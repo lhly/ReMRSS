@@ -8,7 +8,7 @@
 | 选择、授权和切换 Root | [Root 权限来源](root-backend.md) |
 | 投放操作、侧滑、旋转和显示范围 | [虚拟背屏投放](virtual-rear-casting.md) |
 | 按 App 设置布局大小与缩放兼容 | [密度兼容](density-compatibility.md) |
-| AI 壁纸六宫格、锁屏启动及恢复原画 | [背屏启动器](rear-wallpaper-shortcuts.md) |
+| AI 壁纸快捷布局、锁屏启动及恢复原画 | [背屏启动器](rear-wallpaper-shortcuts.md) |
 | 原图、手机外壳和图片保存 | [背屏截图](rear-screenshot.md) |
 | 镜头间电量、时间、日期和天气 | [镜头区域信息](camera-gap-battery.md) |
 | 投放期间的消息与充电提示 | [紧凑通知](cast-notifications.md) |

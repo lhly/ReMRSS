@@ -28,6 +28,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -62,7 +63,7 @@ class AiRearWallpaperStudioUiTest {
             work = AiRearStudioWork("林间微光", "11月19日 · 91ae27")))
         var edits = 0
         var requested: AiRearStudioAction? = null
-        ActivityScenario.launch(NativeModuleRendererTestHostActivity::class.java).use { scene ->
+        ActivityScenario.launch(ComposeTestHostActivity::class.java).use { scene ->
             fun install(dark: Boolean, font: Float = 1f) = scene.onActivity { activity ->
                 present(activity, dark, font) {
                     AiRearWallpaperStudio(model.value, rememberLazyListState(), {}, { edits++ },
@@ -115,7 +116,7 @@ class AiRearWallpaperStudioUiTest {
         val model = mutableStateOf(studio(apps))
         var editRequests = 0
         var requested: AiRearStudioAction? = null
-        ActivityScenario.launch(NativeModuleRendererTestHostActivity::class.java).use { scene ->
+        ActivityScenario.launch(ComposeTestHostActivity::class.java).use { scene ->
             fun install() = scene.onActivity { activity ->
                 present(activity, dark = false) {
                     AiRearWallpaperStudio(model.value, rememberLazyListState(), {}, { editRequests++ },
@@ -151,7 +152,17 @@ class AiRearWallpaperStudioUiTest {
             assertEquals(AiRearStudioAction.PICK_WORK, requested)
             compose.onNodeWithTag("ai_rear_primary_action").performScrollTo().performClick()
             assertEquals(AiRearStudioAction.REPLACE, requested)
-            compose.onNodeWithTag("ai_rear_restore").performScrollTo().assertIsDisplayed()
+            val actions = compose.onNodeWithTag("ai_rear_work_actions").performScrollTo()
+            val restore = compose.onNodeWithTag("ai_rear_restore").assertIsDisplayed()
+            val prepare = compose.onNodeWithTag("ai_rear_primary_action").assertTextContains("准备快捷启动")
+            assertButtonsInsideSafeWindow(scene, restore, prepare)
+            assertAlignedActions(restore.fetchSemanticsNode().boundsInRoot, prepare.fetchSemanticsNode().boundsInRoot)
+            actions.assertIsDisplayed()
+            capture("wallpaper-prepare-light")
+            prepare.performTouchInput { click(center) }
+            assertEquals(AiRearStudioAction.PREPARE, requested)
+            restore.performTouchInput { click(center) }
+            assertEquals(AiRearStudioAction.RESTORE, requested)
             compose.onNodeWithTag("ai_rear_allow_unlocked").performScrollTo().performClick()
             compose.runOnIdle { assertEquals(true, model.value.allowUnlocked) }
             scene.recreate()
@@ -169,7 +180,7 @@ class AiRearWallpaperStudioUiTest {
         val fifthKey = original.entries[4].key
         val sixthKey = original.entries[5].key
         val parkedText = "暂不显示 · 第六格由「全部应用」占用"
-        ActivityScenario.launch(NativeModuleRendererTestHostActivity::class.java).use { scene ->
+        ActivityScenario.launch(ComposeTestHostActivity::class.java).use { scene ->
             fun install(dark: Boolean = false, font: Float = 1f) = scene.onActivity { activity ->
                 present(activity, dark, font) {
                     val studioScroll = rememberLazyListState()
@@ -190,6 +201,7 @@ class AiRearWallpaperStudioUiTest {
             val library = compose.onNodeWithTag("ai_rear_library")
             library.performClick()
             assertTrue(draft.value.allApps)
+            compose.onNodeWithText("已选 5 / 5").assertIsDisplayed()
             assertEquals(original.entries, draft.value.entries)
             list.performScrollToIndex(2)
             compose.onNodeWithText(parkedText).assertIsDisplayed()
@@ -265,11 +277,12 @@ class AiRearWallpaperStudioUiTest {
 
     @Test fun largeLandscapeKeepsActionsAndTheRearShelfCanScrollSelectAndClose() {
         val apps = demoApps()
-        val model = studio(apps).copy(work = AiRearStudioWork("林间微光", "11月19日 · 91ae27"),
-            installed = true, ready = true)
+        val model = mutableStateOf(studio(apps).copy(work = AiRearStudioWork("林间微光", "11月19日 · 91ae27"),
+            installed = true))
         var selected: String? = null
+        var requested: AiRearStudioAction? = null
         var closed = false
-        ActivityScenario.launch(NativeModuleRendererTestHostActivity::class.java).use { scene ->
+        ActivityScenario.launch(ComposeTestHostActivity::class.java).use { scene ->
             scene.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
             compose.waitUntil(10_000) {
                 var landscape = false
@@ -278,14 +291,26 @@ class AiRearWallpaperStudioUiTest {
             }
             scene.onActivity { activity ->
                 present(activity, dark = true, font = 1.6f) {
-                    AiRearWallpaperStudio(model, rememberLazyListState(), {}, {}, {}, {}, thumbnail = {})
+                    AiRearWallpaperStudio(model.value, rememberLazyListState(), {}, {}, {}, { requested = it }, thumbnail = {})
                 }
             }
             compose.onNodeWithTag("ai_rear_canvas").assertIsDisplayed()
             capture("wallpaper-studio-dark-large")
-            compose.onNodeWithTag("ai_rear_restore").performScrollTo().assertIsDisplayed()
+            val restore = compose.onNodeWithTag("ai_rear_restore")
+            val prepare = compose.onNodeWithTag("ai_rear_primary_action")
+            compose.onNodeWithTag("ai_rear_work_actions").performScrollTo()
+            assertButtonsInsideSafeWindow(scene, restore, prepare)
+            assertAlignedActions(restore.fetchSemanticsNode().boundsInRoot, prepare.fetchSemanticsNode().boundsInRoot)
+            capture("wallpaper-prepare-dark-large")
+            prepare.performTouchInput { click(center) }
+            assertEquals(AiRearStudioAction.PREPARE, requested)
+            compose.runOnIdle { model.value = model.value.copy(ready = true) }
+            compose.onNodeWithTag("ai_rear_work_actions").performScrollTo()
+            val disarm = compose.onNodeWithTag("ai_rear_primary_action").assertTextContains("停用快捷启动")
+            disarm.performTouchInput { click(center) }
+            assertEquals(AiRearStudioAction.DISARM, requested)
             scene.onActivity { activity ->
-                present(activity, dark = true) {
+                present(activity, dark = true, pageWindow = false) {
                     CompositionLocalProvider(LocalDensity provides Density(2.8125f, 1f)) {
                         Box(Modifier.fillMaxSize().background(AppPalette.background()), contentAlignment = Alignment.Center) {
                             Box(Modifier.size(347.dp, 212.dp).testTag("ai_rear_shelf_fixture")) {
@@ -309,6 +334,29 @@ class AiRearWallpaperStudioUiTest {
         }
     }
 
+    private fun assertButtonsInsideSafeWindow(
+        scenario: ActivityScenario<ComposeTestHostActivity>,
+        vararg buttons: SemanticsNodeInteraction,
+    ) {
+        var safeBottom = 0
+        scenario.onActivity { activity ->
+            val decor = activity.window.decorView
+            val bars = requireNotNull(decor.rootWindowInsets).getInsets(android.view.WindowInsets.Type.systemBars())
+            safeBottom = decor.height - bars.bottom
+        }
+        for (button in buttons) {
+            val node = button.assertIsDisplayed().fetchSemanticsNode()
+            assertTrue("button is clipped or crosses the system gesture area",
+                node.boundsInRoot.height + 1f >= node.size.height && node.boundsInRoot.bottom <= safeBottom + 1f)
+        }
+    }
+
+    private fun assertAlignedActions(a: androidx.compose.ui.geometry.Rect, b: androidx.compose.ui.geometry.Rect) {
+        assertTrue("action widths must match: $a and $b", kotlin.math.abs(a.width - b.width) <= 1f)
+        assertTrue("actions must form one aligned row or stack: $a and $b",
+            (a.top == b.top && a.right <= b.left) || (a.left == b.left && b.bottom <= a.top))
+    }
+
     private fun studio(apps: List<AiRearApp>) = AiRearStudioModel(
         AiRearGrid(apps.take(6).map { it.component }, allApps = true),
         apps.associateBy { it.component }, AiRearWallpaperArt.referenceViewport, background = null, work = null,
@@ -329,8 +377,8 @@ class AiRearWallpaperStudioUiTest {
         return sorted.take(18).mapIndexed { index, app -> app.copy(canCast = index != sorted.take(18).lastIndex) }
     }
 
-    private fun present(activity: NativeModuleRendererTestHostActivity, dark: Boolean, font: Float = 1f,
-        body: @Composable () -> Unit,
+    private fun present(activity: ComposeTestHostActivity, dark: Boolean, font: Float = 1f,
+        pageWindow: Boolean = true, body: @Composable () -> Unit,
     ) {
         activity.prepareMiuixWindow()
         WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
@@ -345,7 +393,13 @@ class AiRearWallpaperStudioUiTest {
         }
         activity.setContentView(ComposeView(activity.createConfigurationContext(configuration)).apply {
             id = contentId
-            setContent { AppTheme { AiRearArtworkScope(body) } }
+            setContent {
+                AppTheme {
+                    AiRearArtworkScope {
+                        if (pageWindow) AppPageWindow(body) else body()
+                    }
+                }
+            }
         })
     }
 

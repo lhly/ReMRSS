@@ -21,6 +21,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import top.zainzh.rearscreen.MainActivity
+import top.zainzh.rearscreen.hostedModConfig
 import top.zainzh.rearscreen.R
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -66,20 +67,14 @@ class Rc5SignedModCastEntryProbeTest {
             ModInstallDecision(verified.authorFingerprint, verified.requiredCapabilities.map { it.name }.toSet()))
         val mainActivities = CopyOnWriteArrayList<MainActivity>()
         val resumedMainActivities = CopyOnWriteArrayList<MainActivity>()
-        val settingsActivities = CopyOnWriteArrayList<ModSettingsActivity>()
-        val configActivities = CopyOnWriteArrayList<ModConfigActivity>()
         val foregroundChoices = CopyOnWriteArrayList<ModCastForegroundTargetActivity>()
         val targetPickers = CopyOnWriteArrayList<ModCastTargetPickerActivity>()
-        val resumedSettings = CopyOnWriteArrayList<ModSettingsActivity>()
-        val resumedConfig = CopyOnWriteArrayList<ModConfigActivity>()
         val resumedForegroundChoices = CopyOnWriteArrayList<ModCastForegroundTargetActivity>()
         val resumedTargetPickers = CopyOnWriteArrayList<ModCastTargetPickerActivity>()
         val callbacks = object : Application.ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, state: android.os.Bundle?) {
                 when (activity) {
                     is MainActivity -> mainActivities += activity
-                    is ModSettingsActivity -> settingsActivities += activity
-                    is ModConfigActivity -> configActivities += activity
                     is ModCastForegroundTargetActivity -> foregroundChoices += activity
                     is ModCastTargetPickerActivity -> targetPickers += activity
                 }
@@ -88,16 +83,12 @@ class Rc5SignedModCastEntryProbeTest {
             override fun onActivityResumed(activity: Activity) {
                 when (activity) {
                     is MainActivity -> resumedMainActivities += activity
-                    is ModSettingsActivity -> resumedSettings += activity
-                    is ModConfigActivity -> resumedConfig += activity
                     is ModCastForegroundTargetActivity -> resumedForegroundChoices += activity
                     is ModCastTargetPickerActivity -> resumedTargetPickers += activity
                 }
             }
             override fun onActivityPaused(activity: Activity) {
                 if (activity is MainActivity) resumedMainActivities.remove(activity)
-                if (activity is ModSettingsActivity) resumedSettings.remove(activity)
-                if (activity is ModConfigActivity) resumedConfig.remove(activity)
                 if (activity is ModCastForegroundTargetActivity) resumedForegroundChoices.remove(activity)
                 if (activity is ModCastTargetPickerActivity) resumedTargetPickers.remove(activity)
             }
@@ -107,14 +98,6 @@ class Rc5SignedModCastEntryProbeTest {
                 if (activity is MainActivity) {
                     mainActivities.remove(activity)
                     resumedMainActivities.remove(activity)
-                }
-                if (activity is ModSettingsActivity) {
-                    settingsActivities.remove(activity)
-                    resumedSettings.remove(activity)
-                }
-                if (activity is ModConfigActivity) {
-                    configActivities.remove(activity)
-                    resumedConfig.remove(activity)
                 }
                 if (activity is ModCastForegroundTargetActivity) {
                     foregroundChoices.remove(activity)
@@ -135,7 +118,7 @@ class Rc5SignedModCastEntryProbeTest {
             Log.i(TAG, "stage=mod_cast_fixture_enabled mod=$modId")
 
             var config = openExactModConfig(context, instrumentation, verified.name,
-                resumedMainActivities, resumedSettings, resumedConfig)
+                resumedMainActivities)
             val invokingConfig = config
             val startRevision = ModPackageStore.model(context, modId)?.revision
                 ?: error("测试 Mod 的初始模型未提交")
@@ -168,7 +151,7 @@ class Rc5SignedModCastEntryProbeTest {
                 activity.hasWindowFocus() && activity.window.decorView.display?.displayId == Display.DEFAULT_DISPLAY
             }
             val expectedConfirmation = listOf(
-                "目标应用：$selectedChoiceLabel", "方式：虚拟投放", "区域：FULL 全域", "内容方向：90°", "确认并投放"
+                "目标应用：$selectedChoiceLabel", "投放方式：虚拟投放", "背屏区域：全域", "内容方向：90°", "确认并投放"
             )
             waitForExactRoots(instrumentation, context.packageName, Display.DEFAULT_DISPLAY, expectedConfirmation)
             check(confirmationPicker.hasWindowFocus() && !confirmationPicker.isFinishing &&
@@ -210,7 +193,7 @@ class Rc5SignedModCastEntryProbeTest {
                     }
                     Log.i(TAG, "stage=mod_cast_start_model state=$state " +
                         "fresh_terminal=${model != null && model.revision >= startRevision + 2} " +
-                        "original_resumed=${invokingConfig in resumedConfig} " +
+                        "original_resumed=${invokingConfig in resumedMainActivities} " +
                         "picker_resumed=${confirmationPicker in resumedTargetPickers}")
                 }
                 runCatching { top.zainzh.rearscreen.Rc5TargetTaskSnapshotProbe
@@ -226,12 +209,12 @@ class Rc5SignedModCastEntryProbeTest {
             SystemClock.sleep(8_000)
 
             val query = try {
-                waitForOwnedCastAction(instrumentation, readyConfig, resumedConfig, handle, QUERY_LABEL)
+                waitForOwnedCastAction(instrumentation, readyConfig, resumedMainActivities, handle, QUERY_LABEL)
             } catch (failure: Throwable) {
                 runCatching {
                     val activityState = readFixtureCastState(instrumentation, readyConfig)
                     val modelMatches = activityState?.let { handle.matches(it.handle) } == true
-                    Log.i(TAG, "stage=mod_cast_query_window original_resumed=${readyConfig in resumedConfig} " +
+                    Log.i(TAG, "stage=mod_cast_query_window original_resumed=${readyConfig in resumedMainActivities} " +
                         "picker_resumed=${confirmationPicker in resumedTargetPickers} model_matches=$modelMatches")
                 }
                 throw failure
@@ -241,17 +224,17 @@ class Rc5SignedModCastEntryProbeTest {
             assertEquals(EXPECTED_CAST_VIEWPORT, readyResult.detail)
             Log.i(TAG, "stage=mod_cast_query_ready")
 
-            val close = waitForOwnedCastAction(instrumentation, readyConfig, resumedConfig, handle, CLOSE_LABEL)
+            val close = waitForOwnedCastAction(instrumentation, readyConfig, resumedMainActivities, handle, CLOSE_LABEL)
             val closeResult = waitForOwnedCastResult(instrumentation, readyConfig, close, "关闭：")
             check(closeResult.status == "关闭：CLOSING" || closeResult.status == "关闭：CLOSED")
             Log.i(TAG, "stage=mod_cast_close_submitted")
-            finishHostActivities(instrumentation, mainActivities, settingsActivities, configActivities)
+            finishHostActivities(instrumentation, mainActivities)
             waitForTargetWindow(instrumentation)
             assertTargetReturnedAndPickerGone(instrumentation, context.packageName)
 
             config = reopenExactModConfig(context, instrumentation, verified.name,
-                resumedMainActivities, resumedSettings, resumedConfig)
-            waitForFinalClosedQuery(instrumentation, config, resumedConfig, handle)
+                resumedMainActivities)
+            waitForFinalClosedQuery(instrumentation, config, resumedMainActivities, handle)
             Log.i(TAG, "stage=mod_cast_closed_and_target_returned")
             Log.i(TAG, "stage=mod_cast_resources_released")
         } catch (failure: Throwable) {
@@ -264,12 +247,6 @@ class Rc5SignedModCastEntryProbeTest {
                     val first = cleanupFailure
                     if (first == null) cleanupFailure = failure else first.addSuppressed(failure)
                 }
-            }
-            settingsActivities.toList().forEach { activity ->
-                cleanup { instrumentation.runOnMainSync { if (!activity.isFinishing && !activity.isDestroyed) activity.finish() } }
-            }
-            configActivities.toList().forEach { activity ->
-                cleanup { instrumentation.runOnMainSync { if (!activity.isFinishing && !activity.isDestroyed) activity.finish() } }
             }
             foregroundChoices.toList().forEach { activity ->
                 cleanup { instrumentation.runOnMainSync { if (!activity.isFinishing && !activity.isDestroyed) activity.finish() } }
@@ -301,18 +278,12 @@ class Rc5SignedModCastEntryProbeTest {
         }
     }
 
-    private fun readModId(activity: ModConfigActivity): String? = runCatching {
-        activity.javaClass.getDeclaredField("modId").apply { isAccessible = true }.get(activity) as? String
-    }.getOrNull()
-
     private fun openExactModConfig(
         context: android.content.Context,
         instrumentation: android.app.Instrumentation,
         modName: String,
         resumedMainActivities: List<MainActivity>,
-        resumedSettings: List<ModSettingsActivity>,
-        resumedConfig: List<ModConfigActivity>,
-    ): ModConfigActivity {
+    ): MainActivity {
         val request = ++fixtureMainRequest
         val runId = fixtureRunId()
         Log.i(TAG, "stage=fixture_needs_main request=$request run=$runId")
@@ -334,19 +305,21 @@ class Rc5SignedModCastEntryProbeTest {
         assertEquals("ZIP Mods entry is unique on the single visible host window", 1, findTexts(mainRoot, zipMods).size)
         check(clickMainAction(instrumentation, context.packageName, zipMods)) { "主屏 ZIP Mods 入口不可用" }
         Log.i(TAG, "stage=fixture_main_ready request=$request display=${main.window.decorView.display?.displayId} run=$runId")
-        val settings = waitForActivity(resumedSettings) {
-            it.hasWindowFocus() && it.window.decorView.display?.displayId == Display.DEFAULT_DISPLAY
-        }
-        assertEquals(Display.DEFAULT_DISPLAY, settings.window.decorView.display?.displayId)
         waitForHostTexts(instrumentation, context.packageName, listOf("Mod 管理", modName))
         requireUniqueModEntry(instrumentation, context.packageName, modName)
         waitForAction(instrumentation, context.packageName, Display.DEFAULT_DISPLAY,
             listOf(modName), "设置", "只打开签名测试 Mod 的原生设置")
-        val config = waitForActivity(resumedConfig) {
-            it.hasWindowFocus() && it.window.decorView.display?.displayId == Display.DEFAULT_DISPLAY && readModId(it) == modId
+        waitFor("签名测试 Mod 的当前设置路由可见") {
+            var ready = false
+            instrumentation.runOnMainSync {
+                val page = main.hostedModConfig()
+                ready = main.hasWindowFocus() && main in resumedMainActivities &&
+                    main.window.decorView.display?.displayId == Display.DEFAULT_DISPLAY &&
+                    page?.modId == modId && page.sceneVisible
+            }
+            ready
         }
-        assertEquals(Display.DEFAULT_DISPLAY, config.window.decorView.display?.displayId)
-        return config
+        return main
     }
 
     private fun reopenExactModConfig(
@@ -354,9 +327,7 @@ class Rc5SignedModCastEntryProbeTest {
         instrumentation: android.app.Instrumentation,
         modName: String,
         resumedMainActivities: List<MainActivity>,
-        resumedSettings: List<ModSettingsActivity>,
-        resumedConfig: List<ModConfigActivity>,
-    ) = openExactModConfig(context, instrumentation, modName, resumedMainActivities, resumedSettings, resumedConfig)
+    ) = openExactModConfig(context, instrumentation, modName, resumedMainActivities)
 
     private fun assertConfigVisible(
         instrumentation: android.app.Instrumentation,
@@ -480,13 +451,13 @@ class Rc5SignedModCastEntryProbeTest {
 
     private fun waitForFinalClosedQuery(
         instrumentation: android.app.Instrumentation,
-        config: ModConfigActivity,
-        resumedConfig: List<ModConfigActivity>,
+        config: MainActivity,
+        resumedMainActivities: List<MainActivity>,
         handle: FixtureCastHandle,
     ) {
         val deadline = SystemClock.elapsedRealtime() + FINAL_QUERY_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
-            val query = waitForOwnedCastAction(instrumentation, config, resumedConfig, handle, QUERY_LABEL, 8_000)
+            val query = waitForOwnedCastAction(instrumentation, config, resumedMainActivities, handle, QUERY_LABEL, 8_000)
             val result = waitForOwnedCastResult(instrumentation, config, query, "查询：")
             assertEquals(EXPECTED_CAST_VIEWPORT, result.detail)
             if (result.status == "查询：CLOSED") return
@@ -504,8 +475,8 @@ class Rc5SignedModCastEntryProbeTest {
      */
     private fun waitForOwnedCastAction(
         instrumentation: android.app.Instrumentation,
-        config: ModConfigActivity,
-        resumedConfig: List<ModConfigActivity>,
+        config: MainActivity,
+        resumedMainActivities: List<MainActivity>,
         handle: FixtureCastHandle,
         label: String,
         timeoutMs: Long = 15_000,
@@ -513,10 +484,10 @@ class Rc5SignedModCastEntryProbeTest {
         require(label == QUERY_LABEL || label == CLOSE_LABEL)
         var submitted: FixtureCastState? = null
         waitFor("主屏原 Mod 的 $label", timeoutMs) {
-            val original = ownedCastWindow(instrumentation, config, resumedConfig, handle)
+            val original = ownedCastWindow(instrumentation, config, resumedMainActivities, handle)
                 ?: return@waitFor false
             val target = ownedCastButton(original, label)
-            val current = ownedCastWindow(instrumentation, config, resumedConfig, handle)
+            val current = ownedCastWindow(instrumentation, config, resumedMainActivities, handle)
                 ?: return@waitFor false
             if (current.window.id != original.window.id) return@waitFor false
             val fresh = ownedCastButton(current, label)
@@ -552,20 +523,10 @@ class Rc5SignedModCastEntryProbeTest {
 
     // Read the exact settings renderer's model; scrolling can clip the top labels.
     // Only the fixture's own Mod is read. Never log the full opaque handle.
-    private val fixtureModelReader by lazy {
-        ModConfigActivity::class.java.getDeclaredMethod("getModel").apply { isAccessible = true }
-    }
-    private val fixtureVisibilityReader by lazy {
-        ModConfigActivity::class.java.getDeclaredMethod("getSceneVisible").apply { isAccessible = true }
-    }
-    private val fixtureErrorReader by lazy {
-        ModConfigActivity::class.java.getDeclaredMethod("getError").apply { isAccessible = true }
-    }
-
-    private fun fixtureCastState(config: ModConfigActivity): FixtureCastState? {
-        if (config.isDestroyed || config.isFinishing || readModId(config) != modId) return null
-        val model = fixtureModelReader.invoke(config) as? ModPersistedModel ?: return null
-        return fixtureCastState(model)
+    private fun fixtureCastState(config: MainActivity): FixtureCastState? {
+        if (config.isDestroyed || config.isFinishing) return null
+        val page = config.hostedModConfig()?.takeIf { it.modId == modId } ?: return null
+        return page.model?.let(::fixtureCastState)
     }
 
     private fun fixtureCastState(model: ModPersistedModel): FixtureCastState? {
@@ -578,7 +539,7 @@ class Rc5SignedModCastEntryProbeTest {
 
     private fun readFixtureCastState(
         instrumentation: android.app.Instrumentation,
-        config: ModConfigActivity,
+        config: MainActivity,
     ): FixtureCastState? {
         var result: FixtureCastState? = null
         instrumentation.runOnMainSync { result = fixtureCastState(config) }
@@ -587,7 +548,7 @@ class Rc5SignedModCastEntryProbeTest {
 
     private fun waitForOwnedCastResult(
         instrumentation: android.app.Instrumentation,
-        config: ModConfigActivity,
+        config: MainActivity,
         submission: FixtureCastState,
         prefix: String,
     ): FixtureCastState {
@@ -626,8 +587,9 @@ class Rc5SignedModCastEntryProbeTest {
                     else -> "other"
                 }
                 instrumentation.runOnMainSync {
-                    val visible = fixtureVisibilityReader.invoke(config) == true
-                    val submitRejected = (fixtureErrorReader.invoke(config) as? String)
+                    val page = config.hostedModConfig()?.takeIf { it.modId == modId }
+                    val visible = page?.sceneVisible == true
+                    val submitRejected = page?.error
                         ?.startsWith("操作暂未提交：") == true
                     Log.i(TAG, "stage=mod_cast_action_result action=$action durable=$stage " +
                         "settings_visible=$visible submit_rejected=$submitRejected")
@@ -657,16 +619,16 @@ class Rc5SignedModCastEntryProbeTest {
 
     private fun ownedCastWindow(
         instrumentation: android.app.Instrumentation,
-        config: ModConfigActivity,
-        resumedConfig: List<ModConfigActivity>,
+        config: MainActivity,
+        resumedMainActivities: List<MainActivity>,
         handle: FixtureCastHandle,
     ): OwnedCastWindow? {
         var windowId: Int? = null
         var state: FixtureCastState? = null
         instrumentation.runOnMainSync {
             val decor = config.window.decorView
-            if (resumedConfig.singleOrNull() === config && !config.isFinishing && !config.isDestroyed &&
-                readModId(config) == modId && decor.isAttachedToWindow && decor.isShown &&
+            if (resumedMainActivities.singleOrNull() === config && !config.isFinishing && !config.isDestroyed &&
+                config.hostedModConfig()?.let { it.modId == modId && it.sceneVisible } == true && decor.isAttachedToWindow && decor.isShown &&
                 decor.windowVisibility == View.VISIBLE && decor.display?.displayId == Display.DEFAULT_DISPLAY &&
                 decor.display?.state == Display.STATE_ON &&
                 config.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false) {
@@ -702,17 +664,16 @@ class Rc5SignedModCastEntryProbeTest {
         assertExactTargetVisible(instrumentation)
         val pickers = matchingRoots(instrumentation, hostPackage, Display.DEFAULT_DISPLAY,
             listOf("选择主屏应用")) + matchingRoots(instrumentation, hostPackage,
-            Display.DEFAULT_DISPLAY, listOf("选择要投放的主屏应用"))
+            Display.DEFAULT_DISPLAY, listOf("选择要投放的主屏应用")) + matchingRoots(instrumentation, hostPackage,
+            Display.DEFAULT_DISPLAY, listOf("确认投放到背屏"))
         assertTrue("both Cast selector windows have exited before returning the exact target task", pickers.isEmpty())
     }
 
     private fun finishHostActivities(
         instrumentation: android.app.Instrumentation,
         mains: List<MainActivity>,
-        settings: List<ModSettingsActivity>,
-        configs: List<ModConfigActivity>,
     ) {
-        (settings + configs + mains).forEach { activity ->
+        mains.forEach { activity ->
             runCatching {
                 instrumentation.runOnMainSync {
                     if (!activity.isFinishing && !activity.isDestroyed) activity.finish()

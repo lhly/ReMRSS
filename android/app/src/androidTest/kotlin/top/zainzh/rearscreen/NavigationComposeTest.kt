@@ -79,8 +79,7 @@ class NavigationComposeTest {
             fun readingPosition(): Pair<Int, Int> {
                 var result = 0 to 0
                 tutorial.onActivity {
-                    val field = TutorialActivity::class.java.getDeclaredField("list").apply { isAccessible = true }
-                    val list = field.get(it) as androidx.compose.foundation.lazy.LazyListState
+                    val list = it.guide.list
                     result = list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset
                 }
                 return result

@@ -17,7 +17,7 @@
     <string name="tutorial_notifications_title">设置背屏通知</string>
     <string name="tutorial_notifications_steps">进入底部“通知”页，开启通知服务，并授予通知使用权。仅允许本应用发送通知，不能代替读取其他应用通知的权限。\n进入通知应用列表，选择需要投送的应用。再按需要设置隐藏标题/内容、跟随系统勿扰模式、仅倒扣手机时通知和自动销毁时间。\n若收不到通知，确认来源应用确实产生了新通知，并检查所选应用、勿扰模式、倒扣条件及通知使用权。授权和后台设置可在“关于 → 权限检测”中检查。</string>
     <string name="tutorial_background_title">后台运行与更新</string>
-    <string name="tutorial_background_steps">只手动使用磁贴时，通常无需锁定后台。长期使用背屏通知、充电动画或常亮时，建议允许后台运行，并检查自启动与省电限制。\n在权限检测中查看 Android 电池优化豁免；小米的应用省电“无限制”是另一项设置。自启动和厂商省电策略需手动确认，本应用不显示在最近任务中，无需专门加锁。\n开启自启动权限不等于开机恢复全部功能。重启后先启动 Shizuku，再打开 ReMRSS。更新可在“关于 → 检查更新”中手动检查，安装更新时再按系统提示允许安装未知应用。</string>
+    <string name="tutorial_background_steps">只手动使用磁贴时，通常无需锁定后台。长期使用背屏通知、充电动画或常亮时，建议允许后台运行，并检查自启动与省电限制。\n在权限检测中查看 Android 电池优化豁免；小米的应用省电“无限制”是另一项设置。自启动和厂商省电策略需手动确认，ReMRSS 默认在最近任务中隐藏；如需显示，可在「更多 → 应用偏好」中关闭「在最近任务中隐藏」。\n开启自启动权限不等于开机恢复全部功能。重启后先启动 Shizuku，再打开 ReMRSS。更新可在“关于 → 检查更新”中手动检查，安装更新时再按系统提示允许安装未知应用。</string>
     <string name="tutorial_troubleshooting_title">排查与自动化</string>
     <string name="tutorial_troubleshooting_steps">提示请先启动 Shizuku：回到 Shizuku 检查服务是否运行；提示请先打开应用授权：在权限检测中重新检查 Shizuku 授权。连接超时时可重新展开控制中心并重试。\n背屏已占用或内容消失：先将已投放应用移回主屏，再重新投放。通知或充电动画未出现时，检查功能开关、通知触发条件、后台限制及 Shizuku 状态。\n自动化入口位于“关于 → 自动化入口”。例如 {scheme}://switch?current=1 可投放当前应用；若安装了其他处理同一协议的应用，应在自动化工具中指定 ReMRSS 的目标包名。\n仍有问题时，在“关于 → 诊断信息”查看连接详情，或通过“提交反馈”描述机型、系统版本、操作步骤和实际现象。</string>
     <string name="tutorial_open_permissions">打开权限检测</string>

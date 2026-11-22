@@ -1,17 +1,10 @@
 package top.zainzh.rearscreen
 
-import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.gestures.BringIntoViewSpec
-import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,15 +21,16 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.focusProperties
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.LayerOutsets
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
@@ -44,6 +38,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -51,22 +46,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import top.yukonga.miuix.kmp.basic.Switch
+import top.yukonga.miuix.kmp.basic.RadioButton
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
-import top.yukonga.miuix.kmp.window.WindowDialog
 import top.yukonga.miuix.kmp.window.WindowBottomSheet
 import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.awaitCancellation
-import top.zainzh.rearscreen.modules.ModuleDescriptor
-import top.zainzh.rearscreen.modules.ModuleStore
 
 /** All settings destinations share the same Miuix theme and reusable components. */
 class MiuixSettingsUi(
@@ -91,13 +80,10 @@ class MiuixSettingsUi(
         fun saveDuration(seconds: Int, neverAutoClose: Boolean)
         fun action(method: String)
         fun updates()
+        fun showInRecents(shown: Boolean)
         fun proxy(enabled: Boolean)
         fun permissions()
         fun automation()
-        fun moduleImport()
-        fun moduleSettings(id: String)
-        fun moduleRear(id: String)
-        fun moduleRemove(id: String, onComplete: (Boolean) -> Unit)
     }
     private data class HomeState(
         val status: String = "check_shizuku", val summary: String = "connection_help",
@@ -108,7 +94,8 @@ class MiuixSettingsUi(
     private var state by mutableStateOf(HomeState())
     private data class SettingsState(val selected: Int = 0, val listener: Boolean = false, val posting: Boolean = true,
         val duration: Int = 8, val updates: String = "", val checking: Boolean = false, val proxy: Boolean = false,
-        val neverAutoClose: Boolean = false, val dismissOnly: Boolean = false, val openOnRear: Boolean = false)
+        val neverAutoClose: Boolean = false, val dismissOnly: Boolean = false, val openOnRear: Boolean = false,
+        val showInRecents: Boolean = false)
     private var settings by mutableStateOf(SettingsState())
     private var durationSheetVisible by mutableStateOf(false)
     private var durationValue by mutableIntStateOf(savedState?.getInt("notification_duration_draft_value", 10) ?: 10)
@@ -120,6 +107,13 @@ class MiuixSettingsUi(
     private val modulesList = savedState.listState("modules_list")
     private val settingsList = savedState.listState("settings_list")
     private val aboutList = savedState.listState("about_list")
+    private val rearSettingsLists = (10..12).associateWith { savedState.listState("rear_settings_$it") }
+    private val tutorialGuide = TutorialGuide(activity, savedState)
+    private val permissionChecks = PermissionChecksPage(activity, savedState)
+    private val tutorialPermissions = PermissionChecksPage(activity, savedState, "tutorial_permissions_scroll")
+    private val screenshotSettings = RearScreenshotPage(activity, savedState)
+    private val densitySettings = DensityCompatibilityPage(activity, savedState)
+    private val notificationDetailsLists = (20..21).associateWith { savedState.listState("notification_details_$it") }
     private var uriConflict by mutableStateOf(false)
     private var navigationHeight by mutableIntStateOf(0)
     private var page by mutableIntStateOf(savedState?.getInt("native_page", 0)?.let {
@@ -127,99 +121,39 @@ class MiuixSettingsUi(
         else when (it) { 2 -> 3; 3 -> 100; else -> it }
     } ?: 0)
     private var subpage by mutableIntStateOf(savedState?.getInt("native_subpage", 0) ?: 0)
-    private var selectedModuleId by mutableStateOf(savedState?.getString("native_module_id").orEmpty())
     private var navigationRequest by mutableIntStateOf(0)
     private var insets by mutableStateOf(SafeInsets())
-    private var transitionPair by mutableStateOf<NavigationRoutePair?>(null)
-    private var backPreviewProgress by mutableStateOf<Float?>(null)
-    private var progressOverride by mutableFloatStateOf(Float.NaN)
-    private var lastDisplayedProgress by mutableFloatStateOf(if (NavigationMotion.parentRoute(page) != null) 1f else 0f)
-    private val displayedMotion = MotionVelocityTracker()
-    private var motionDurationScale by mutableFloatStateOf(readMotionDurationScale())
-    private var animationGeneration by mutableIntStateOf(0)
-    private var animationRequest by mutableStateOf<MotionAnimationRequest?>(null)
+    private val wallpaperMods = WallpaperModNavigation(activity, savedState, { page }, actions::navigate,
+        activity::hasWallpaperEditor)
+
+    fun parentRoute(route: Int): Int? = wallpaperMods.parentRoute(route)
+    fun canPreviewBack(): Boolean = wallpaperMods.canPreviewBack()
+    fun consumeOwnedBack(): Boolean = wallpaperMods.consumeOwnedBack()
+
+    private val routeMotion = AppRouteMotion(activity, page, ::parentRoute)
+    private val transitionPair get() = routeMotion.transitionPair
     private var pickerExitSnapshot by mutableStateOf<AppPickerExitSnapshot?>(null)
-    private val backMotion = NavigationMotion()
     private val listState = LazyListState(savedState?.getInt("compose_home_index", 0) ?: 0, savedState?.getInt("compose_home_offset", 0) ?: 0)
+    private val mainRailBottomMargin = 12.dp
+    private val mainRailContentGap = 8.dp
 
-    init { durationSheetVisible = savedState?.getBoolean("notification_duration_sheet", false) ?: false }
-
-    private data class MotionAnimationRequest(
-        val generation: Int,
-        val start: Float,
-        val target: Float,
-        val durationMillis: Int,
-        val initialVelocity: Float = 0f,
-        val springSettle: Boolean = false,
-        val immediate: Boolean = false,
-    )
-
-    private fun readMotionDurationScale(): Float =
-        Settings.Global.getFloat(activity.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
-
-    private fun requestMotion(
-        start: Float,
-        target: Float,
-        durationMillis: Int,
-        velocity: Float = 0f,
-        springSettle: Boolean = false,
-        immediate: Boolean = motionDurationScale == 0f,
-    ) {
-        val clampedStart = NavigationMotion.clampProgress(start)
-        val clampedTarget = NavigationMotion.clampProgress(target)
-        progressOverride = clampedStart
-        animationRequest = MotionAnimationRequest(++animationGeneration, clampedStart, clampedTarget,
-            durationMillis, velocity, springSettle, immediate)
+    init {
+        durationSheetVisible = savedState?.getBoolean("notification_duration_sheet", false) ?: false
     }
+
     private val view = ComposeView(activity).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         setContent {
             val dark = isSystemInDarkTheme()
-            val motionProgress = remember { Animatable(lastDisplayedProgress) }
-            val pager = rememberPagerState(initialPage = NavigationMotion.routeForTab(page), pageCount = { 4 })
-            val routeMotionProgress = backPreviewProgress ?: progressOverride.takeIf { it.isFinite() } ?: motionProgress.value
-            LaunchedEffect(motionProgress) {
-                snapshotFlow { motionProgress.value }.collect {
-                    lastDisplayedProgress = it
-                    displayedMotion.sample(it, android.os.SystemClock.uptimeMillis())
-                }
+            val routeMotionProgress = routeMotion.Progress(page) {
+                pickerExitSnapshot = null
+                wallpaperMods.releaseUnusedPages()
             }
-            LaunchedEffect(animationRequest?.generation) {
-                val request = animationRequest ?: return@LaunchedEffect
-                motionProgress.snapTo(request.start)
-                lastDisplayedProgress = request.start
-                progressOverride = Float.NaN
-                if (request.immediate || motionDurationScale == 0f) {
-                    motionProgress.snapTo(request.target)
-                } else if (request.springSettle) {
-                    motionProgress.animateTo(request.target,
-                        spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow),
-                        initialVelocity = request.initialVelocity)
-                } else {
-                    motionProgress.animateTo(request.target,
-                        androidx.compose.animation.core.tween(request.durationMillis, easing = secondaryPageEasing))
-                }
-                if (animationRequest?.generation == request.generation) {
-                    lastDisplayedProgress = request.target
-                    progressOverride = Float.NaN
-                    transitionPair = null
-                    if (request.target == 0f) pickerExitSnapshot = null
-                    animationRequest = null
-                }
-            }
-            LaunchedEffect(motionDurationScale) {
-                if (motionDurationScale != 0f) return@LaunchedEffect
-                if (backMotion.isPreviewing) {
-                    backMotion.cancelBackPreview()
-                    backPreviewProgress = null
-                }
-                val pair = transitionPair ?: return@LaunchedEffect
-                val target = if (page == pair.childRoute) 1f else 0f
-                requestMotion(lastDisplayedProgress, target, durationMillis = 0, immediate = true)
-            }
+            val motionDurationScale = routeMotion.durationScale
+            val pager = rememberPagerState(initialPage = NavigationMotion.routeForTab(page, ::parentRoute), pageCount = { 4 })
             LaunchedEffect(navigationRequest, motionDurationScale) {
                 val target = page
-                val tab = NavigationMotion.routeForTab(target)
+                val tab = NavigationMotion.routeForTab(target, ::parentRoute)
                 if (pager.currentPage != tab || kotlin.math.abs(pager.currentPageOffsetFraction) > .001f) {
                     if (motionDurationScale == 0f) pager.scrollToPage(tab)
                     else pager.animateScrollToPage(tab, animationSpec = tween(250, easing = pageEasing))
@@ -231,23 +165,23 @@ class MiuixSettingsUi(
             }
             val focusManager = LocalFocusManager.current
             LaunchedEffect(page) { if (page != 100) focusManager.clearFocus(force = true) }
-            DisposableEffect(activity) {
-                val uri = Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE)
-                val observer = object : android.database.ContentObserver(android.os.Handler(android.os.Looper.getMainLooper())) {
-                    override fun onChange(selfChange: Boolean) { motionDurationScale = readMotionDurationScale() }
-                    override fun onChange(selfChange: Boolean, changed: android.net.Uri?) { motionDurationScale = readMotionDurationScale() }
-                }
-                activity.contentResolver.registerContentObserver(uri, false, observer)
-                onDispose { activity.contentResolver.unregisterContentObserver(observer) }
-            }
             AppTheme {
-                AppNavigationFrame(Modifier.fillMaxSize(), content = { SurfaceContent(it, dark, pager, routeMotionProgress) }) {
-                    Navigation(pager, routeMotionProgress)
-                }
+                val pair = transitionPair ?: parentRoute(page)?.let { NavigationRoutePair(it, page) }
+                val progress = if (transitionPair == null && pair != null) 1f else routeMotionProgress.coerceIn(0f, 1f)
+                AppNavigationFrame(
+                    Modifier.fillMaxSize(),
+                    content = { TabSurface(it, dark, pager, pair?.parentRoute, progress) },
+                    navigation = { Navigation(pager, pair, progress) },
+                    foreground = { SecondarySurfaces(pair, progress) },
+                )
             }
         }
     }
     fun getView(): View = view
+    fun closeOwnedPages() {
+        screenshotSettings.close()
+        wallpaperMods.close()
+    }
     fun showPicker(model: AppPickerModel?) { picker = model; if (model != null) pickerExitSnapshot = null }
     @JvmName("showPickerExitSnapshot")
     internal fun showPickerExitSnapshot(snapshot: AppPickerExitSnapshot) { pickerExitSnapshot = snapshot }
@@ -256,70 +190,30 @@ class MiuixSettingsUi(
         if (page in 0..3 && target in 0..3) page = target
     }
     fun updateSettings(selected: Int, listener: Boolean, posting: Boolean, duration: Int, updates: String, checking: Boolean, proxy: Boolean,
-                       neverAutoClose: Boolean = false, dismissOnly: Boolean = false, openOnRear: Boolean = false) {
-        settings = SettingsState(selected, listener, posting, duration, updates, checking, proxy, neverAutoClose, dismissOnly, openOnRear)
+                       neverAutoClose: Boolean = false, dismissOnly: Boolean = false, openOnRear: Boolean = false,
+                       showInRecents: Boolean = false) {
+        settings = SettingsState(selected, listener, posting, duration, updates, checking, proxy, neverAutoClose,
+            dismissOnly, openOnRear, showInRecents)
     }
     fun updateUriConflict(conflict: Boolean) { uriConflict = conflict }
     fun showPage(target: Int) {
         val previous = page
-        val commit = if (backMotion.isPreviewing && NavigationMotion.parentRoute(previous) == target)
-            backMotion.commitBackPreview() else null
-        if (backMotion.isPreviewing && commit == null) {
-            backMotion.cancelBackPreview()
-            backPreviewProgress = null
-        }
-        val pair = transitionPair?.takeIf { target == it.parentRoute || target == it.childRoute }
-            ?: NavigationMotion.pairBetween(previous, target)
-        val continuingTransition = pair != null && pair == transitionPair && animationRequest != null
-        val start = backPreviewProgress ?: if (pair != null && pair == transitionPair)
-            lastDisplayedProgress else if (pair != null && previous == pair.childRoute) 1f else 0f
+        wallpaperMods.prepare(target)
         page = target
-        backPreviewProgress = null
-        if (pair != null) {
-            transitionPair = pair
-            val targetProgress = if (target == pair.childRoute) 1f else 0f
-            requestMotion(start, targetProgress, if (targetProgress == 1f) 260 else 220,
-                velocity = commit?.velocity ?: if (continuingTransition) displayedMotion.velocity else 0f,
-                springSettle = commit != null || continuingTransition)
-        } else {
-            transitionPair = null
-            progressOverride = Float.NaN
-            animationRequest = null
-        }
+        routeMotion.showPage(previous, target)
+        wallpaperMods.onRouteChanged(previous, target)
+        if (routeMotion.transitionPair == null) wallpaperMods.releaseUnusedPages()
         navigationRequest++
     }
-    fun startBackPreview(target: Int, initialProgress: Float) {
-        val pair = transitionPair?.takeIf { it.parentRoute == target && it.childRoute == page }
-            ?: NavigationMotion.pairBetween(page, target)
-            ?: return
-        val origin = if (pair == transitionPair) lastDisplayedProgress else if (page == pair.childRoute) 1f else 0f
-        transitionPair = pair
-        animationRequest = null
-        progressOverride = Float.NaN
-        val start = backMotion.beginBackPreview(origin)
-        backPreviewProgress = start
-        lastDisplayedProgress = start
-        if (motionDurationScale != 0f && initialProgress > 0f) updateBackPreview(initialProgress, 0L)
-    }
-    fun updateBackPreview(progress: Float, frameTimeMillis: Long) {
-        if (motionDurationScale == 0f) return
-        backMotion.updateBackProgress(progress, frameTimeMillis)?.let {
-            backPreviewProgress = it
-            lastDisplayedProgress = it
-        }
-    }
-    fun cancelBackPreview() {
-        val settle = backMotion.cancelBackPreview() ?: return
-        backPreviewProgress = null
-        val endpoint = transitionPair?.let { if (page == it.childRoute) 1f else 0f } ?: settle.progress
-        requestMotion(lastDisplayedProgress, endpoint, 220, settle.velocity, springSettle = true)
-    }
-    fun isShowingModuleDetails(id: String): Boolean = page == 30 && selectedModuleId == id
+    fun startBackPreview(target: Int, initialProgress: Float) = routeMotion.startBackPreview(page, target, initialProgress)
+    fun updateBackPreview(progress: Float, frameTimeMillis: Long) = routeMotion.updateBackPreview(progress, frameTimeMillis)
+    fun cancelBackPreview() = routeMotion.cancelBackPreview(page)
     fun setInsets(left: Int, top: Int, right: Int, bottom: Int, ime: Int) { insets = SafeInsets(left, top, right, bottom, ime) }
     fun updateHome(status: String, summary: String, action: String, dpi: Int, rotation: Int, busy: Boolean, values: Map<String, Boolean>) {
         state = HomeState(status, summary, action, dpi, rotation, busy, values.toMap())
     }
     fun saveState(bundle: Bundle) {
+        wallpaperMods.save(bundle)
         bundle.putBoolean("notification_duration_sheet", durationSheetVisible)
         bundle.putInt("notification_duration_draft_value", durationValue)
         bundle.putBoolean("notification_duration_draft_minutes", durationUnitMinutes)
@@ -329,11 +223,17 @@ class MiuixSettingsUi(
         bundle.saveList("modules_list", modulesList)
         bundle.saveList("settings_list", settingsList)
         bundle.saveList("about_list", aboutList)
+        rearSettingsLists.forEach { (route, state) -> bundle.saveList("rear_settings_$route", state) }
+        tutorialGuide.save(bundle)
+        permissionChecks.save(bundle)
+        tutorialPermissions.save(bundle)
+        screenshotSettings.save(bundle)
+        densitySettings.save(bundle)
+        notificationDetailsLists.forEach { (route, state) -> bundle.saveList("notification_details_$route", state) }
         bundle.putInt("compose_home_index", listState.firstVisibleItemIndex)
         bundle.putInt("compose_home_offset", listState.firstVisibleItemScrollOffset)
         bundle.putInt("native_subpage", subpage)
         bundle.putInt("native_route_version", 2)
-        bundle.putString("native_module_id", selectedModuleId)
     }
     fun showDurationSheet(seconds: Int, neverAutoClose: Boolean) {
         if (!durationSheetVisible) {
@@ -347,53 +247,51 @@ class MiuixSettingsUi(
     private fun s(key: String) = NativeStrings.get(activity, key)
 
     @OptIn(ExperimentalFoundationApi::class)
-    @Composable private fun SurfaceContent(modifier: Modifier, dark: Boolean, pager: PagerState, routeMotionProgress: Float) {
+    @Composable private fun TabSurface(modifier: Modifier, dark: Boolean, pager: PagerState, parentRoute: Int?, progress: Float) {
         val d = LocalDensity.current
-        val logicalForwardSign = if (LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl) -1f else 1f
-        val safe = with(d) { PaddingValues(start = insets.left.toDp(), top = insets.top.toDp(), end = insets.right.toDp(), bottom = maxOf(insets.bottom, insets.ime).toDp()) }
-        val pair = transitionPair ?: NavigationMotion.parentRoute(page)?.let { NavigationRoutePair(it, page) }
-        val childRoute = pair?.childRoute
-        val parentRoute = pair?.parentRoute
-        val progress = if (transitionPair == null && childRoute != null) 1f else routeMotionProgress.coerceIn(0f, 1f)
+        val direction = if (LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl) -1f else 1f
+        val nested = parentRoute != null && parentRoute !in 0..3
         val participatingPages by remember(pager) {
             derivedStateOf {
                 pager.layoutInfo.visiblePagesInfo.mapTo(mutableSetOf()) { it.index } + pager.currentPage + pager.targetPage
             }
         }
-        Box(modifier.fillMaxSize().background(AppPalette.background()).padding(safe).clipToBounds(), contentAlignment = Alignment.TopCenter) {
+        val imeVisible = insets.ime > insets.bottom
+        val tailPadding = if (imeVisible) {
+            16.dp
+        } else with(d) {
+            val railHeight = if (navigationHeight > 0) navigationHeight.toDp() else 72.dp
+            insets.bottom.toDp() + mainRailBottomMargin + railHeight + mainRailContentGap
+        }
+        val background = AppPalette.background()
+        Box(modifier.fillMaxSize().background(background)
+            .padding(pageInsets(bottom = if (imeVisible) insets.ime else 0)).clipToBounds(),
+            contentAlignment = Alignment.TopCenter) {
             HorizontalPager(state = pager, beyondViewportPageCount = 1, userScrollEnabled = page in 0..3,
-                modifier = Modifier.fillMaxSize().testTag("main_pager").semantics { if (page >= 10 || page == 100) hideFromAccessibility() }) { index ->
-                val reserve = navigationHeight + with(d) { 24.dp.toPx() }
-                val focusScroll = remember(reserve) { object : BringIntoViewSpec {
-                    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
-                        val visibleEnd = (containerSize - reserve).coerceAtLeast(size)
-                        return when { offset < 0f -> offset; offset + size > visibleEnd -> offset + size - visibleEnd; else -> 0f }
-                    }
-                } }
-                CompositionLocalProvider(LocalBringIntoViewSpec provides focusScroll) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                        val pageActive = page == index
-                        if (index in participatingPages) {
-                            val motionParent = parentRoute == index || (transitionPair == null && page == index)
-                            val pageFrameModifier = Modifier.widthIn(max = 680.dp).fillMaxSize()
-                                .then(if (motionParent) Modifier.graphicsLayer {
-                                    val retreat = .018f * progress
-                                    scaleX = 1f - retreat; scaleY = 1f - retreat
-                                    translationX = -size.width * .012f * progress * logicalForwardSign
-                                    alpha = 1f - .07f * progress
-                                } else Modifier)
-                                .then(inactiveRouteModifier(!pageActive))
-                                .testTag(if (motionParent) "navigation_motion_parent" else "pager_page_$index")
-                            // Keep the motion probe on its own Box node; appending a second
-                            // testTag to the LazyColumn would replace its established list tag.
-                            Box(pageFrameModifier, contentAlignment = Alignment.TopCenter) {
-                                Box(Modifier.fillMaxSize()
-                                    .then(if (pageActive) Modifier else Modifier.clearAndSetSemantics {})) {
+                modifier = Modifier.fillMaxSize().clipToBounds()
+                    // Keep the pager composed for restoration, but paint only the actual parent behind a nested route.
+                    .drawWithContent { if (!nested) drawContent() }
+                    .testTag("main_pager").semantics { if (page >= 10 || page == 100) hideFromAccessibility() }) { index ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                    val pageActive = page == index
+                    if (index in participatingPages) {
+                        val motionParent = parentRoute == index || (transitionPair == null && page == index)
+                        val pageFrameModifier = Modifier.widthIn(max = 680.dp).fillMaxSize()
+                            .then(if (motionParent) Modifier.retreatingRoute(progress, direction) else Modifier)
+                            .then(inactiveRouteModifier(!pageActive))
+                            .testTag(if (motionParent) "navigation_motion_parent" else "pager_page_$index")
+                        // Keep the motion probe on its own Box node; appending a second
+                        // testTag to the LazyColumn would replace its established list tag.
+                        Box(pageFrameModifier, contentAlignment = Alignment.TopCenter) {
+                            Box(Modifier.fillMaxSize()
+                                .then(if (pageActive) Modifier else Modifier.clearAndSetSemantics {})) {
+                                MainTabFocus(tailPadding) {
+                                    val body = Modifier.fillMaxSize()
                                     when (index) {
-                                        0 -> Home(dark, Modifier.fillMaxSize())
-                                        1 -> Notifications(Modifier.fillMaxSize())
-                                        2 -> Modules(Modifier.fillMaxSize(), active = pageActive)
-                                        3 -> Settings(Modifier.fillMaxSize())
+                                        0 -> Home(dark, body, tailPadding)
+                                        1 -> Notifications(body, tailPadding)
+                                        2 -> Modules(body, tailPadding, active = pageActive)
+                                        3 -> Settings(body, tailPadding)
                                     }
                                 }
                             }
@@ -401,49 +299,71 @@ class MiuixSettingsUi(
                     }
                 }
             }
-            if (childRoute != null) {
-                val childActive = page == childRoute
-                Box(Modifier.fillMaxSize().graphicsLayer {
-                    translationX = size.width * (1f - progress) * logicalForwardSign
-                    alpha = 1f
-                }.background(AppPalette.background())
-                    .then(inactiveRouteModifier(!childActive)).testTag("navigation_motion_child"),
-                    contentAlignment = Alignment.TopCenter) {
-                    Box(Modifier.widthIn(max = 680.dp).fillMaxSize()
-                        .then(if (childActive) Modifier else Modifier.clearAndSetSemantics {})) {
-                        when (childRoute) {
-                            100 -> AppPickerSlot(
-                                model = if (childActive) picker else null,
-                                snapshot = if (childActive) null else pickerExitSnapshot,
-                            )
-                            in 10..13 -> BackSubpage(childRoute)
-                            in 20..21 -> NotificationsSubpage(childRoute)
-                            30 -> ModuleDetails(selectedModuleId, active = childActive)
-                            40 -> AboutDetails()
-                        }
-                    }
+        }
+    }
+
+    @Composable private fun pageInsets(bottom: Int = maxOf(insets.bottom, insets.ime)): PaddingValues = with(LocalDensity.current) {
+        PaddingValues(
+            start = insets.left.toDp(),
+            top = insets.top.toDp(),
+            end = insets.right.toDp(),
+            bottom = bottom.toDp(),
+        )
+    }
+
+    @Composable private fun SecondarySurfaces(pair: NavigationRoutePair?, progress: Float) {
+        if (pair == null) return
+        val direction = if (LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl) -1f else 1f
+        Box(Modifier.fillMaxSize().clipToBounds()) {
+            if (pair.parentRoute !in 0..3) {
+                SecondaryPane(pair.parentRoute, page == pair.parentRoute,
+                    Modifier.retreatingRoute(progress, direction).testTag("navigation_motion_parent"))
+            }
+            SecondaryPane(pair.childRoute, page == pair.childRoute,
+                Modifier.enteringRoute(progress, direction).testTag("navigation_motion_child"))
+        }
+    }
+
+    @Composable private fun SecondaryPane(route: Int, active: Boolean, motion: Modifier) {
+        AppRoutePane(active, motion, contentInsets = pageInsets()) {
+            when (route) {
+                in WALLPAPER_STUDIO_ROUTE..WALLPAPER_WORKS_ROUTE,
+                in MOD_MANAGEMENT_ROUTE..MOD_DETAIL_ROUTE -> wallpaperMods.Content(route, active)
+                100 -> AppPickerSlot(
+                    model = if (active) picker else null,
+                    snapshot = if (active) null else pickerExitSnapshot,
+                )
+                in 10..12 -> BackSubpage(route)
+                SCREENSHOT_SETTINGS_ROUTE -> screenshotSettings.Content({ actions.navigate(0) }, active)
+                DENSITY_SETTINGS_ROUTE -> densitySettings.Content({ actions.navigate(10) }, active)
+                in 20..21 -> NotificationsSubpage(route)
+                40 -> AboutDetails()
+                TUTORIAL_ROUTE -> tutorialGuide.Content({ actions.navigate(3) }) {
+                    actions.navigate(TUTORIAL_PERMISSION_ROUTE)
                 }
+                PERMISSION_SETTINGS_ROUTE -> permissionChecks.Content({ actions.navigate(3) }, active)
+                TUTORIAL_PERMISSION_ROUTE -> tutorialPermissions.Content({ actions.navigate(TUTORIAL_ROUTE) }, active)
             }
         }
     }
 
-    @Composable private fun BoxScope.Navigation(pager: PagerState, routeMotionProgress: Float) {
-        val pair = transitionPair ?: NavigationMotion.parentRoute(page)?.let { NavigationRoutePair(it, page) }
-        val childRoute = pair?.childRoute
-        val motionProgress = if (transitionPair == null && childRoute != null) 1f else routeMotionProgress.coerceIn(0f, 1f)
-        val navigationProgress = if (childRoute != null) 1f - motionProgress else 1f
-        val shouldRender = page in 0..3 || transitionPair != null
+    @Composable private fun BoxScope.Navigation(pager: PagerState, pair: NavigationRoutePair?, progress: Float) {
+        val navigationProgress = if (pair == null) 1f else 1f - progress
+        val shouldRender = page in 0..3 || (transitionPair?.parentRoute ?: -1) in 0..3
         if (!shouldRender || insets.ime > insets.bottom) return
         val bottom = with(LocalDensity.current) { insets.bottom.toDp() }
         Box(Modifier.align(Alignment.BottomCenter)
-            .padding(start = 20.dp, end = 20.dp, bottom = bottom + 12.dp)
+            .padding(start = 20.dp, end = 20.dp, bottom = bottom + mainRailBottomMargin)
             .widthIn(max = 360.dp).fillMaxWidth()
             .graphicsLayer {
                 alpha = navigationProgress
                 translationY = size.height * .42f * (1f - navigationProgress)
+                // Partial alpha composites the rail offscreen. Keep its soft elevation
+                // inside that layer rather than clipping it to the capsule's layout box.
+                outsets = LayerOutsets(24.dp)
             }
-            // A committed pop exposes the global tabs immediately so they can interrupt it.
-            // Predictive-back keeps the child route active, so the tabs remain unavailable there.
+            // Only the revealed portion can intercept a committed pop; a predictive preview
+            // never makes the parent tabs interactive.
             .then(inactiveRouteModifier(page !in 0..3))) {
             AppBottomNavigation(
                 progress = { pager.currentPage + pager.currentPageOffsetFraction },
@@ -455,31 +375,16 @@ class MiuixSettingsUi(
                 descriptions = listOf(s("screen_title"), s("notifications_title"), s("nav_modules"), s("nav_settings")),
                 onSelected = actions::navigate,
                 modifier = Modifier.fillMaxWidth().onSizeChanged { navigationHeight = it.height },
-            ) { index, color -> Icon(listOf("screen", "bell", "apps", "settings")[index], color, Modifier.size(23.dp)) }
+            ) { index, color -> Icon(listOf("screen", "bell", "apps", "more")[index], color, Modifier.size(23.dp)) }
         }
     }
 
-    private fun inactiveRouteModifier(inactive: Boolean): Modifier = if (!inactive) Modifier else Modifier
-        .focusProperties { canFocus = false }
-        .semantics { hideFromAccessibility() }
-        .pointerInput(Unit) {
-            awaitEachGesture {
-                awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false).consume()
-                do {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                    event.changes.forEach { it.consume() }
-                } while (event.changes.any { it.pressed })
-            }
-        }
-
     private val pageEasing = CubicBezierEasing(.77f, 0f, .175f, 1f)
-    private val secondaryPageEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
 
-    @Composable private fun Home(dark: Boolean, modifier: Modifier) {
+    @Composable private fun Home(dark: Boolean, modifier: Modifier, tailPadding: Dp) {
         val virtualRearCast = rememberVirtualRearCastMode()
         LazyColumn(modifier.testTag("home_list"), state = listState,
-            contentPadding = PaddingValues(20.dp, 22.dp, 20.dp,
-                maxOf(126.dp, with(LocalDensity.current) { navigationHeight.toDp() } + 32.dp)),
+            contentPadding = PaddingValues(20.dp, 22.dp, 20.dp, tailPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item("title") { PageTitle(s("screen_title"), s("screen_subtitle")) }
             if (uriConflict) item("uri_conflict") {
@@ -502,18 +407,22 @@ class MiuixSettingsUi(
             }
             item("charging") {
                 val animation = s(if (state.values["charging_animation_enabled"] == true) "status_on" else "status_off")
-                val always = s(if (state.values["charging_always_on_enabled"] == true) "status_on" else "status_off")
+                val always = when {
+                    state.values["charging_always_on_enabled"] != true -> s("status_off")
+                    state.values["charging_animation_enabled"] == true -> s("status_on")
+                    else -> activity.getString(R.string.ui_charging_standby)
+                }
                 EntryCard("nav_charging", s("nav_charging_state").replace("{0}", animation).replace("{1}", always), "charging_settings_entry") { actions.navigate(12) }
             }
-            if (AiRearWallpaperSupport.supported()) item("ai_rear_wallpaper") {
+            if (activity.hasWallpaperEditor()) item("ai_rear_wallpaper") {
                 AppCard {
                     AppRow(activity.getString(R.string.ai_rear_title), activity.getString(R.string.ai_rear_entry),
                         modifier = Modifier.testTag("ai_rear_wallpaper_entry"),
-                        action = { activity.startActivity(AiRearWallpaperEditorActivity.open(activity)) })
+                        action = { actions.navigate(WALLPAPER_STUDIO_ROUTE) })
                 }
             }
             item("screenshots") { EntryCard("nav_screenshots", activity.getString(R.string.rear_screenshot_entry_help), "screenshot_settings_entry") {
-                activity.startActivity(android.content.Intent(activity, RearScreenshotActivity::class.java))
+                actions.navigate(SCREENSHOT_SETTINGS_ROUTE)
             } }
         }
     }
@@ -581,15 +490,45 @@ class MiuixSettingsUi(
         }
     }
 
+    @Composable private fun WakeModeChoices() {
+        val keep = state.values["keep_screen_on_enabled"] == true
+        val always = state.values["always_wakeup_enabled"] == true
+        val current = if (always) 2 else if (keep) 1 else 0
+        Column(Modifier.selectableGroup()) {
+            WakeModeOption(0, s("status_off"), null, current) {
+                if (always) actions.toggle("always_wakeup_enabled", "setAlwaysWakeUpEnabled", false)
+                else if (keep) actions.toggle("keep_screen_on_enabled", "setKeepScreenOnEnabled", false)
+            }
+            AppDivider()
+            WakeModeOption(1, s("keep_screen_on"), s("keep_help"), current) {
+                actions.toggle("keep_screen_on_enabled", "setKeepScreenOnEnabled", true)
+            }
+            AppDivider()
+            WakeModeOption(2, s("always_wake_up"), s("always_help"), current) {
+                actions.toggle("always_wakeup_enabled", "setAlwaysWakeUpEnabled", true)
+            }
+        }
+    }
+
+    @Composable private fun WakeModeOption(index: Int, title: String, detail: String?, current: Int, select: () -> Unit) {
+        val isSelected = current == index
+        AppRow(title, detail, Modifier.testTag("wake_mode_$index").selectable(
+            selected = isSelected, role = Role.RadioButton, onClick = { if (!isSelected) select() }
+        ), trailing = {
+            RadioButton(isSelected, null, Modifier.clearAndSetSemantics {})
+        })
+    }
+
     @Composable private fun BackSubpage(route: Int) {
         val (title, backTag) = when (route) {
             10 -> s("nav_cast") to "cast_settings_back"
             11 -> s("nav_wake") to "wake_settings_back"
-            12 -> s("nav_charging") to "charging_settings_back"
-            else -> s("nav_screenshots") to "screenshot_settings_back"
+            else -> s("nav_charging") to "charging_settings_back"
         }
-        PageFrame(title, { actions.navigate(0) }, backTag) { modifier, header ->
-            LazyColumn(modifier, contentPadding = PaddingValues(20.dp, header + 12.dp, 20.dp, 24.dp),
+        val list = rearSettingsLists.getValue(route)
+        AppPageContent(title, { actions.navigate(0) }, backTag, scrollState = list) { modifier, header ->
+            LazyColumn(modifier.testTag("rear_settings_${route}_list"), state = list,
+                contentPadding = PaddingValues(20.dp, header + 12.dp, 20.dp, 24.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when (route) {
                     10 -> item("cast_options") {
@@ -601,7 +540,7 @@ class MiuixSettingsUi(
                                     AppDivider()
                                     AppRow(activity.getString(R.string.rear_density_title), activity.getString(R.string.rear_density_summary),
                                         modifier = Modifier.testTag("density_compatibility_entry"), action = {
-                                            activity.startActivity(android.content.Intent().setClassName(activity, "top.zainzh.rearscreen.DensityCompatibilityActivity"))
+                                            actions.navigate(DENSITY_SETTINGS_ROUTE)
                                         })
                                     AppDivider()
                                     RearCameraGapBatteryToggle(virtual)
@@ -615,10 +554,18 @@ class MiuixSettingsUi(
                                         AppRow(s("screen_size"), s("dpi_help"), Modifier.testTag("physical_dpi_entry"), action = actions::dpi,
                                             trailing = { Text(if (state.dpi > 0) state.dpi.toString() else "—", color = AppPalette.accent()) })
                                         AppDivider()
-                                        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            repeat(4) { index ->
-                                                TextButton("${index * 90}°", onClick = { actions.rotation(index) }, enabled = !state.busy,
-                                                    modifier = Modifier.weight(1f), minHeight = 48.dp)
+                                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            if (state.rotation !in 0..3) Text(activity.getString(R.string.ui_rotation_unavailable),
+                                                color = AppPalette.secondary(), fontSize = 13.sp)
+                                            FlowRow(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                repeat(4) { index ->
+                                                    val selected = state.rotation == index
+                                                    TextButton("${index * 90}°", onClick = { if (!selected) actions.rotation(index) },
+                                                        enabled = !state.busy, modifier = Modifier
+                                                            .testTag("physical_rotation_$index").semantics { this.selected = selected },
+                                                        colors = if (selected) ButtonDefaults.textButtonColorsPrimary() else ButtonDefaults.textButtonColors(),
+                                                        minHeight = 48.dp)
+                                                }
                                             }
                                         }
                                     }
@@ -627,336 +574,39 @@ class MiuixSettingsUi(
                         }
                     }
                     11 -> item("wake_options") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AppCard {
-                                SettingsToggle("proximity_sensor", "proximity_help", "proximity_sensor_enabled", "setProximitySensorEnabled")
-                                AppDivider()
-                                SettingsToggle("keep_screen_on", "keep_help", "keep_screen_on_enabled", "setKeepScreenOnEnabled")
-                                AppDivider()
-                                SettingsToggle("always_wake_up", "always_help", "always_wakeup_enabled", "setAlwaysWakeUpEnabled")
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            AppCard { SettingsToggle("proximity_sensor", "proximity_help", "proximity_sensor_enabled", "setProximitySensorEnabled") }
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                AppSection(activity.getString(R.string.ui_wake_behavior))
+                                AppCard { WakeModeChoices() }
+                                Text(s("warning_burn_in"), Modifier.padding(horizontal = 16.dp), fontSize = 13.sp, color = AppPalette.secondary())
                             }
-                            Text(s("warning_burn_in"), Modifier.padding(14.dp), fontSize = 12.sp, color = AppPalette.secondary())
                         }
                     }
                     12 -> item("charging_options") {
                         AppCard {
                             SettingsToggle("charging_animation", "charging_help", "charging_animation_enabled", "toggleChargingService")
                             AppDivider()
-                            SettingsToggle("charging_always_on", "charging_always_help", "charging_always_on_enabled", "setChargingAlwaysOnEnabled")
+                            val animationOn = state.values["charging_animation_enabled"] == true
+                            AppToggle(s("charging_always_on"), if (animationOn) s("charging_always_help")
+                                else activity.getString(R.string.ui_charging_requires_animation),
+                                state.values["charging_always_on_enabled"] == true, enabled = animationOn,
+                                modifier = Modifier.testTag("charging_always_on_enabled"),
+                                onChange = { actions.toggle("charging_always_on_enabled", "setChargingAlwaysOnEnabled", it) })
                         }
-                    }
-                    13 -> item("screenshot_options") {
-                        AppCard { AppRow(activity.getString(R.string.rear_screenshot_title), activity.getString(R.string.rear_screenshot_entry_help),
-                            action = { activity.startActivity(android.content.Intent(activity, RearScreenshotActivity::class.java)) }) }
                     }
                 }
             }
         }
     }
 
-    @Composable private fun Modules(modifier: Modifier, active: Boolean) {
-        var modules by remember { mutableStateOf<List<ModuleDescriptor>>(emptyList()) }
-        var enabled by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
-        var message by remember { mutableStateOf("") }
-        var busy by remember { mutableStateOf(false) }
-        var initialLoaded by remember { mutableStateOf(false) }
-        val scope = rememberCoroutineScope()
-        var refreshJob by remember { mutableStateOf<Job?>(null) }
-        fun refresh() {
-            if (!active) return
-            refreshJob?.cancel()
-            refreshJob = scope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    val all = ModuleStore.list(activity)
-                    all to all.associate { it.id to ModuleStore.isEnabled(activity, it.id) }
-                }
-                if (active) {
-                    modules = result.first
-                    enabled = result.second
-                    initialLoaded = true
-                }
-            }
-        }
-        LaunchedEffect(active) {
-            if (!active) return@LaunchedEffect
-            if (!BuildConfig.DEBUG) {
-                initialLoaded = true
-                return@LaunchedEffect
-            }
-            val receiver = object : android.content.BroadcastReceiver() {
-                override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
-                    refresh()
-                }
-            }
-            androidx.core.content.ContextCompat.registerReceiver(activity, receiver,
-                android.content.IntentFilter(ModuleStore.ACTION_CHANGED), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
-            refresh()
-            try {
-                awaitCancellation()
-            } finally {
-                refreshJob?.cancel()
-                runCatching { activity.unregisterReceiver(receiver) }
-            }
-        }
-        if (!initialLoaded) {
-            Column(modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                PageTitle(s("nav_modules"), s("native_modules_trust"))
-                AppCard { AppRow(activity.getString(R.string.native_modules_loading), null) }
-            }
-        } else LazyColumn(modifier.testTag("modules_tab"), state = modulesList, contentPadding = PaddingValues(20.dp, 22.dp, 20.dp,
-            maxOf(126.dp, with(LocalDensity.current) { navigationHeight.toDp() } + 32.dp)), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item("title") { PageTitle(s("nav_modules"), s("native_modules_trust")) }
-            item("zip_mods") { AppCard { AppRow(activity.getString(R.string.zip_mods_title), activity.getString(R.string.zip_mods_summary),
-                Modifier.testTag("zip_mods_entry"), action = {
-                    activity.startActivity(Intent(activity, top.zainzh.rearscreen.platform.mods.ModSettingsActivity::class.java))
-                }) } }
-            if (BuildConfig.DEBUG) {
-                item("legacy_debug_heading") { Text(activity.getString(R.string.native_modules_debug_only), Modifier.padding(horizontal = 12.dp), color = AppPalette.secondary()) }
-                item("import") { AppCard { AppRow(s("native_modules_import"), s("native_modules_import_help"), enabled = !busy, action = actions::moduleImport) } }
-                if (message.isNotBlank()) item("message") { Text(message, Modifier.padding(horizontal = 12.dp), color = AppPalette.secondary()) }
-                if (modules.isEmpty()) item("empty") { AppCard { AppRow(s("native_modules_empty"), s("native_modules_empty_help")) } }
-                items(modules, key = { it.id }) { descriptor ->
-                    val isEnabled = enabled[descriptor.id] == true
-                    AppCard(Modifier.testTag("native_module_${descriptor.id}")) {
-                        AppRow(descriptor.label(activity.resources.configuration.locales[0].toLanguageTag()),
-                            descriptor.description(activity.resources.configuration.locales[0].toLanguageTag()) + " · " + descriptor.versionName,
-                            action = { selectedModuleId = descriptor.id; actions.navigate(30) }, trailing = {
-                                Switch(isEnabled, onCheckedChange = { value ->
-                                    scope.launch {
-                                        busy = true
-                                        val result = withContext(Dispatchers.IO) { runCatching { ModuleStore.setEnabled(activity, descriptor.id, value) } }
-                                        message = result.exceptionOrNull()?.message.orEmpty()
-                                        busy = false
-                                        refresh()
-                                    }
-                                }, enabled = !busy)
-                            })
-                    }
-                }
-            }
-        }
+    @Composable private fun Modules(modifier: Modifier, tailPadding: Dp, active: Boolean) {
+        wallpaperMods.ModTab(modifier, modulesList, tailPadding, active, heading = { PageTitle(s("nav_modules")) })
     }
 
-    @Composable private fun ModuleDetails(id: String, active: Boolean) {
-        var descriptor by remember(id) { mutableStateOf<ModuleDescriptor?>(null) }
-        var enabled by remember(id) { mutableStateOf(false) }
-        var loading by remember(id) { mutableStateOf(true) }
-        var busy by remember(id) { mutableStateOf(false) }
-        var removePrompt by remember(id) { mutableStateOf(false) }
-        var removing by remember(id) { mutableStateOf(false) }
-        var removeFailed by remember(id) { mutableStateOf(false) }
-        var moduleMessage by remember(id) { mutableStateOf("") }
-        var moduleLookupGeneration by remember(id) { mutableIntStateOf(0) }
-        val scope = rememberCoroutineScope()
-        var moduleEventJob by remember(id) { mutableStateOf<Job?>(null) }
-        LaunchedEffect(id, active) {
-            if (!active) return@LaunchedEffect
-            val generation = ++moduleLookupGeneration
-            val result = withContext(Dispatchers.IO) {
-                val module = ModuleStore.get(activity, id)
-                module to (module != null && ModuleStore.isEnabled(activity, id))
-            }
-            if (generation == moduleLookupGeneration) {
-                descriptor = result.first
-                enabled = result.second
-                loading = false
-                if (active && result.first == null) actions.navigate(2)
-            }
-        }
-        DisposableEffect(id, scope, active) {
-            if (!active) return@DisposableEffect onDispose { }
-            val receiver = object : android.content.BroadcastReceiver() {
-                override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
-                    if (!active || intent?.action != ModuleStore.ACTION_CHANGED || intent.getStringExtra("id") != id) return
-                    moduleEventJob?.cancel()
-                    val generation = ++moduleLookupGeneration
-                    moduleEventJob = scope.launch {
-                        val result = withContext(Dispatchers.IO) {
-                            val module = ModuleStore.get(activity, id)
-                            module to (module != null && ModuleStore.isEnabled(activity, id))
-                        }
-                        withContext(Dispatchers.Main.immediate) {
-                            if (!active || generation != moduleLookupGeneration) return@withContext
-                            loading = false
-                            val latestDescriptor = result.first
-                            val loadedVersion = descriptor?.versionCode
-                            if (latestDescriptor == null ||
-                                (loadedVersion != null && latestDescriptor.versionCode != loadedVersion)
-                            ) {
-                                actions.navigate(2)
-                            } else {
-                                descriptor = latestDescriptor
-                                enabled = result.second
-                            }
-                        }
-                    }
-                }
-            }
-            androidx.core.content.ContextCompat.registerReceiver(activity, receiver,
-                android.content.IntentFilter(ModuleStore.ACTION_CHANGED), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
-            onDispose { moduleEventJob?.cancel(); runCatching { activity.unregisterReceiver(receiver) } }
-        }
-        if (loading || descriptor == null) {
-            return
-        }
-        val currentDescriptor = descriptor ?: return
-        val locale = activity.resources.configuration.locales[0].toLanguageTag()
-        val moduleTitle = currentDescriptor.label(locale)
-        val controlsEnabled = enabled && !busy && !removing
-        val disabledReason = s(if (busy || removing) "native_modules_working" else "native_modules_enable_required")
-        val destructiveColors = ButtonDefaults.textButtonColorsPrimary().copy(
-            color = AppPalette.destructive(),
-            disabledColor = AppPalette.destructive().copy(alpha = .32f),
-            textColor = AppPalette.onDestructive(),
-            disabledTextColor = AppPalette.onDestructive().copy(alpha = .6f),
-        )
-        PageFrame(currentDescriptor.label(activity.resources.configuration.locales[0].toLanguageTag()), { actions.navigate(2) }, "module_detail_back") { modifier, header ->
-            LazyColumn(
-                modifier.testTag("module_detail_list"),
-                contentPadding = PaddingValues(20.dp, header + 12.dp, 20.dp, 24.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                item("module_status") {
-                    AppCard {
-                        AppToggle(
-                            s("native_modules_enable_module"),
-                            null,
-                            checked = enabled,
-                            enabled = !busy && !removing,
-                            modifier = Modifier.testTag("module_detail_enabled"),
-                        ) { value ->
-                            if (busy || removing) return@AppToggle
-                            scope.launch {
-                                busy = true
-                                moduleMessage = ""
-                                val result = withContext(Dispatchers.IO) {
-                                    runCatching { ModuleStore.setEnabled(activity, id, value) }
-                                }
-                                if (result.isSuccess) {
-                                    enabled = value
-                                } else {
-                                    moduleMessage = result.exceptionOrNull()?.message
-                                        ?: s("native_modules_action_failed")
-                                }
-                                busy = false
-                            }
-                        }
-                        if (!enabled) {
-                            AppDivider()
-                            Text(
-                                s("native_modules_disabled_detail_help"),
-                                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)
-                                    .testTag("module_detail_disabled_hint"),
-                                fontSize = 13.sp,
-                                color = AppPalette.secondary(),
-                            )
-                        }
-                        if (moduleMessage.isNotBlank()) {
-                            AppDivider()
-                            Text(
-                                moduleMessage,
-                                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)
-                                    .semantics { liveRegion = LiveRegionMode.Polite },
-                                fontSize = 13.sp,
-                                color = AppPalette.accent(),
-                            )
-                        }
-                    }
-                }
-                item("summary") {
-                    AppCard {
-                        AppRow(
-                            currentDescriptor.description(locale),
-                            currentDescriptor.versionName,
-                        )
-                    }
-                }
-                item("actions") {
-                    AppCard {
-                        AppRow(
-                            s("native_modules_settings"),
-                            if (controlsEnabled) null else disabledReason,
-                            Modifier.testTag("module_detail_settings").graphicsLayer(alpha = if (controlsEnabled) 1f else .55f),
-                            enabled = controlsEnabled,
-                            action = { if (controlsEnabled) actions.moduleSettings(id) },
-                            trailing = if (controlsEnabled) null else ({ }),
-                        )
-                        AppDivider()
-                        AppRow(
-                            s("native_modules_rear"),
-                            if (controlsEnabled) s("native_modules_rear_help") else disabledReason,
-                            Modifier.testTag("module_detail_rear").graphicsLayer(alpha = if (controlsEnabled) 1f else .55f),
-                            enabled = controlsEnabled,
-                            action = { if (controlsEnabled) actions.moduleRear(id) },
-                            trailing = if (controlsEnabled) null else ({ }),
-                        )
-                    }
-                }
-                item("uninstall") {
-                    TextButton(
-                        s("native_modules_uninstall"),
-                        onClick = { if (!busy && !removing) { removeFailed = false; removePrompt = true } },
-                        modifier = Modifier.fillMaxWidth().testTag("module_detail_uninstall"),
-                        enabled = !busy && !removing,
-                        minHeight = 52.dp,
-                        cornerRadius = 18.dp,
-                        colors = destructiveColors,
-                    )
-                }
-            }
-        }
-        WindowDialog(
-            show = removePrompt,
-            title = s("native_modules_uninstall_confirm_title"),
-            onDismissRequest = { if (!removing) removePrompt = false },
-        ) {
-            Column(
-                Modifier.fillMaxWidth().testTag("module_uninstall_dialog"),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text(
-                    activity.getString(R.string.native_modules_uninstall_confirm_message, moduleTitle),
-                    Modifier.testTag("module_uninstall_module_name"),
-                    fontSize = 14.sp,
-                    color = AppPalette.secondary(),
-                )
-                if (removeFailed) {
-                    Text(s("native_modules_action_failed"), color = AppPalette.accent())
-                }
-                TextButton(
-                    s("cancel"),
-                    onClick = { if (!removing) removePrompt = false },
-                    modifier = Modifier.fillMaxWidth().testTag("module_uninstall_cancel"),
-                    enabled = !removing,
-                    minHeight = 48.dp,
-                )
-                TextButton(
-                    s("native_modules_uninstall"),
-                    onClick = {
-                        if (busy || removing) return@TextButton
-                        removing = true
-                        removeFailed = false
-                        actions.moduleRemove(id) { success ->
-                            removing = false
-                            if (success) {
-                                removePrompt = false
-                            } else {
-                                removeFailed = true
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().testTag("module_uninstall_confirm"),
-                    enabled = !busy && !removing,
-                    minHeight = 48.dp,
-                    colors = destructiveColors,
-                )
-            }
-        }
-    }
-
-    @Composable private fun Notifications(modifier: Modifier) {
+    @Composable private fun Notifications(modifier: Modifier, tailPadding: Dp) {
         LazyColumn(modifier.testTag("notifications_list"), state = notificationsList,
-            contentPadding = PaddingValues(20.dp, 22.dp, 20.dp, maxOf(126.dp, with(LocalDensity.current) { navigationHeight.toDp() } + 32.dp)), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            contentPadding = PaddingValues(20.dp, 22.dp, 20.dp, tailPadding), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item("title") { PageTitle(s("notifications_title"), s("notifications_subtitle")) }
             item("delivery") {
                 AppCard {
@@ -973,7 +623,7 @@ class MiuixSettingsUi(
                     }
                     AppDivider()
                     AppRow(s("notification_access"), s("notification_access_help"), action = { actions.action("openNotificationListenerSettings") },
-                        trailing = { Text(s(if (settings.listener) "access_granted" else "access_pending"), color = AppPalette.accent(), fontSize = 13.sp, modifier = Modifier.widthIn(max = 100.dp)) })
+                        value = s(if (settings.listener) "access_granted" else "access_pending"))
                     if (!settings.posting) {
                         AppDivider()
                         AppRow(s("notification_permission"), s("notification_permission_help"), action = { actions.action("requestNotificationPermission") })
@@ -981,15 +631,17 @@ class MiuixSettingsUi(
                 }
             }
             item("privacy") { AppCard { AppRow(s("privacy_section"), null, action = { actions.navigate(20) }) } }
-            item("rules") { AppCard { AppRow(s("notification_rules"), s("duration_help"), action = { actions.navigate(21) }) } }
+            item("rules") { AppCard { AppRow(s("notification_rules"), s("duration_help"),
+                Modifier.testTag("notification_rules_entry"), action = { actions.navigate(21) }) } }
         }
     }
 
     @Composable private fun NotificationsSubpage(route: Int) {
         val privacy = route == 20
         val title = s(if (privacy) "privacy_section" else "notification_rules")
-        PageFrame(title, { actions.navigate(1) }, if (privacy) "notification_privacy_back" else "notification_rules_back") { modifier, header ->
-            LazyColumn(modifier.testTag(if (privacy) "notification_privacy_list" else "notification_rules_list"),
+        val list = notificationDetailsLists.getValue(route)
+        AppPageContent(title, { actions.navigate(1) }, if (privacy) "notification_privacy_back" else "notification_rules_back", scrollState = list) { modifier, header ->
+            LazyColumn(modifier.testTag(if (privacy) "notification_privacy_list" else "notification_rules_list"), state = list,
                 contentPadding = PaddingValues(20.dp, header + 12.dp, 20.dp, 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 item {
                     AppCard {
@@ -1004,16 +656,15 @@ class MiuixSettingsUi(
                             AppDivider()
                             SettingsToggle("only_when_locked", "upside_help", "notification_only_when_locked", "setOnlyWhenLocked")
                             AppDivider()
-                            AppRow(s("notification_duration_title"), s("duration_help"), action = actions::duration,
-                                trailing = { Text(durationSummary(settings.duration), fontSize = 15.sp, color = AppPalette.accent(), modifier = Modifier.widthIn(max = 130.dp)) })
+                            AppRow(s("notification_duration_title"), activity.getString(R.string.ui_notification_duration_scope), action = actions::duration,
+                                value = durationSummary(settings.duration))
                             AppDivider()
                             AppRow(s("notification_click_action"), null, action = actions::clickAction,
-                                trailing = { Text(s(when {
+                                value = s(when {
                                     settings.dismissOnly -> "notification_click_dismiss"
                                     settings.openOnRear -> "notification_click_open_rear"
                                     else -> "notification_click_open"
-                                }),
-                                    fontSize = 14.sp, color = AppPalette.accent(), modifier = Modifier.widthIn(max = 150.dp)) })
+                                }))
                         }
                     }
                 }
@@ -1030,43 +681,91 @@ class MiuixSettingsUi(
     }
 
     @Composable private fun DurationBottomSheet() {
+        val configuration = LocalConfiguration.current
+        val shortWindow = configuration.screenHeightDp < 500
+        val sideBySide = shortWindow && configuration.screenWidthDp >= 600
+        // Reserve room for the sheet title and system bars; the body can scroll but not the actions.
+        val maxContentHeight = (configuration.screenHeightDp.dp - 92.dp).coerceAtLeast(130.dp)
         WindowBottomSheet(show = durationSheetVisible, title = s("notification_duration_title"),
             onDismissRequest = { durationSheetVisible = false }) {
-            Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    top.yukonga.miuix.kmp.basic.NumberPicker(
-                        value = durationValue,
-                        onValueChange = { durationValue = it; durationChanged = true },
-                        modifier = Modifier.weight(1f), enabled = !durationNeverAutoClose, range = 1..60)
-                    top.yukonga.miuix.kmp.basic.NumberPicker(
-                        value = if (durationUnitMinutes) 1 else 0,
-                        onValueChange = { durationUnitMinutes = it == 1; durationChanged = true },
-                        modifier = Modifier.weight(1f), enabled = !durationNeverAutoClose, range = 0..1,
-                        label = { if (it == 0) s("unit_seconds") else s("unit_minutes") })
+            Column(Modifier.fillMaxWidth().heightIn(max = maxContentHeight).navigationBarsPadding().imePadding(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (sideBySide) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            DurationWheelRow(true, Modifier.weight(1.15f))
+                            Box(Modifier.weight(1f)) { DurationPersistentToggle(showHelp = false) }
+                        }
+                        Text(s("notification_never_close_help"),
+                            modifier = Modifier.padding(horizontal = 12.dp).testTag("notification_duration_persist_help"),
+                            fontSize = 13.sp, color = AppPalette.secondary())
+                    } else {
+                        DurationWheelRow(shortWindow, Modifier.fillMaxWidth())
+                        DurationPersistentToggle()
+                    }
+                    if (!durationChanged && !durationNeverAutoClose &&
+                        settings.duration != NotificationDisplayOptions.durationSeconds(durationValue, durationUnitMinutes)) {
+                        Text(activity.getString(R.string.ui_notification_duration_current,
+                            s("seconds_value").replace("{0}", settings.duration.toString())),
+                            fontSize = 13.sp, color = AppPalette.secondary())
+                    }
                 }
-                AppToggle(s("notification_never_close"), s("notification_never_close_help"), durationNeverAutoClose,
-                    onChange = { durationNeverAutoClose = it })
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    TextButton(s("cancel"), { durationSheetVisible = false }, Modifier.weight(1f), minHeight = 48.dp)
-                    TextButton(s("confirm"), {
+                AppActionPair(
+                    s("cancel"), { durationSheetVisible = false },
+                    s("confirm"), {
                         val seconds = NotificationDisplayOptions.durationAfterConfirmation(
                             settings.duration, durationChanged, durationValue, durationUnitMinutes)
                         durationSheetVisible = false
                         if (durationChanged || durationNeverAutoClose != activity.getSharedPreferences("mrss_settings", android.content.Context.MODE_PRIVATE)
                                 .getBoolean("notification_never_auto_close", false))
                             actions.saveDuration(if (durationChanged) seconds else -1, durationNeverAutoClose)
-                    }, Modifier.weight(1f), minHeight = 48.dp, colors = ButtonDefaults.textButtonColorsPrimary())
-                }
+                    },
+                    secondaryModifier = Modifier.testTag("notification_duration_cancel"),
+                    primaryModifier = Modifier.testTag("notification_duration_confirm"),
+                )
             }
         }
     }
 
-    @Composable private fun Settings(modifier: Modifier) {
+    @Composable private fun DurationWheelRow(shortWindow: Boolean, modifier: Modifier) {
+        val rows = if (shortWindow) 3 else 5
+        Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            top.yukonga.miuix.kmp.basic.NumberPicker(
+                value = durationValue, onValueChange = { durationValue = it; durationChanged = true },
+                modifier = Modifier.weight(1f).testTag("notification_duration_value"),
+                enabled = !durationNeverAutoClose, range = 1..60, visibleItemCount = rows)
+            top.yukonga.miuix.kmp.basic.NumberPicker(
+                value = if (durationUnitMinutes) 1 else 0,
+                onValueChange = { durationUnitMinutes = it == 1; durationChanged = true },
+                modifier = Modifier.weight(1.25f).testTag("notification_duration_unit"),
+                enabled = !durationNeverAutoClose, range = 0..1, visibleItemCount = rows,
+                label = { if (it == 0) s("unit_seconds") else s("unit_minutes") })
+        }
+    }
+
+    @Composable private fun DurationPersistentToggle(showHelp: Boolean = true) {
+        AppToggle(s("notification_never_close"), if (showHelp) s("notification_never_close_help") else null,
+            durationNeverAutoClose,
+            modifier = Modifier.testTag("notification_duration_persist"), onChange = { durationNeverAutoClose = it })
+    }
+
+    @Composable private fun Settings(modifier: Modifier, tailPadding: Dp) {
         LazyColumn(modifier.testTag("settings_list"), state = settingsList,
-            contentPadding = PaddingValues(20.dp, 22.dp, 20.dp, maxOf(126.dp, with(LocalDensity.current) { navigationHeight.toDp() } + 32.dp)),
+            contentPadding = PaddingValues(20.dp, 22.dp, 20.dp, tailPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item("title") { PageTitle(s("nav_settings")) }
+            item("app_preferences") {
+                AppSection(activity.getString(R.string.app_preferences_title))
+                AppCard {
+                    AppToggle(activity.getString(R.string.recents_hide_title),
+                        activity.getString(R.string.recents_visibility_summary), !settings.showInRecents,
+                        modifier = Modifier.testTag("hide_in_recents")) { hidden ->
+                        actions.showInRecents(!hidden)
+                    }
+                }
+            }
             item("runtime") {
                 AppSection(s("settings_runtime"))
                 AppCard {
@@ -1093,20 +792,14 @@ class MiuixSettingsUi(
                     AppToggle(s("update_proxy"), s("update_proxy_help"), settings.proxy, !settings.checking,
                         onChange = actions::proxy)
                     AppDivider()
-                    AppRow(s("about"), s("nav_about_help"), action = { actions.navigate(40) })
-                }
-            }
-            if (BuildConfig.DEBUG) item("debug_tools") {
-                AppCard {
-                    AppRow(activity.getString(R.string.rear_info_title), activity.getString(R.string.rear_info_summary),
-                        action = { activity.startActivity(android.content.Intent().setClassName(activity, "top.zainzh.rearscreen.RearInfoSettingsActivity")) })
+                    AppRow(s("about"), s("nav_about_help"), Modifier.testTag("about_entry"), action = { actions.navigate(40) })
                 }
             }
         }
     }
 
     @Composable private fun AboutDetails() {
-        PageFrame(s("about"), { actions.navigate(3) }, "about_details_back") { modifier, header ->
+        AppPageContent(s("about"), { actions.navigate(3) }, "about_details_back", scrollState = aboutList) { modifier, header ->
             LazyColumn(modifier.testTag("about_list"), state = aboutList,
                 contentPadding = PaddingValues(20.dp, header + 12.dp, 20.dp, 24.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1149,7 +842,7 @@ class MiuixSettingsUi(
         AppCard(content = content)
     }
     @Composable private fun ConnectButton(modifier: Modifier, action: String = state.action) {
-        TextButton(s(action), actions::connect, modifier, enabled = !state.busy && state.status !in setOf("privilege_root_authorizing", "connection_binding", "privilege_switching"), minHeight = 48.dp, cornerRadius = 16.dp, insideMargin = PaddingValues(10.dp), colors = ButtonDefaults.textButtonColorsPrimary())
+        TextButton(s(action), actions::connect, modifier, enabled = !state.busy && state.status !in setOf("privilege_root_authorizing", "connection_binding", "privilege_switching"), minHeight = 48.dp, cornerRadius = 16.dp, insideMargin = PaddingValues(10.dp), colors = if (action == "refresh") ButtonDefaults.textButtonColors() else ButtonDefaults.textButtonColorsPrimary())
     }
     @Composable private fun DetailsButton(modifier: Modifier) {
         TextButton(s("connection_details"), actions::details, modifier, minHeight = 48.dp, cornerRadius = 16.dp, insideMargin = PaddingValues(10.dp))
@@ -1181,7 +874,6 @@ class MiuixSettingsUi(
 
 /** Small consistent stroke icons without bundling an unused icon font/library. */
 @Composable private fun Icon(name: String, baseTint: Color, modifier: Modifier, tintProvider: (() -> Color)? = null) {
-    val background = AppPalette.background()
     Canvas(modifier) {
         val tint = tintProvider?.invoke() ?: baseTint
         val scale = size.width / 24f
@@ -1191,17 +883,11 @@ class MiuixSettingsUi(
             "screen" -> { drawRoundRect(tint, Offset(5f*scale,2f*scale), Size(14f*scale,20f*scale), androidx.compose.ui.geometry.CornerRadius(3f*scale), style=stroke); drawRoundRect(tint,Offset(8f*scale,5f*scale),Size(8f*scale,7f*scale), androidx.compose.ui.geometry.CornerRadius(2f*scale),style=stroke);line(10f,19f,14f,19f) }
             "bell" -> { drawArc(tint,180f,180f,false,Offset(6f*scale,4f*scale),Size(12f*scale,12f*scale),style=stroke);line(6f,10f,5f,17f);line(18f,10f,19f,17f);line(5f,17f,19f,17f);drawArc(tint,0f,180f,false,Offset(10f*scale,18f*scale),Size(4f*scale,3f*scale),style=stroke) }
             "info" -> { drawCircle(tint,9f*scale,style=stroke);line(12f,11f,12f,17f);drawCircle(tint,1f*scale,Offset(12f*scale,7f*scale)) }
-            "settings" -> {
-                drawCircle(tint, 7f * scale, style = stroke)
-                repeat(8) { index ->
-                    val angle = index * Math.PI / 4
-                    val inner = 7.5f
-                    val outer = 10.5f
-                    line(12f + inner * kotlin.math.cos(angle).toFloat(), 12f + inner * kotlin.math.sin(angle).toFloat(),
-                        12f + outer * kotlin.math.cos(angle).toFloat(), 12f + outer * kotlin.math.sin(angle).toFloat())
+            "more" -> {
+                drawCircle(tint, 9.5f * scale, style = stroke)
+                for (x in 8..16 step 4) {
+                    drawCircle(tint, 1.2f * scale, Offset(x * scale, 12f * scale))
                 }
-                drawCircle(background, 2.7f * scale)
-                drawCircle(tint, 2.7f * scale, style = stroke)
             }
             "sun" -> { drawCircle(tint,4f*scale,style=stroke);repeat(8){ val a=it*Math.PI/4;line(12f+8f*kotlin.math.cos(a).toFloat(),12f+8f*kotlin.math.sin(a).toFloat(),12f+10f*kotlin.math.cos(a).toFloat(),12f+10f*kotlin.math.sin(a).toFloat()) } }
             "eye" -> { drawOval(tint,Offset(2f*scale,6f*scale),Size(20f*scale,12f*scale),style=stroke);drawCircle(tint,3f*scale,style=stroke) }

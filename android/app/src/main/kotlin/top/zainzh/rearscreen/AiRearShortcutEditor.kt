@@ -12,16 +12,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -57,8 +58,8 @@ import top.yukonga.miuix.kmp.basic.Text
     KeepShortcutDragInView(order, keys, list)
 
     val keyboard = LocalSoftwareKeyboardController.current
-    var search by rememberSaveable { mutableStateOf("") }
-    val query = search.trim()
+    val search = rememberTextFieldState()
+    val query = search.text.toString().trim()
     val catalog = remember(apps) { apps.associateBy { it.component } }
     val duplicateLabels = remember(apps) { apps.groupingBy { it.label }.eachCount() }
     val visible = remember(apps, draft.entries, query) {
@@ -68,11 +69,16 @@ import top.yukonga.miuix.kmp.basic.Text
     }
     val dragging = order.movingKey != null
     val full = draft.entries.size >= limit
+    val grid = draft.grid
+    val capacity = grid.visibleShortcutCapacity(limit, reserveAllApps = allowAllApps)
+    val assigned = grid.boundShortcutCount(capacity) { catalog[it]?.canCast == true }
+    val canParkAnother = allowAllApps && draft.allApps && assigned == capacity && !full
 
-    PageFrame(stringResource(R.string.ai_rear_shortcuts_title), {
+    var searchFocused by remember { mutableStateOf(false) }
+    AppPageContent(stringResource(R.string.ai_rear_shortcuts_title), {
         keyboard?.hide()
         back()
-    }, "ai_rear_shortcuts_back") { modifier, inset ->
+    }, "ai_rear_shortcuts_back", scrollState = list, fadeEnabled = !searchFocused && !dragging) { modifier, inset ->
         LazyColumn(modifier.shortcutOrderViewport(order, with(density) { inset.toPx() }).testTag("ai_rear_shortcuts"),
             state = list, contentPadding = PaddingValues(20.dp, inset + 12.dp, 20.dp, 24.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -84,7 +90,7 @@ import top.yukonga.miuix.kmp.basic.Text
                 }
             }
             item("selected_heading") {
-                AppSection(stringResource(R.string.ai_rear_configured_shortcuts, draft.entries.size, limit))
+                AppSection(stringResource(R.string.ai_rear_bound_count, assigned, capacity))
             }
             item("ordered") {
                 if (draft.entries.isEmpty()) {
@@ -136,8 +142,9 @@ import top.yukonga.miuix.kmp.basic.Text
                 Column {
                     AppSection(stringResource(R.string.ai_rear_available_shortcuts))
                     if (full) ShortcutListStatus(if (allowAllApps) R.string.ai_rear_shortcuts_full else R.string.ai_rear_theme_shortcuts_full)
-                    AppCatalogSearchField(search, { search = it }, stringResource(R.string.ai_rear_search_apps),
-                        modifier = Modifier.testTag("ai_rear_search"), interactive = !dragging)
+                    else if (canParkAnother) ShortcutListStatus(R.string.ai_rear_shortcut_can_park)
+                    AppCatalogSearchField(search, stringResource(R.string.ai_rear_search_apps),
+                        modifier = Modifier.testTag("ai_rear_search").onFocusChanged { searchFocused = it.hasFocus }, interactive = !dragging)
                 }
             }
             if (visible.isEmpty()) item("empty_results") {

@@ -101,9 +101,9 @@ class NotificationConsentComposeTest {
                 compose.onNodeWithText("Notification Preview Publisher", substring = true).assertIsDisplayed()
                 compose.onNodeWithText(activity.getString(R.string.notification_publisher_consent_access)).assertIsDisplayed()
                 compose.onNode(isToggleable()).assertIsOn()
-                // These checks scroll only when needed; actual Save interaction is covered below.
-                compose.onNodeWithTag("notification_consent_save").performScrollTo().assertIsDisplayed()
-                compose.onNodeWithTag("notification_consent_cancel").performScrollTo().assertIsDisplayed()
+                // Decision controls remain visible without scrolling the disclosure.
+                compose.onNodeWithTag("notification_consent_save").assertIsDisplayed()
+                compose.onNodeWithTag("notification_consent_cancel").assertIsDisplayed()
             }.onFailure { failures += "${mode.name}: consent semantics/layout failed: ${it.message}" }
 
             variant.put("assertionsPassed", failures.none { it.startsWith("${mode.name}:") })
@@ -143,7 +143,7 @@ class NotificationConsentComposeTest {
         NotificationConsentPreviewActivity.lastResult = null
         NotificationConsentPreviewActivity.lastSavedChoice = null
         compose.onNode(isToggleable()).performClick()
-        compose.onNodeWithTag("notification_consent_save").performScrollTo().performClick()
+        compose.onNodeWithTag("notification_consent_save").performClick()
         compose.waitUntil(5_000) { NotificationConsentPreviewActivity.lastResult == "save" }
         assertEquals("save", NotificationConsentPreviewActivity.lastResult)
         assertEquals(false, NotificationConsentPreviewActivity.lastSavedChoice)

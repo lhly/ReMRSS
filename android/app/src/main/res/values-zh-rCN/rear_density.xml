@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
     <string name="rear_density_help">为应用放宽窗口尺寸限制，并可单独设置布局 DPI。默认关闭，下次投放生效。使用背屏键盘不用开启。</string>
-    <string name="rear_density_bulk_summary">共 %1$d 个应用</string>
+    <string name="rear_density_bulk_summary">作用于全部 %1$d 个应用，不受搜索影响</string>
     <string name="rear_density_bulk_running">正在更新 %1$d 个应用…</string>
     <string name="rear_density_bulk_enable">全部开启</string>
     <string name="rear_density_bulk_disable">全部关闭</string>

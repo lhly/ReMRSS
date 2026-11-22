@@ -25,7 +25,7 @@
     <string name="rear_screenshot_preview_failed">外殼預覽暫時無法使用，請稍後重試</string>
     <string name="rear_screenshot_retry">重試</string>
     <string name="rear_screenshot_download_help">首次準備外殼需要連線，之後可離線使用。</string>
-    <string name="rear_screenshot_save_help">截圖磁貼與截圖 URI 共用此設定，圖片儲存至 Pictures/RearDisplay。</string>
+    <string name="rear_screenshot_save_help">截圖磁貼與截圖 URI 共用此設定。\n儲存位置：Pictures/RearDisplay</string>
     <string name="rear_screenshot_saving">正在儲存截圖…</string>
     <string name="rear_screenshot_saved_shell">帶殼背屏截圖已儲存</string>
     <string name="rear_screenshot_saved_both">帶殼截圖與原圖已儲存</string>

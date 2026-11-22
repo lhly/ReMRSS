@@ -127,6 +127,8 @@ public class ChargingGlassTest {
             try (java.io.FileOutputStream out = new java.io.FileOutputStream(new File(folder, name + ".png"))) {
                 result.compress(Bitmap.CompressFormat.PNG, 100, out);
             }
+            if (name.equals("23") || name.equals("67-motion") || name.equals("100"))
+                VisualAuditBitmap.write(inst, "audit-charging", "charge-" + name, result);
         }
         return result;
     }

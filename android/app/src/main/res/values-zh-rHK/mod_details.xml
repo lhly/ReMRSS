@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mod_detail_title">Mod 詳情</string>
+    <string name="mod_detail_actions">操作</string>
+    <string name="mod_detail_permissions">能力與權限</string>
+    <string name="mod_detail_management">管理</string>
+    <string name="mod_list_enable">啟用 %1$s</string>
+</resources>

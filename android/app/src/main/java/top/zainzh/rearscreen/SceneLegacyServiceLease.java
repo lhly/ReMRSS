@@ -2,8 +2,7 @@ package top.zainzh.rearscreen;
 
 /**
  * Excludes legacy global display keepers while a first-party Scene owns the rear display.
- * This is deliberately a process-local lease signal: it never starts a service and never
- * replaces ModuleDisplayRecoveryService's independent owner/lease contract.
+ * This is a process-local lease signal; it never starts a service.
  */
 public final class SceneLegacyServiceLease {
     private static volatile String activeLeaseId;

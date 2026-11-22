@@ -103,9 +103,13 @@ public class ChargingLiquidView extends View implements SensorEventListener {
     }
     public float getFillLevel() { return fillLevel; }
 
-    public void restartMotion() {
-        seconds = 0f;
-        visibleSeconds = 0f;
+    public void restartMotion() { resetMotion(0f); }
+
+    void resumeAmbientMotion() { resetMotion(AMBIENT_AFTER_SECONDS); }
+
+    private void resetMotion(float visibleTime) {
+        seconds = visibleTime;
+        visibleSeconds = visibleTime;
         lastTick = lastDrawTick = 0;
         tilt = 0f;
         updateRunning();

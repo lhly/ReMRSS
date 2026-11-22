@@ -19,7 +19,13 @@ internal data class AiRearGrid(
         return apps[index]?.let { Tile.App(it) } ?: Tile.Empty
     }
 
-    val appCapacity get() = if (allApps) 5 else apps.size
+    fun visibleShortcutCapacity(limit: Int = apps.size, reserveAllApps: Boolean = true): Int =
+        if (reserveAllApps && allApps) minOf(limit, apps.lastIndex) else limit
+
+    fun boundShortcutCount(capacity: Int, available: (String) -> Boolean): Int =
+        apps.take(capacity).count { it?.let(available) == true }
+
+    val appCapacity get() = visibleShortcutCapacity()
     val occupiedSlots get() = apps.indices.filter { tile(it) != Tile.Empty }
 
     fun isReady(available: (String) -> Boolean): Boolean {

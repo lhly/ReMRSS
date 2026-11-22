@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -36,6 +38,8 @@ import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.Lifecycle
 import kotlinx.coroutines.Dispatchers
@@ -46,68 +50,116 @@ import java.io.Closeable
 import top.zainzh.rearscreen.platform.RearCapabilityCore
 import top.yukonga.miuix.kmp.basic.Text
 import top.zainzh.rearscreen.AppCard
+import top.zainzh.rearscreen.AppSettingsReveal
 import top.zainzh.rearscreen.AppPalette
 import top.zainzh.rearscreen.AppRow
 import top.zainzh.rearscreen.AppSection
 import top.zainzh.rearscreen.AppToggle
-import top.zainzh.rearscreen.PageFrame
+import top.zainzh.rearscreen.AppPageContent
+import top.zainzh.rearscreen.AppPageWindow
 import top.zainzh.rearscreen.miuixContent
 
 /** Same Compose/Miuix node renderer as the live Mod scene, without a display lease or reducer. */
 class ModPreviewActivity : ComponentActivity() {
+    private lateinit var page: ModPreviewPage
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        page = ModPreviewPage(this, intent.getStringExtra("mod_id").orEmpty(), savedInstanceState, ::finish)
+        page.setRouteActive(true)
+        miuixContent { AppPageWindow { page.Content() } }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        page.save(outState)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        page.close()
+        super.onDestroy()
+    }
+}
+
+internal class ModPreviewPage(
+    private val activity: ComponentActivity,
+    val modId: String,
+    state: Bundle?,
+    private val back: () -> Unit,
+) {
+    private val scroll = ScrollState(state?.getInt("preview_scroll") ?: 0)
+    private var routeActive = false
+    private var closed = false
+    private val visibility = object : DefaultLifecycleObserver {
+        override fun onResume(owner: LifecycleOwner) = updateSubscription()
+        override fun onPause(owner: LifecycleOwner) = stopHostData()
+    }
     private var pkg by mutableStateOf<VerifiedModPackage?>(null)
     private var initialModel by mutableStateOf<ModPersistedModel?>(null)
     private var failure by mutableStateOf("")
     private var hostData by mutableStateOf(JSONObject())
     private var dataSubscription: Closeable? = null
     private val hostDataEpoch = ModDataSubscriptionEpoch()
-    private val core by lazy { RearCapabilityCore.get(this) }
+    private val core by lazy { RearCapabilityCore.get(activity) }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val modId = intent.getStringExtra("mod_id").orEmpty()
-        lifecycleScope.launch {
+    init {
+        activity.lifecycle.addObserver(visibility)
+        activity.lifecycleScope.launch {
             val loaded = runCatching {
                 withContext(Dispatchers.IO) {
-                    val installed = ModPackageStore.installed(this@ModPreviewActivity, modId)
+                    val installed = ModPackageStore.installed(activity, modId)
                         ?: error("找不到已导入的 Mod")
-                    require(ModPackageStore.isAuthorTrusted(this@ModPreviewActivity, installed.authorFingerprint)) { "此作者尚未受信任" }
-                    val verified = ModPackageStore.find(this@ModPreviewActivity, modId) ?: error("Mod 包无法读取")
-                    val stored = ModPackageStore.model(this@ModPreviewActivity, modId)
+                    require(ModPackageStore.isAuthorTrusted(activity, installed.authorFingerprint)) { "此作者尚未受信任" }
+                    val verified = ModPackageStore.find(activity, modId) ?: error("Mod 包无法读取")
+                    val stored = ModPackageStore.model(activity, modId)
                     verified to stored?.copy(
                         state = stored.state?.let { JSONObject(it.toString()) },
                         config = JSONObject(stored.config.toString())
                     )
                 }
             }
+            if (closed) return@launch
             loaded.onSuccess { (verified, model) ->
                 pkg = verified
                 initialModel = model ?: ModPersistedModel(null, defaultConfig(verified.configSchema), 0, verified.dataVersion)
-                if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) startHostData()
+                updateSubscription()
             }.onFailure { failure = it.message ?: "无法载入预览" }
         }
-        miuixContent {
-            val active = pkg
-            val saved = initialModel
-            PageFrame("本机预览", ::finish, "mod_preview_back") { body, header ->
-                Column(body.padding(start = 20.dp, end = 20.dp, top = header + 8.dp, bottom = 24.dp)
-                    .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("同源原生渲染，不申请背屏服务或显示租约。控件只影响本次预览。", color = AppPalette.secondary())
-                    if (failure.isNotEmpty()) AppCard { Text(failure, Modifier.padding(18.dp), color = AppPalette.destructive()) }
-                    if (active != null && saved != null) PreviewBody(active, saved, hostData)
-                }
+    }
+
+    @Composable
+    fun Content() {
+        val active = pkg
+        val saved = initialModel
+        AppPageContent("本机预览", back, "mod_preview_back", bodyScrollState = scroll) { body, header ->
+            Column(body.padding(horizontal = 20.dp).verticalScroll(scroll)
+                .padding(top = header + 12.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("同源原生渲染，不申请背屏服务或显示租约。控件只影响本次预览。", color = AppPalette.secondary())
+                if (failure.isNotEmpty()) AppCard { Text(failure, Modifier.padding(18.dp), color = AppPalette.destructive()) }
+                if (active != null && saved != null) PreviewBody(active, saved, hostData)
             }
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        startHostData()
+    fun save(state: Bundle) {
+        state.putInt("preview_scroll", scroll.value)
     }
 
-    override fun onPause() {
+    fun setRouteActive(active: Boolean) {
+        if (routeActive == active || closed) return
+        routeActive = active
+        updateSubscription()
+    }
+
+    fun close() {
+        closed = true
+        activity.lifecycle.removeObserver(visibility)
         stopHostData()
-        super.onPause()
+    }
+
+    private fun updateSubscription() {
+        if (routeActive && !closed && activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) startHostData()
+        else stopHostData()
     }
 
     private fun startHostData() {
@@ -120,7 +172,7 @@ class ModPreviewActivity : ComponentActivity() {
         if (fields.isEmpty()) return
         val owner = core.modDataOwner(active.id) ?: return
         dataSubscription = ModHostDataSnapshot.observe(core, owner, fields) { snapshot ->
-            runOnUiThread { if (hostDataEpoch.isCurrent(generation) && !isFinishing && !isDestroyed) hostData = snapshot }
+            activity.runOnUiThread { if (hostDataEpoch.isCurrent(generation) && !closed && !activity.isFinishing && !activity.isDestroyed) hostData = snapshot }
         }
     }
 
@@ -142,6 +194,8 @@ private fun PreviewBody(pkg: VerifiedModPackage, initial: ModPersistedModel, hos
     var safeArea by rememberSaveable(pkg.id) { mutableStateOf(true) }
     var blackCover by rememberSaveable(pkg.id) { mutableStateOf(false) }
     var temporaryCover by rememberSaveable(pkg.id) { mutableStateOf(0) }
+    var optionsExpanded by rememberSaveable(pkg.id) { mutableStateOf(false) }
+    var fitActualSize by rememberSaveable(pkg.id) { mutableStateOf(true) }
     val overlays = listOf("无", "通知示例", "充电示例")
     var config by remember(pkg.id) { mutableStateOf(JSONObject(initial.config.toString())) }
     var previewMessage by rememberSaveable(pkg.id) { mutableStateOf("") }
@@ -151,29 +205,37 @@ private fun PreviewBody(pkg: VerifiedModPackage, initial: ModPersistedModel, hos
     val rotations = listOf(0, 90, 180, 270)
     val themeNames = listOf("跟随系统", "浅色", "深色")
 
-    AppSection("预览选项")
+    val chosen = presets[preset]
     AppCard {
-        Column {
-            AppRow("场景", if (rear) "背屏" else "设置", enabled=pkg.rearScene!=null, action = { rear = !rear })
-            AppRow("屏幕尺寸", "${presets[preset].width} × ${presets[preset].height} ${if (presets[preset].dp) "dp" else "px"}", action = { preset = (preset + 1) % presets.size })
-            AppToggle("显示安全区", "以边框标出内容边界", safeArea) { safeArea = it }
-            AppRow("主题", themeNames[dark], action = { dark = (dark + 1) % themeNames.size })
-            AppRow("字号", "${(scales[scale] * 100).toInt()}%", action = { scale = (scale + 1) % scales.size })
-            AppRow("旋转", "${rotations[rotation]}°", action = { rotation = (rotation + 1) % rotations.size })
-            if (rear) AppRow("模拟临时覆盖", overlays[temporaryCover], action = { temporaryCover = (temporaryCover + 1) % overlays.size })
-            AppToggle("模拟纯黑遮挡", "检查黑态下内容是否被完全覆盖", blackCover) { blackCover = it }
+        AppRow("预览选项", "${if (rear) "背屏" else "设置"} · ${themeNames[dark]} · ${(scales[scale] * 100).toInt()}%",
+            action = { optionsExpanded = !optionsExpanded })
+        AppSettingsReveal(optionsExpanded) {
+            Column {
+                AppRow("场景", if (rear) "背屏" else "设置", enabled = pkg.rearScene != null, action = { rear = !rear })
+                AppRow("屏幕尺寸", "${chosen.width} × ${chosen.height} ${if (chosen.dp) "dp" else "px"}",
+                    action = { preset = (preset + 1) % presets.size })
+                if (chosen.dp) AppToggle("适合窗口", "缩放画面，但保持布局按真实尺寸计算", fitActualSize) { fitActualSize = it }
+                AppToggle("显示安全区", "以边框标出内容边界", safeArea) { safeArea = it }
+                AppRow("主题", themeNames[dark], action = { dark = (dark + 1) % themeNames.size })
+                AppRow("字号", "${(scales[scale] * 100).toInt()}%", action = { scale = (scale + 1) % scales.size })
+                AppRow("旋转", "${rotations[rotation]}°", action = { rotation = (rotation + 1) % rotations.size })
+                if (rear) AppRow("模拟临时覆盖", overlays[temporaryCover], action = { temporaryCover = (temporaryCover + 1) % overlays.size })
+                AppToggle("模拟纯黑遮挡", "检查黑态下内容是否被完全覆盖", blackCover) { blackCover = it }
+            }
         }
     }
     AppSection("${pkg.name} · ${if (rear) "背屏场景" else "设置场景"}")
     BoxWithConstraints(Modifier.fillMaxWidth().height(360.dp), contentAlignment = Alignment.Center) {
-        val chosen = presets[preset]
         val quarterTurn = rotations[rotation] % 180 != 0
         val contentWidth = if (quarterTurn) chosen.height else chosen.width
         val contentHeight = if (quarterTurn) chosen.width else chosen.height
-        val factor = if (chosen.dp) 1f else minOf(maxWidth.value / contentWidth, 360f / contentHeight, 1f)
-        Box(Modifier.width((contentWidth * factor).dp).height((contentHeight * factor).dp), contentAlignment = Alignment.Center) {
-          Box(Modifier.requiredSize((chosen.width * factor).dp, (chosen.height * factor).dp)
-            .graphicsLayer(rotationZ = rotations[rotation].toFloat())
+        val factor = minOf(maxWidth.value / contentWidth, 360f / contentHeight, 1f)
+        val layoutFactor = if (chosen.dp) 1f else factor
+        val previewScale = if (chosen.dp && fitActualSize) factor else 1f
+        Box(Modifier.width((contentWidth * layoutFactor * previewScale).dp)
+            .height((contentHeight * layoutFactor * previewScale).dp), contentAlignment = Alignment.Center) {
+          Box(Modifier.requiredSize((chosen.width * layoutFactor).dp, (chosen.height * layoutFactor).dp)
+            .graphicsLayer(rotationZ = rotations[rotation].toFloat(), scaleX = previewScale, scaleY = previewScale)
             .clip(RoundedCornerShape(22.dp)).background(if (dark == 2) Color(0xFF101013) else if (dark == 1) Color(0xFFF3F3F5) else AppPalette.background())
             .border(1.dp, AppPalette.secondary().copy(alpha = .38f), RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
             val baseConfiguration = LocalConfiguration.current

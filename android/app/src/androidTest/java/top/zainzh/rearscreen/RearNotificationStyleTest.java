@@ -22,8 +22,11 @@ import android.view.View;
 import android.widget.TextView;
 import androidx.test.platform.app.InstrumentationRegistry;
 import org.junit.*;
-import java.io.File;
-import java.io.FileOutputStream;
+import java.io.ByteArrayOutputStream;
+import android.os.Binder;
+import android.os.Bundle;
+import android.util.Base64;
+import java.lang.reflect.Proxy;
 import java.lang.reflect.Field;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -43,6 +46,7 @@ public class RearNotificationStyleTest {
     int duration;
     boolean hadDuration, initialized;
     Object cachedInfo;
+    ITaskService previousRearIdentity;
     static final String LONG_TEXT = "这是用于检查背屏通知布局的较长正文。The notification must remain inside the safe area at large font sizes. ";
 
     String shell(String command) throws Exception {
@@ -60,6 +64,9 @@ public class RearNotificationStyleTest {
         if (android.os.Build.VERSION.SDK_INT >= 29) inst.getUiAutomation().adoptShellPermissionIdentity();
         String mode = shell("cmd uimode night"); night = mode.contains("auto") ? "auto" : mode.contains("yes") ? "yes" : "no";
         font = shell("settings get system font_scale");
+        Field rearProvider = RearDisplay.class.getDeclaredField("remote");
+        rearProvider.setAccessible(true);
+        previousRearIdentity = (ITaskService) rearProvider.get(null);
         DisplayInfoCache cache = DisplayInfoCache.getInstance();
         initialized = cache.isInitialized(); cachedInfo = cacheField("cachedInfo").get(cache);
         prefs = context.getSharedPreferences("mrss_settings", 0); hadDuration = prefs.contains("notification_duration"); duration = prefs.getInt("notification_duration", 10);
@@ -68,6 +75,7 @@ public class RearNotificationStyleTest {
     }
     @After public void cleanup() throws Exception {
         closeActivity();
+        RearDisplay.attach(previousRearIdentity);
         if (display != null) display.release(); if (reader != null) reader.close();
         cacheField("cachedInfo").set(DisplayInfoCache.getInstance(), cachedInfo); cacheField("initialized").set(DisplayInfoCache.getInstance(), initialized);
         if (hadDuration) prefs.edit().putInt("notification_duration", duration).commit(); else prefs.edit().remove("notification_duration").commit();
@@ -87,6 +95,17 @@ public class RearNotificationStyleTest {
         assertNotNull(display);
         displayId = display.getDisplay().getDisplayId();
         } else displayId = 0;
+        // The debug Activity maps this fixture display to logical rear ID 1.
+        // Supply the same identity through the production discovery boundary; don't spoof a panel globally.
+        Binder alive = new Binder();
+        ITaskService identity = (ITaskService) Proxy.newProxyInstance(ITaskService.class.getClassLoader(),
+            new Class<?>[]{ITaskService.class}, (instance, method, args) -> {
+                if (method.getName().equals("asBinder")) return alive;
+                if (method.getName().equals("getRearDisplayState"))
+                    return "{\"selectedId\":1,\"reason\":\"virtual_fixture\"}";
+                throw new AssertionError(method.getName());
+            });
+        RearDisplay.attach(identity);
         RearDisplayHelper.RearDisplayInfo info = new RearDisplayHelper.RearDisplayInfo();
         info.width = width; info.height = height; info.densityDpi = 450;
         info.cutout = portrait ? new Rect(0, 296, 0, 0) : new Rect(296, 0, 0, 0);
@@ -102,7 +121,12 @@ public class RearNotificationStyleTest {
                 .putExtra("title", "ReMRSS 通知样式检查 / Long notification title").putExtra("text", text).putExtra("darkMode", oled)
                 .putExtra(RearAnimationManager.EXTRA_SESSION_ID, id), options.toBundle());
             RearScreenNotificationActivity result = (RearScreenNotificationActivity) monitor.waitForActivityWithTimeout(5000);
-            assertNotNull(result); inst.waitForIdleSync();
+            assertNotNull(result);
+            inst.runOnMainSync(() -> {
+                View wrapper = result.findViewById(R.id.notification_wrapper);
+                assertEquals("The first drawn notification must not wait behind an icon-only phase", 1f, wrapper.getAlpha(), 0f);
+            });
+            inst.waitForIdleSync();
             long end = android.os.SystemClock.uptimeMillis() + 5000;
             while (android.os.SystemClock.uptimeMillis() < end) {
                 final boolean[] settled = {false};
@@ -147,8 +171,14 @@ public class RearNotificationStyleTest {
     }
     void capture(String name) throws Exception {
         Bitmap bitmap = copyWindow();
-        try (FileOutputStream output = new FileOutputStream(new File(context.getCacheDir(), "notification-" + name + ".png"))) { bitmap.compress(Bitmap.CompressFormat.PNG, 100, output); }
-        bitmap.recycle();
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.JPEG, 88, output));
+            Bundle bundle = new Bundle();
+            bundle.putString("rc6_jpg_notification-" + name, Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP));
+            inst.addResults(bundle);
+        } finally {
+            bitmap.recycle();
+        }
     }
     void closeActivity() throws Exception {
         if (activity != null) { inst.runOnMainSync(activity::finish); await(activity::isDestroyed); activity = null; }

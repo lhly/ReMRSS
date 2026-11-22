@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -103,12 +102,13 @@ internal data class AiRearStudioModel(
     val modTheme: AiRearModWallpaperTheme? = null,
     val loadingTheme: Boolean = false,
     val checkingWork: Boolean = false,
+    val virtualCasting: Boolean = true,
 ) {
     val busy get() = applying || preparing || editingImage || loadingTheme || checkingWork
     val usable get() = !isModTheme || modTheme != null
     val customControls get() = modTheme?.art?.isNotEmpty() == true
     val appCapacity get() = if (customControls) checkNotNull(modTheme).buttons else grid.appCapacity
-    val assigned get() = grid.apps.take(appCapacity).count { apps[it]?.canCast == true }
+    val assigned get() = grid.boundShortcutCount(appCapacity, ::canCast)
     val bindingsReady get() = if (isModTheme) modTheme?.validGrid(grid, ::canCast) == true else grid.isReady(::canCast)
 
     private fun canCast(component: String) = apps[component]?.canCast == true
@@ -125,7 +125,7 @@ internal data class AiRearStudioModel(
     thumbnail: @Composable (Modifier) -> Unit,
 ) {
     val wide = LocalConfiguration.current.screenWidthDp >= 640
-    PageFrame(stringResource(R.string.ai_rear_title), back, "ai_rear_back") { modifier, inset ->
+    AppPageContent(stringResource(R.string.ai_rear_title), back, "ai_rear_back", scrollState = scroll) { modifier, inset ->
         LazyColumn(modifier.testTag("ai_rear_editor"), state = scroll,
             contentPadding = PaddingValues(20.dp, inset + 10.dp, 20.dp, 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -168,18 +168,30 @@ internal data class AiRearStudioModel(
                 }
             }
         }
-        if (!model.usable) return@Column
-        AiRearWallpaperCanvas(model, editShortcuts)
-        if (model.isModTheme || model.installed || model.grid.occupiedSlots.isNotEmpty()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-                Text(stringResource(if (model.installed) R.string.ai_rear_edit_draft else R.string.ai_rear_tap_to_edit),
-                    modifier = Modifier.weight(1f), fontSize = 13.sp, color = AppPalette.secondary())
-                val count = if (model.isModTheme)
-                    stringResource(R.string.ai_rear_bound_count, model.assigned, model.appCapacity)
-                    else stringResource(R.string.ai_rear_visible_buttons, model.grid.occupiedSlots.size)
-                Text(count, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                    fontSize = 13.sp, color = AppPalette.secondary())
+        if (!model.usable) {
+            Box(Modifier.fillMaxWidth().aspectRatio(model.viewport.width.toFloat() / model.viewport.height)
+                .clip(RoundedCornerShape(24.dp)).background(AppPalette.background()),
+                contentAlignment = Alignment.Center) {
+                Text(stringResource(if (model.loadingTheme) R.string.ai_rear_loading_theme else R.string.ai_rear_theme_paused),
+                    color = AppPalette.secondary(), fontSize = 13.sp)
             }
+            return@Column
+        }
+        AiRearWallpaperCanvas(model, editShortcuts)
+        val shortcutCount = if (model.isModTheme) {
+            stringResource(R.string.ai_rear_bound_count, model.assigned, model.appCapacity)
+        } else {
+            stringResource(R.string.ai_rear_visible_buttons, model.grid.occupiedSlots.size)
+        }
+        AppCard {
+            AppRow(stringResource(R.string.ai_rear_shortcuts_title),
+                shortcutCount,
+                Modifier.testTag("ai_rear_edit_shortcuts").semantics { liveRegion = LiveRegionMode.Polite },
+                enabled = !model.busy, action = editShortcuts, trailing = { AppNavigationChevron() })
+        }
+        if (model.installed) {
+            Text(stringResource(R.string.ai_rear_edit_draft), Modifier.padding(horizontal = 4.dp),
+                fontSize = 13.sp, color = AppPalette.secondary())
         }
     }
 }
@@ -209,7 +221,7 @@ internal data class AiRearStudioModel(
     model: AiRearStudioModel, action: (AiRearStudioAction) -> Unit, thumbnail: @Composable (Modifier) -> Unit,
 ) {
     AppCard {
-        AppSection(stringResource(R.string.ai_rear_grid_cast_title))
+        AppSection(stringResource(if (model.installed) R.string.ai_rear_current_work else R.string.ai_rear_grid_cast_title))
         val work = model.work
         AppRow(work?.title ?: stringResource(if (model.installed) R.string.ai_rear_backed_up
             else R.string.ai_rear_pick_wallpaper), work?.detail,
@@ -218,34 +230,26 @@ internal data class AiRearStudioModel(
             trailing = if (work == null) null else ({
                 thumbnail(Modifier.size(width = 62.dp, height = 42.dp).clip(RoundedCornerShape(8.dp)))
             }))
-        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
             StudioStatus(model)
-            val primary = when {
-                model.installed && !model.ready -> AiRearStudioAction.PREPARE
-                !model.installed && work != null -> AiRearStudioAction.REPLACE
-                else -> null
-            }
-            if (primary != null) {
-                val id = if (primary == AiRearStudioAction.PREPARE) R.string.ai_rear_prepare
-                    else R.string.ai_rear_backup_replace
-                TextButton(stringResource(id), { action(primary) },
-                    Modifier.fillMaxWidth().testTag("ai_rear_primary_action"),
-                    enabled = !model.busy && model.connected && model.usable &&
-                        (model.installed || model.bindingsReady),
-                    minHeight = 48.dp, cornerRadius = 16.dp,
-                    colors = ButtonDefaults.textButtonColorsPrimary())
-            }
-        }
-        if (model.installed) {
-            AppDivider()
-            FlowRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(stringResource(R.string.ai_rear_restore), { action(AiRearStudioAction.RESTORE) },
-                    Modifier.testTag("ai_rear_restore"), enabled = !model.busy && model.connected, minHeight = 48.dp)
-                if (model.ready) TextButton(stringResource(R.string.ai_rear_disarm),
-                    { action(AiRearStudioAction.DISARM) }, enabled = !model.busy, minHeight = 48.dp)
+            when {
+                model.installed -> AppActionPair(
+                    stringResource(R.string.ai_rear_restore), { action(AiRearStudioAction.RESTORE) },
+                    stringResource(if (model.ready) R.string.ai_rear_disarm else R.string.ai_rear_prepare),
+                    { action(if (model.ready) AiRearStudioAction.DISARM else AiRearStudioAction.PREPARE) },
+                    modifier = Modifier.testTag("ai_rear_work_actions"),
+                    secondaryModifier = Modifier.testTag("ai_rear_restore"),
+                    primaryModifier = Modifier.testTag("ai_rear_primary_action"),
+                    secondaryEnabled = !model.busy && model.connected,
+                    primaryEnabled = !model.busy && (model.ready ||
+                        (model.connected && model.usable && model.virtualCasting)),
+                    emphasizePrimary = !model.ready,
+                )
+                work != null -> TextButton(stringResource(R.string.ai_rear_backup_replace),
+                    { action(AiRearStudioAction.REPLACE) }, Modifier.fillMaxWidth().testTag("ai_rear_primary_action"),
+                    enabled = !model.busy && model.connected && model.usable && model.bindingsReady,
+                    minHeight = 48.dp, cornerRadius = 16.dp, colors = ButtonDefaults.textButtonColorsPrimary())
             }
         }
     }
@@ -260,6 +264,7 @@ internal data class AiRearStudioModel(
         !model.usable -> R.string.ai_rear_theme_paused
         !model.connected -> R.string.ai_rear_connect
         model.ready && model.installed -> R.string.ai_rear_prepared
+        model.installed && !model.virtualCasting -> R.string.ai_rear_virtual_required
         model.installed -> R.string.ai_rear_prepare_hint
         model.work == null -> R.string.ai_rear_pick_hint
         !model.bindingsReady -> when {

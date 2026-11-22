@@ -105,14 +105,21 @@ class SettingsComposeTest {
                     .hideSoftInputFromWindow(compose.activity.window.decorView.windowToken, 0)
             }
             compose.waitUntil(5000) { compose.onAllNodes(hasText("com.android.settings") and isToggleable()).fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText(s("select_all")).performClick()
+            val selectVisible = compose.onNodeWithTag("picker_select_visible")
+            val visibleLabel = selectVisible.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
+            selectVisible.performClick()
+            compose.waitForIdle()
             val selected = prefs.getStringSet("notification_selected_apps", emptySet())!!
             assertTrue(selected.containsAll(setOf("outside.app", "com.android.settings")))
             assertTrue(selected.all { it == "outside.app" || it.contains("com.android.settings") })
+            val scopedCount = selected.size - 1
+            assertEquals(s("select_all").replace("{0}", scopedCount.toString()), visibleLabel)
             compose.activityRule.scenario.recreate()
             compose.onNodeWithTag("app_search").assertTextContains("com.android.settings")
             compose.onNodeWithText(s("system_apps")).assertIsOn()
-            compose.onNodeWithText(s("deselect_all")).performClick()
+            compose.onNodeWithTag("picker_clear_visible").assertTextContains(
+                s("deselect_all").replace("{0}", scopedCount.toString())
+            ).performClick()
             assertEquals(setOf("outside.app"), prefs.getStringSet("notification_selected_apps", emptySet()))
         } finally { prefs.edit().putStringSet("notification_selected_apps", old).commit() }
     }

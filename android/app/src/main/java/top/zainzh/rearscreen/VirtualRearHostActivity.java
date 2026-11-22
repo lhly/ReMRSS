@@ -151,10 +151,33 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         }
     };
     private boolean menuVisible, menuBusy;
+    private boolean viewportFailureReported;
+
+    private void startMenuOperation(int label) {
+        menuBusy = true;
+        menuVisible = false; // Not an input target even while the status is drawn.
+        castMenu.showOperation(label);
+        clearFeedback();
+        updateCastNotification();
+    }
+
+    private void finishMenuOperation() {
+        menuBusy = false;
+        castMenu.show(false);
+        updateCastNotification();
+    }
+
+    private void reportViewportFailure() {
+        if (viewportFailureReported) return;
+        viewportFailureReported = true;
+        android.widget.Toast.makeText(this, R.string.rear_cast_menu_viewport_failed,
+                android.widget.Toast.LENGTH_LONG).show();
+    }
     private final Runnable viewportTimeout = () -> { if (resizing) fail(new IllegalStateException("Rear viewport change timed out")); };
     private void toggleViewport() {
         if (ending || menuBusy || session == null || reconnecting || resizing) return;
-        menuBusy = true; castMenu.setBusy(true); menuVisible = false; castMenu.show(false); clearFeedback();
+        startMenuOperation(R.string.rear_cast_menu_resizing);
+        viewportFailureReported = false;
         resizing = true; resizeSubmitted = false; outputGeneration++;
         updateCameraGapBattery();
         main.postDelayed(viewportTimeout, 4500);
@@ -183,9 +206,10 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                 rememberPresentation(confirmed, false);
                 main.post(() -> {
                     if (ending || !id.equals(session)) return;
-                    resizing = false; resizeSubmitted = false; menuBusy = false;
+                    resizing = false; resizeSubmitted = false;
                     updateCameraGapBattery();
-                    castMenu.updateViewportMode(viewport.isFull()); castMenu.setBusy(false);
+                    castMenu.updateViewportMode(viewport.isFull());
+                    finishMenuOperation();
                     main.removeCallbacks(viewportTimeout);
                     android.util.Log.i("VirtualRearHost", status);
                 });
@@ -200,20 +224,20 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     }
     private void rotateContent(int direction) {
         if (ending || menuBusy || session == null || reconnecting) return;
-        menuBusy = true; castMenu.setBusy(true); menuVisible = false; castMenu.show(false); String id = session;
-        updateCastNotification();
+        startMenuOperation(R.string.rear_cast_menu_rotating);
+        String id = session;
         worker.execute(() -> {
             try {
                 if (service == null) throw new IllegalStateException("Control service disconnected");
                 String confirmed = service.rotateRearVirtualCast(id, direction);
                 status = confirmed;
                 rememberPresentation(confirmed, true);
-                main.post(() -> { menuBusy = false; castMenu.setBusy(false); updateCastNotification(); });
+                main.post(() -> { if (!ending && id.equals(session)) finishMenuOperation(); });
             } catch (Exception e) {
                 android.util.Log.w("VirtualRearHost", "Content rotation failed", e);
                 main.post(() -> {
-                    if (ending) return;
-                    menuBusy = false; castMenu.setBusy(false); updateCastNotification();
+                    if (ending || !id.equals(session)) return;
+                    finishMenuOperation();
                     android.widget.Toast.makeText(this, R.string.rear_cast_menu_failed, android.widget.Toast.LENGTH_SHORT).show();
                 });
             }
@@ -227,7 +251,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
         else RearPresentationPreferences.saveViewport(this, sessionPackage, state.getBoolean("fullViewport"));
     }
     private void renderMenu(String id, boolean open) {
-        if (ending || id == null || !id.equals(session) || (open && (reconnecting || menuBusy))) return;
+        if (ending || id == null || !id.equals(session) || menuBusy || (open && reconnecting)) return;
         if (open) {
             float anchor = Float.NaN;
             synchronized (feedbackLock) { if (id.equals(feedbackSession) && safeViewport != null) anchor = feedbackY - safeViewport.top; }
@@ -1751,6 +1775,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
 
     private void fail(Exception e) {
         if (ending || isFinishing()) return;
+        if (resizing) main.post(this::reportViewportFailure);
         RearWallpaperStandby probe = wallpaperStandby;
         boolean cancelled = probe != null && wallpaperStartCancelled;
         if (!cancelled) android.util.Log.e("VirtualRearHost", "Virtual casting stopped", e);

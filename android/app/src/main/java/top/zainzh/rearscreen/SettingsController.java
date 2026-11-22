@@ -27,11 +27,8 @@ import java.util.Map;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.nio.charset.StandardCharsets;
 import rikka.shizuku.Shizuku;
-import top.zainzh.rearscreen.modules.ModuleStore;
 
 /** Settings actions and lifecycle. All visual rendering belongs to Compose + Miuix. */
 final class SettingsController {
@@ -41,7 +38,6 @@ final class SettingsController {
     private final MiuixSettingsUi composeUi;
     private final MiuixDialogUi modal;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ExecutorService moduleWorker = Executors.newSingleThreadExecutor();
     private final UpdateDialogController updateDialog;
     private final boolean automaticChecksEnabled;
     private final UriConflictMonitor uriConflicts;
@@ -97,7 +93,16 @@ final class SettingsController {
         int restoredPage = state == null ? 0 : state.getInt("native_page", 0);
         // Legacy page 3 was the app picker; preserve it as the distinct picker route.
         int routeVersion = state == null ? 0 : state.getInt("native_route_version", 0);
-        page = restorePageForBuild(restoredPage, routeVersion, BuildConfig.DEBUG);
+        page = restorePage(restoredPage, routeVersion);
+        boolean modListFromThemes = state != null
+                && state.getInt("native_mod_management_parent") == NavigationMotionKt.WALLPAPER_THEMES_ROUTE;
+        if (!activity.hasWallpaperEditor()) {
+            if (NavigationMotionKt.isWallpaperRoute(page)) page = 0;
+            else if (NavigationMotionKt.isModManagementRoute(page) && modListFromThemes) page = 2;
+            else if (NavigationMotionKt.isModWallpaperRoute(page)) page = 2;
+        }
+        // An old Tab → ZIP Mod list is now the Tab itself. Theme-origin routes keep their parent.
+        if (page == NavigationMotionKt.MOD_MANAGEMENT_ROUTE && !modListFromThemes) page = 2;
         currentDpi = state == null ? 0 : state.getInt("native_dpi", 0);
         rotation = state == null ? -1 : state.getInt("native_rotation", -1);
         homePicker = page == 100 && state != null && state.getBoolean("native_locked_home_picker", false)
@@ -119,7 +124,7 @@ final class SettingsController {
             @Override public void dpi() { if (!remoteBusy) showDpi(); }
             @Override public void rotation(int target) { setRotation(target); }
             @Override public void toggle(String key, String method, boolean enabled) { SettingsController.this.toggle(key, method, enabled); }
-            @Override public void tutorial() { action("openTutorial"); }
+            @Override public void tutorial() { navigate(NavigationMotionKt.TUTORIAL_ROUTE); }
             @Override public void automation() { showUri(); }
             @Override public void apps() {
                 homePicker = false;
@@ -129,54 +134,14 @@ final class SettingsController {
                 homePicker = true;
                 navigate(100);
             }
-            @Override public void moduleImport() {
-                if (!BuildConfig.DEBUG) return;
-                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
-                        .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/octet-stream"})
-                        .addCategory(Intent.CATEGORY_OPENABLE);
-                activity.startActivityForResult(intent, 4102);
-            }
-            @Override public void moduleSettings(String id) {
-                if (BuildConfig.DEBUG)
-                    activity.startActivity(new Intent(activity, ModuleSettingsActivity.class).putExtra("module_id", id));
-            }
-            @Override public void moduleRear(String id) {
-                if (BuildConfig.DEBUG) activity.startActivityForResult(
-                        new Intent(activity, NativeModuleLaunchActivity.class).putExtra("module_id", id), 4103);
-            }
-            @Override public void moduleRemove(String id,
-                    kotlin.jvm.functions.Function1<? super Boolean, kotlin.Unit> onComplete) {
-                if (!BuildConfig.DEBUG) { onComplete.invoke(false); return; }
-                submitModuleWork(() -> {
-                    String error = null;
-                    boolean removed = false;
-                    try {
-                        ModuleStore.INSTANCE.uninstall(activity, id);
-                        removed = true;
-                    } catch (Exception failure) {
-                        error = failure.getMessage() == null
-                                ? activity.getString(R.string.native_modules_action_failed)
-                                : failure.getMessage();
-                    }
-                    final boolean succeeded = removed;
-                    final String result = error;
-                    handler.post(() -> {
-                        if (destroyed) return;
-                        if (succeeded && composeUi.isShowingModuleDetails(id)) navigate(2);
-                        Toast.makeText(activity,
-                                succeeded ? activity.getString(R.string.native_modules_removed) : result,
-                                Toast.LENGTH_LONG).show();
-                        onComplete.invoke(succeeded);
-                    });
-                });
-            }
             @Override public void duration() { composeUi.showDurationSheet(preferences.getDuration(), preferences.isNotificationNeverAutoClose()); }
             @Override public void clickAction() { showNotificationClickAction(); }
             @Override public void saveDuration(int seconds, boolean neverAutoClose) { saveNotificationDuration(seconds, neverAutoClose); }
             @Override public void action(String method) { SettingsController.this.action(method); }
             @Override public void updates() { checkForUpdates(); }
+            @Override public void showInRecents(boolean shown) { updateRecentsVisibility(shown); }
             @Override public void proxy(boolean enabled) { UpdateNetwork.setProxyEnabled(activity, enabled); updateResult = null; updateHome(); }
-            @Override public void permissions() { activity.startActivity(new Intent(activity, PermissionChecksActivity.class)); }
+            @Override public void permissions() { navigate(NavigationMotionKt.PERMISSION_SETTINGS_ROUTE); }
         });
         root.addView(composeUi.getView(), new FrameLayout.LayoutParams(-1, -1));
         root.addView(modal.getView(), new FrameLayout.LayoutParams(-1, -1));
@@ -203,7 +168,10 @@ final class SettingsController {
     }
 
     View getView() { return root; }
-    void openNavigationTarget(int target) { navigate(target); }
+    void openNavigationTarget(int target) {
+        // Wallpaper routes are entered from their own visible parent, not through a public MainActivity intent.
+        if (!NavigationMotionKt.isWallpaperRoute(target) && !NavigationMotionKt.isModManagementRoute(target)) navigate(target);
+    }
     String s(String key) { return NativeStrings.get(activity, key); }
     String count(String key, Object value) { return s(key).replace("{0}", String.valueOf(value)); }
 
@@ -225,6 +193,7 @@ final class SettingsController {
     }
 
     void onResume() {
+        activity.setMainTaskShownInRecents(preferences.showInRecents());
         resumed = true;
         displayRead = false;
         uriConflicts.start();
@@ -245,50 +214,8 @@ final class SettingsController {
         updateDialog.destroy(activity.isChangingConfigurations());
         handler.removeCallbacksAndMessages(null);
         if (picker != null) picker.destroy();
-        moduleWorker.shutdownNow();
+        composeUi.closeOwnedPages();
         modal.dismiss();
-    }
-
-    void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == 4103) {
-            if (resultCode != MainActivity.RESULT_OK && !destroyed) {
-                String message = data == null ? null : data.getStringExtra("error");
-                Toast.makeText(activity,
-                        message == null || message.isBlank()
-                                ? activity.getString(R.string.native_modules_rear_unavailable)
-                                : message,
-                        Toast.LENGTH_LONG).show();
-            }
-            return;
-        }
-        if (requestCode != 4102 || resultCode != MainActivity.RESULT_OK || data == null || data.getData() == null) return;
-        android.net.Uri uri = data.getData();
-        submitModuleWork(() -> {
-            String result;
-            try (InputStream input = activity.getContentResolver().openInputStream(uri)) {
-                if (input == null) throw new IOException("Cannot read module file");
-                top.zainzh.rearscreen.modules.ModuleDescriptor installed = ModuleStore.INSTANCE.install(activity, input);
-                result = activity.getString(R.string.native_modules_installed,
-                        installed.label(activity.getResources().getConfiguration().getLocales().get(0).toLanguageTag()));
-            } catch (Exception failure) {
-                result = failure.getMessage() == null ? activity.getString(R.string.native_modules_action_failed) : failure.getMessage();
-            }
-            String message = result;
-            handler.post(() -> {
-                if (!destroyed) Toast.makeText(activity, message, Toast.LENGTH_LONG).show();
-            });
-        });
-    }
-
-    private void submitModuleWork(Runnable work) {
-        if (destroyed || moduleWorker.isShutdown()) return;
-        try {
-            moduleWorker.execute(() -> {
-                if (!destroyed) work.run();
-            });
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            // Activity results may arrive after the UI owner has begun teardown.
-        }
     }
 
     void saveState(Bundle state) {
@@ -305,15 +232,16 @@ final class SettingsController {
     }
 
     int backTarget() {
-        if (page == 100) return 1;
-        if (page >= 20 && page <= 21) return 1;
-        if (page >= 10 && page <= 13) return 0;
-        if (page == 30) return 2;
-        if (page == 40) return 3;
+        Integer parent = composeUi.parentRoute(page);
+        if (parent != null) return parent;
         return page != 0 ? 0 : -1;
     }
 
     boolean navigateBack() {
+        if (composeUi.consumeOwnedBack()) {
+            composeUi.cancelBackPreview();
+            return true;
+        }
         int target = backTarget();
         if (target < 0) return false;
         navigate(target);
@@ -321,6 +249,7 @@ final class SettingsController {
     }
 
     void startBackPreview(float progress) {
+        if (!composeUi.canPreviewBack()) return;
         int target = backTarget();
         if (target >= 0) composeUi.startBackPreview(target, progress);
     }
@@ -335,7 +264,7 @@ final class SettingsController {
 
     private void navigate(int target) {
         if (destroyed) return;
-        target = normalizePageForBuild(target, BuildConfig.DEBUG);
+        target = normalizePage(target);
         if (picker != null && target != 100) {
             Bundle savedPicker = new Bundle();
             picker.saveState(savedPicker);
@@ -359,14 +288,16 @@ final class SettingsController {
         refreshStatus();
     }
 
-    static int normalizePageForBuild(int route, boolean debug) {
-        return !debug && route == 30 ? 2 : route;
+    static int normalizePage(int route) {
+        if (!BuildConfig.VIRTUAL_CAST_ENABLED && route == NavigationMotionKt.DENSITY_SETTINGS_ROUTE) return 10;
+        return route;
     }
 
-    static int restorePageForBuild(int savedRoute, int routeVersion, boolean debug) {
+    static int restorePage(int savedRoute, int routeVersion) {
         int migrated = routeVersion >= 2 ? savedRoute
                 : savedRoute == 3 ? 100 : savedRoute == 2 ? 3 : savedRoute;
-        return normalizePageForBuild(migrated, debug);
+        // A restored task from an older Debug build can still point at the removed module detail.
+        return normalizePage(migrated == 30 ? 2 : migrated);
     }
 
     private void onPageSettled(int target) {
@@ -420,7 +351,16 @@ final class SettingsController {
         composeUi.updateSettings(selected, listenerGranted(), Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
                 preferences.getDuration(), updateSummaryText(), checkingUpdates, UpdateNetwork.proxyEnabled(activity),
                 preferences.isNotificationNeverAutoClose(), preferences.isNotificationDismissOnly(),
-                preferences.getBoolean(RearNotificationCastRequest.PREF));
+                preferences.getBoolean(RearNotificationCastRequest.PREF), preferences.showInRecents());
+    }
+
+    private void updateRecentsVisibility(boolean shown) {
+        if (activity.setMainTaskShownInRecents(shown)) {
+            preferences.setShowInRecents(shown);
+            updateHome();
+        } else {
+            toast(activity.getString(R.string.recents_update_unavailable));
+        }
     }
 
     private void toggle(String key, String method, boolean enabled) {
@@ -583,8 +523,10 @@ final class SettingsController {
     private void showDetails() {
         if (diagnosticsLoading) return;
         diagnosticsLoading = true;
-        toast(activity.getString(R.string.compat_collecting));
+        Toast collecting = Toast.makeText(activity, activity.getString(R.string.compat_collecting), Toast.LENGTH_SHORT);
+        collecting.show();
         activity.runAction("getCompatibilityDiagnostics", null, (value, error) -> {
+            collecting.cancel();
             diagnosticsLoading = false;
             if (destroyed) return;
             presentDiagnostics(String.valueOf(error == null ? value : error));

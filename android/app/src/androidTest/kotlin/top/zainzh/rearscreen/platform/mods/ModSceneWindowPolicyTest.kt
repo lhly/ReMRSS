@@ -26,13 +26,13 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import top.zainzh.rearscreen.NativeModuleRendererTestHostActivity
+import top.zainzh.rearscreen.ComposeTestHostActivity
 import top.zainzh.rearscreen.platform.ScenePresentationSnapshot
 import dev.remrss.scene.geometry.QuarterTurnSceneContainer
 
 @RunWith(AndroidJUnit4::class)
 class ModSceneWindowPolicyTest {
-    @get:Rule val compose = createAndroidComposeRule<NativeModuleRendererTestHostActivity>()
+    @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     @Test fun readyAndMeasuredWindowStayBlackUntilCoordinatorReportsVisible() {
         val policy = ModSceneWindowPolicy(

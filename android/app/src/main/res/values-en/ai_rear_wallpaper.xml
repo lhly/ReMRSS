@@ -8,7 +8,7 @@
     <string name="ai_rear_all_apps_hint">Uses the bottom-right slot. App names and icons will be visible while locked.</string>
     <string name="ai_rear_empty_slot">Unassigned</string>
     <string name="ai_rear_pick_wallpaper">Wallpaper to replace</string>
-    <string name="ai_rear_pick_hint">Choose an AI wallpaper you no longer plan to use. The original will be backed up so you can restore it.</string>
+    <string name="ai_rear_pick_hint">Choose an AI wallpaper. The original will be backed up first.</string>
     <string name="ai_rear_connect">Connect Shizuku on the rear screen tab to view local AI wallpapers.</string>
     <string name="ai_rear_loading">Reading local AI wallpapers…</string>
     <string name="ai_rear_no_wallpapers">No readable AI wallpapers on this device.</string>
@@ -26,7 +26,7 @@
     <string name="ai_rear_write_error">The file change could not be verified. Keep Shizuku connected and retry Restore here before uninstalling ReMRSS.</string>
 
     <string name="ai_rear_allow_unlocked">Open with main screen unlocked</string>
-    <string name="ai_rear_allow_unlocked_hint">When off, the wallpaper shortcuts work only while the main screen is locked.</string>
+    <string name="ai_rear_allow_unlocked_hint">Applies to all rear-screen shortcuts. When off, shortcuts only work while the main screen is locked.</string>
     <string name="ai_rear_unlocked_blocked">Lock main screen</string>
     <string name="ai_rear_shortcuts_connect">Connect Shizuku</string>
     <string name="ai_rear_shortcuts_not_prepared">Set up shortcuts</string>
@@ -35,7 +35,7 @@
     <string name="ai_rear_shortcuts_virtual">Enable virtual cast</string>
     <string name="ai_rear_shortcuts_app_failed">Can’t open app</string>
     <string name="ai_rear_button_settings">Shortcut options</string>
-    <string name="ai_rear_grid_cast_title">Apply to the rear screen</string>
+    <string name="ai_rear_grid_cast_title">Shortcut setup</string>
     <string name="ai_rear_checking_work">Checking this wallpaper…</string>
     <string name="ai_rear_legacy_title">Replace the previous theme?</string>
     <string name="ai_rear_legacy_confirm">ReMRSS has already replaced this wallpaper. Continue to use your current launcher settings and keep the original backup.</string>
@@ -59,7 +59,7 @@
     <string name="ai_rear_backup_replace">Back up and replace</string>
     <string name="ai_rear_prepare">Prepare shortcuts</string>
     <string name="ai_rear_prepared">Shortcuts are ready.</string>
-    <string name="ai_rear_prepare_hint">Apply the selected work in Xiaomi rear screen settings, then unlock and prepare here.</string>
+    <string name="ai_rear_prepare_hint">First, reapply this wallpaper in Xiaomi rear screen settings.</string>
     <string name="ai_rear_prepare_failed">Could not prepare shortcuts. Check Shizuku, unlock the main screen and close any existing rear cast.</string>
     <string name="ai_rear_virtual_required">Turn on virtual casting in Casting and display first.</string>
     <string name="ai_rear_disarm">Disable shortcuts</string>
@@ -70,14 +70,14 @@
     <string name="ai_rear_restoring">Restoring original wallpaper…</string>
     <string name="ai_rear_replacing">Backing up and replacing…</string>
     <string name="ai_rear_preparing">Preparing shortcuts…</string>
-    <string name="ai_rear_replace_ready">A backup is kept. Apply the selected wallpaper again in Xiaomi rear screen settings.</string>
+    <string name="ai_rear_replace_ready">After backing up and replacing, apply the same work again in Xiaomi rear screen settings.</string>
     <string name="ai_rear_slot_summary">Slot %1$d, %2$s</string>
     <string name="ai_rear_back_to_wallpaper">Back to wallpaper</string>
     <string name="ai_rear_app_unavailable_short">Unavailable</string>
-    <string name="ai_rear_edit_draft">Tap any tile to edit the draft. Restore the original wallpaper before applying a different layout.</string>
+    <string name="ai_rear_edit_draft">This is a draft. Restore the original wallpaper before applying a new layout.</string>
     <string name="ai_rear_shortcuts_title">Shortcut apps</string>
-    <string name="ai_rear_configured_shortcuts">Added · %1$d / %2$d</string>
     <string name="ai_rear_available_shortcuts">Not added</string>
+    <string name="ai_rear_shortcut_can_park">You can keep a sixth app in reserve. It appears when All apps is off.</string>
     <string name="ai_rear_shortcut_parked">Hidden while All apps uses slot 6</string>
     <string name="ai_rear_shortcuts_empty">Select apps below to add them.</string>
     <string name="ai_rear_shortcuts_full">Up to six apps. Remove one to add another.</string>
@@ -109,4 +109,5 @@
     <string name="ai_rear_uninstall_restore_first">Mod kept: could not verify wallpaper restoration. Check its backups in Rear screen launcher.</string>
     <string name="ai_rear_mod_uninstalled">Uninstalled %1$s and restored the original wallpaper. Reapply it in Xiaomi rear screen settings.</string>
     <string name="ai_rear_written_work">Backed up and replaced “%1$s”. Reapply this work in Xiaomi rear screen settings.</string>
+    <string name="ai_rear_current_work">Current wallpaper</string>
 </resources>

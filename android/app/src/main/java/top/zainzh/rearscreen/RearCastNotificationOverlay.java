@@ -171,6 +171,8 @@ final class RearCastNotificationOverlay extends FrameLayout implements AutoClose
         if (remaining == 0) {
             RearCastNotification.Message expired = message;
             message = null; setContentDescription(null);
+            setClickable(false);
+            clearTouchRegion(); // Retire new DOWNs now, not when the fade finishes.
             if (expired != null) expired.end("TIMEOUT");
             if (expired != null) RearCastNotification.overlayEnded(expired.token, "TIMEOUT");
         } else main.postDelayed(expire, remaining);
@@ -199,6 +201,7 @@ final class RearCastNotificationOverlay extends FrameLayout implements AutoClose
             animate().cancel(); exiting = false; setVisibility(INVISIBLE); return;
         }
         boolean entering = getVisibility() != VISIBLE;
+        setClickable(true);
         animate().cancel(); exiting = false;
         if (entering) {
             setVisibility(VISIBLE);
@@ -266,13 +269,16 @@ final class RearCastNotificationOverlay extends FrameLayout implements AutoClose
     private void hideImmediately() {
         clearDrawListener();
         animate().cancel(); exiting = false; setVisibility(GONE); setAlpha(1f); setTranslationY(0f);
-        if (pendingRegion != null) {
-            pendingRegion = readyRegion = null;
-            if (touchRegion != null) touchRegion.update(0, 0, 0, 0, 0);
-        }
+        setClickable(false);
+        clearTouchRegion();
         if (message == null && (title.length() > 0 || summary.length() > 0)) {
             title.setText(""); summary.setText(""); icon.setImageDrawable(null); setContentDescription(null);
         }
+    }
+    private void clearTouchRegion() {
+        if (pendingRegion == null) return;
+        pendingRegion = readyRegion = null;
+        if (touchRegion != null) touchRegion.update(0, 0, 0, 0, 0);
     }
     private static String key(long token, int left, int top, int right, int bottom) {
         return token + ":" + left + "," + top + "," + right + "," + bottom;

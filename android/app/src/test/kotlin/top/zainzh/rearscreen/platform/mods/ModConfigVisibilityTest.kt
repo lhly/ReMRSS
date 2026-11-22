@@ -33,4 +33,7 @@ class ModConfigVisibilityTest {
         assertFalse(isModConfigMainDisplay(1))
         assertFalse(isModConfigMainDisplay(null))
     }
+    @Test fun committedExitDisablesVisibilityEvenWhileTheHostWindowIsResumed() {
+        assertFalse(isModConfigSceneVisible(true, true, true, true, DEFAULT_DISPLAY, false, routeActive = false))
+    }
 }

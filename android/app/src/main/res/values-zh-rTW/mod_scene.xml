@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mod_scene_cover_behavior_note">開啟遮擋處理後，背屏會顯示全黑並暫停介面更新，移開後恢復。全黑不等於硬體熄屏，耗電可能較高。</string>
+</resources>

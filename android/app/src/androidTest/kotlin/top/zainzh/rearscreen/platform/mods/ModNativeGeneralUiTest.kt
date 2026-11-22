@@ -30,11 +30,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import top.zainzh.rearscreen.AppTheme
-import top.zainzh.rearscreen.NativeModuleRendererTestHostActivity
+import top.zainzh.rearscreen.ComposeTestHostActivity
 
 @RunWith(AndroidJUnit4::class)
 class ModNativeGeneralUiTest {
-    @get:Rule val compose = createAndroidComposeRule<NativeModuleRendererTestHostActivity>()
+    @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     @Test fun listConditionFormattingDeadlineAndRegisteredActionUseNativeRenderer() {
         val base = InstrumentationRegistry.getInstrumentation().context.assets.open("platform/mods/generic-counter.zip").use { ModPackageReader.read(it) }
@@ -107,7 +107,8 @@ class ModNativeGeneralUiTest {
         compose.onNodeWithText("开始动作").assertHasClickAction().performClick()
         compose.runOnIdle { recreateRenderer?.invoke() } // Recreate the renderer with only the caller-restored draft map.
         compose.waitForIdle()
-        compose.onNodeWithText("已选择：${"a".repeat(48)}").assertIsDisplayed()
+        compose.onNodeWithText("已选择快捷操作").assertIsDisplayed()
+        compose.onNodeWithText("a".repeat(48), substring = true).assertDoesNotExist()
         compose.onNodeWithText("保存设置").performClick()
         compose.runOnIdle { assertEquals("config.actionRef", pickerBinding) }
         compose.runOnIdle { assertEquals("a".repeat(48), saved?.getJSONObject("actionRef")?.getString("id")); assertTrue(selectedActions.isEmpty()) }

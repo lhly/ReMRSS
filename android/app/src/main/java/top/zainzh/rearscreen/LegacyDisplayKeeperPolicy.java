@@ -4,15 +4,12 @@ package top.zainzh.rearscreen;
 final class LegacyDisplayKeeperPolicy {
     private LegacyDisplayKeeperPolicy() { }
 
-    static boolean mayWake(boolean userEnabled, boolean moduleLeaseSuspended,
-            boolean sceneLeaseSuspended, boolean moduleLeaseActive, boolean sceneLeaseActive) {
-        return userEnabled && !moduleLeaseSuspended && !sceneLeaseSuspended
-                && !moduleLeaseActive && !sceneLeaseActive;
+    static boolean mayWake(boolean userEnabled, boolean sceneLeaseSuspended, boolean sceneLeaseActive) {
+        return userEnabled && !sceneLeaseSuspended && !sceneLeaseActive;
     }
 
     static boolean mayRestoreAfterScene(boolean restorePriorMode, boolean userEnabled,
-            boolean matchingSceneLease, boolean anotherSceneLeaseActive, boolean moduleLeaseActive) {
-        return restorePriorMode && userEnabled && matchingSceneLease
-                && !anotherSceneLeaseActive && !moduleLeaseActive;
+            boolean matchingSceneLease, boolean anotherSceneLeaseActive) {
+        return restorePriorMode && userEnabled && matchingSceneLease && !anotherSceneLeaseActive;
     }
 }

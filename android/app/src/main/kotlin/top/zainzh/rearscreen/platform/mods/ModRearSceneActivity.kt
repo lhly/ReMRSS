@@ -18,19 +18,19 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -40,9 +40,13 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.layout.DialogDefaults
 import top.yukonga.miuix.kmp.window.WindowDialog
+import top.zainzh.rearscreen.AppActionPair
+import top.zainzh.rearscreen.AppDecisionHeading
+import top.zainzh.rearscreen.AppDecisionLayout
 import top.zainzh.rearscreen.AppPalette
+import top.zainzh.rearscreen.pageBodyFade
 import top.zainzh.rearscreen.miuixContent
 import top.zainzh.rearscreen.miuixComposeView
 import top.zainzh.rearscreen.prepareMiuixWindow
@@ -259,49 +263,39 @@ class ModRearSceneActivity : ComponentActivity() {
                     }
                 }
             }
+            val canShowRequest = isSceneContentVisible() && sceneViewportTransition == null &&
+                !viewportPresentationRefreshPending
             val pendingEffect = effectRequest
-            WindowDialog(show = isSceneContentVisible() && sceneViewportTransition == null && !viewportPresentationRefreshPending && pendingEffect != null, title = "Mod 请求打开背屏场景", onDismissRequest = ::cancelPendingEffect) {
+            ModRearDecisionDialog(show = canShowRequest && pendingEffect != null, onCancel = ::cancelPendingEffect) {
                 pendingEffect?.let { effect ->
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Column(Modifier.heightIn(max = 72.dp).verticalScroll(rememberScrollState())) {
-                            val targetRegion = if (effect.region == "FULL") "全屏" else "相机安全区"
-                            val targetRotation = effect.contentRotation ?: launch?.request?.contentRotation ?: 0
-                            val requestedKeepVisible = if (effect.keepVisible) "保持亮屏" else "不要求保持亮屏"
-                            Text("将当前场景切换为${targetRegion}、内容旋转 ${targetRotation * 90}°。亮屏请求：${requestedKeepVisible}；当前策略不变。")
-                            Text("确认后在当前任务应用此请求。")
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton("取消", ::cancelPendingEffect, modifier = Modifier.weight(1f), minHeight = 48.dp)
-                            TextButton("确认打开", {
-                                effectRequest = null
-                                val completion = effectRequestCompletion
-                                effectInFlightCompletion = completion
-                                effectRequestCompletion = null
-                                requestEffect(effect) { accepted, code ->
-                                    effectInFlightCompletion = null
-                                    completion?.invoke(accepted, code)
-                                }
-                            }, modifier = Modifier.weight(1f), minHeight = 48.dp)
+                    val targetRegion = if (effect.region == "FULL") "全屏" else "相机安全区"
+                    val targetRotation = effect.contentRotation ?: launch?.request?.contentRotation ?: 0
+                    val requestedKeepVisible = if (effect.keepVisible) "保持亮屏" else "不要求保持亮屏"
+                    ModRearSceneRequestContent(targetRegion, targetRotation * 90, requestedKeepVisible,
+                        ::cancelPendingEffect) {
+                        effectRequest = null
+                        val completion = effectRequestCompletion
+                        effectInFlightCompletion = completion
+                        effectRequestCompletion = null
+                        requestEffect(effect) { accepted, code ->
+                            effectInFlightCompletion = null
+                            completion?.invoke(accepted, code)
                         }
                     }
                 }
             }
             val pendingCastEffect = castEffectRequest
-            WindowDialog(show = isSceneContentVisible() && sceneViewportTransition == null && !viewportPresentationRefreshPending && pendingCastEffect != null, title = "Mod 请求开始背屏投放", onDismissRequest = ::cancelPendingCastEffect) {
+            ModRearDecisionDialog(show = canShowRequest && pendingCastEffect != null, onCancel = ::cancelPendingCastEffect) {
                 pendingCastEffect?.let { effect ->
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Column(Modifier.heightIn(max = 72.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("将在主屏选择实际应用，并另行确认投放与替换。")
-                            Text("方式：${if (effect.mode == "VIRTUAL") "虚拟投放" else "物理直投"}；区域：${effect.region ?: "沿用应用偏好"}；方向：${effect.contentRotation?.let { "${it * 90}°" } ?: "沿用应用偏好"}")
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton("取消", ::cancelPendingCastEffect, modifier = Modifier.weight(1f), minHeight = 48.dp)
-                            TextButton("选择主屏应用", {
-                                castEffectRequest = null
-                                castSource?.let { launchModCastPicker(effect, it) }
-                                    ?: cancelPendingCastEffect()
-                            }, modifier = Modifier.weight(1f), minHeight = 48.dp)
-                        }
+                    ModRearCastRequestContent(
+                        if (effect.mode == "VIRTUAL") "虚拟投放" else "物理直投",
+                        effect.region ?: "沿用应用偏好",
+                        effect.contentRotation?.let { "${it * 90}°" } ?: "沿用应用偏好",
+                        ::cancelPendingCastEffect,
+                    ) {
+                        castEffectRequest = null
+                        castSource?.let { launchModCastPicker(effect, it) }
+                            ?: cancelPendingCastEffect()
                     }
                 }
             }
@@ -1336,5 +1330,53 @@ class ModRearSceneActivity : ComponentActivity() {
         private const val VIEWPORT_ROLLBACK_TIMEOUT_MS = MAX_INITIAL_READY_RETRIES * INITIAL_READY_RETRY_DELAY_MS
         private val nextSceneInstance = AtomicLong()
         private val activeSceneInstances = ConcurrentHashMap<String, Long>()
+    }
+}
+
+/** No second title slot: the heading travels with the explanation on very short rear displays. */
+@Composable internal fun ModRearDecisionDialog(show: Boolean, onCancel: () -> Unit, body: @Composable () -> Unit) {
+    WindowDialog(show = show, onDismissRequest = onCancel,
+        outsideMargin = DpSize(8.dp, 8.dp), insideMargin = DpSize(12.dp, 12.dp)) { body() }
+}
+
+@Composable internal fun ModRearSceneRequestContent(
+    region: String, degrees: Int, keepVisible: String, onCancel: () -> Unit, onConfirm: () -> Unit,
+) {
+    ModRearRequestBody("Mod 请求打开背屏场景",
+        listOf("$region · 内容旋转 $degrees°", "亮屏请求：$keepVisible", "仅应用到当前任务", "现有策略不变"),
+        "确认打开", onCancel, onConfirm)
+}
+
+@Composable internal fun ModRearCastRequestContent(
+    mode: String, region: String, direction: String, onCancel: () -> Unit, onConfirm: () -> Unit,
+) {
+    ModRearRequestBody("Mod 请求开始背屏投放",
+        listOf("在主屏选择应用", "方式：$mode", "区域：$region", "方向：$direction", "投放与替换另行确认"),
+        "选择应用", onCancel, onConfirm)
+}
+
+@Composable private fun ModRearRequestBody(
+    title: String, disclosures: List<String>, confirmLabel: String,
+    onCancel: () -> Unit, onConfirm: () -> Unit,
+) {
+    val scroll = rememberScrollState()
+    val surface = DialogDefaults.backgroundColor()
+    val fadePx = with(LocalDensity.current) { 8.dp.toPx() }
+    val bodyViewport = Modifier.testTag("rear_mod_request_body")
+        .pageBodyFade(surface, depth = 8.dp) { (scroll.value / fadePx).coerceIn(0f, 1f) }
+        .pageBodyFade(surface, depth = 8.dp, trailing = true) {
+            if (scroll.maxValue == Int.MAX_VALUE) 0f else ((scroll.maxValue - scroll.value) / fadePx).coerceIn(0f, 1f)
+        }
+    AppDecisionLayout(bodyModifier = bodyViewport, scroll = scroll, spacing = 8.dp, footer = {
+        AppActionPair("取消", onCancel, confirmLabel, onConfirm,
+            secondaryModifier = Modifier.testTag("rear_mod_request_cancel"),
+            primaryModifier = Modifier.testTag("rear_mod_request_confirm"))
+    }) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppDecisionHeading(title, fontSize = 17.sp)
+            disclosures.forEachIndexed { index, detail ->
+                Text(detail, fontSize = 14.sp, color = if (index == 0) AppPalette.text() else AppPalette.secondary())
+            }
+        }
     }
 }

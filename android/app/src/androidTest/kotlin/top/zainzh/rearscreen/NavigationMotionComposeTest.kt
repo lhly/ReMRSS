@@ -51,10 +51,7 @@ class NavigationMotionComposeTest {
         return field.get(controller()) as MiuixSettingsUi
     }
 
-    private fun animationGeneration(): Int {
-        val field = MiuixSettingsUi::class.java.getDeclaredField("animationGeneration\$delegate").apply { isAccessible = true }
-        return (field.get(composeUi()) as androidx.compose.runtime.MutableIntState).intValue
-    }
+    private fun animationGeneration(): Int = uiStateValue("animationGeneration") as Int
 
     private fun pickerList(model: Any): LazyListState {
         val field = AppPickerModel::class.java.getDeclaredField("list").apply { isAccessible = true }
@@ -104,10 +101,7 @@ class NavigationMotionComposeTest {
         return downTime
     }
 
-    private fun motionDurationScale(): Float {
-        val field = MiuixSettingsUi::class.java.getDeclaredField("motionDurationScale\$delegate").apply { isAccessible = true }
-        return (field.get(composeUi()) as androidx.compose.runtime.MutableFloatState).floatValue
-    }
+    private fun motionDurationScale() = routeMotion().durationScale
 
     private fun onMain(block: () -> Unit) {
         InstrumentationRegistry.getInstrumentation().runOnMainSync(block)
@@ -132,10 +126,11 @@ class NavigationMotionComposeTest {
             "rootInsets=${insets?.let { "${it.systemWindowInsetLeft},${it.systemWindowInsetTop},${it.systemWindowInsetRight},${it.systemWindowInsetBottom}" }}"
     }
 
-    private fun uiField(name: String): Any? = MiuixSettingsUi::class.java.getDeclaredField(name)
-            .apply { isAccessible = true }.get(composeUi())
+    private fun routeMotion(): AppRouteMotion = MiuixSettingsUi::class.java.getDeclaredField("routeMotion")
+        .apply { isAccessible = true }.get(composeUi()) as AppRouteMotion
 
-    private fun uiStateValue(name: String): Any? = when (val state = uiField("$name\$delegate")) {
+    private fun uiStateValue(name: String): Any? = when (val state =
+        AppRouteMotion::class.java.getDeclaredField("$name\$delegate").apply { isAccessible = true }.get(routeMotion())) {
         is androidx.compose.runtime.MutableState<*> -> state.value
         is androidx.compose.runtime.MutableFloatState -> state.floatValue
         is androidx.compose.runtime.MutableIntState -> state.intValue
@@ -400,6 +395,48 @@ class NavigationMotionComposeTest {
 
     private fun backEvent(progress: Float) = BackEventCompat(0f, 240f, progress, BackEventCompat.EDGE_LEFT)
 
+    @Test fun captureRailDuringTabAndRouteMotion() {
+        fun frame(name: String) {
+            val bitmap = captureRenderedFrame()
+            val width = minOf(640, bitmap.width)
+            val scaled = Bitmap.createScaledBitmap(bitmap, width, bitmap.height * width / bitmap.width, true)
+            try {
+                VisualAuditBitmap.write(InstrumentationRegistry.getInstrumentation(), "audit-navigation-rail", name, scaled)
+            } finally {
+                if (scaled !== bitmap) scaled.recycle()
+                bitmap.recycle()
+            }
+        }
+        awaitStableNavigationSurface()
+        val rail = compose.onNodeWithTag("main_navigation")
+        frame("01-rest")
+        compose.mainClock.autoAdvance = false
+        try {
+            rail.performTouchInput {
+                down(Offset(width * .14f, height * .5f))
+                moveTo(Offset(width * .48f, height * .5f), delayMillis = 90)
+            }
+            compose.mainClock.advanceTimeBy(100)
+            assertTrue("the selected capsule must actually travel", navigationIndicatorProgress() > .25f)
+            frame("02-drag")
+            rail.performTouchInput { up() }
+            compose.mainClock.advanceTimeBy(700)
+            compose.onNodeWithContentDescription(NativeStrings.get(compose.activity, "screen_title")).performClick()
+            compose.mainClock.advanceTimeBy(700)
+            compose.onNodeWithTag("wake_settings_entry").performClick()
+            compose.mainClock.advanceTimeBy(102)
+            frame("03-route-enter")
+            compose.mainClock.advanceTimeBy(400)
+            compose.onNodeWithTag("wake_settings_back").performClick()
+            compose.mainClock.advanceTimeBy(102)
+            frame("04-route-return")
+            compose.mainClock.advanceTimeBy(400)
+            frame("05-rest")
+        } finally {
+            compose.mainClock.autoAdvance = true
+        }
+    }
+
     @Test fun secondaryPageHasVisibleMiddleFramesAndPredictiveBackCanCancelReverseAndCommit() {
         awaitStableRenderedFrames()
         captureEvidence("home")
@@ -501,11 +538,29 @@ class NavigationMotionComposeTest {
     }
 
     @Test fun realSystemEdgeBackTracksProgressCancelsAndThenCommits() {
+        checkNativeEdgeRoundTrip(11, 0, "wake_settings_back") {
+            compose.onNodeWithTag("wake_settings_entry").performClick()
+        }
+    }
+
+    @Test fun tutorialReturnsToSettingsWithTheSameNativeEdgeGesture() {
+        checkNativeEdgeRoundTrip(TUTORIAL_ROUTE, 3, "tutorial_back") {
+            val activity = compose.activity
+            compose.onNodeWithContentDescription(NativeStrings.get(activity, "nav_settings")).performClick()
+            val title = NativeStrings.get(activity, "tutorial")
+            compose.onNodeWithTag("settings_list").performScrollToNode(hasText(title))
+            compose.onNodeWithText(title).performClick()
+        }
+        compose.onNodeWithTag("settings_list").assertIsDisplayed()
+        compose.onNodeWithContentDescription(NativeStrings.get(compose.activity, "nav_settings")).assertIsSelected()
+    }
+
+    private fun checkNativeEdgeRoundTrip(child: Int, parent: Int, backTag: String, open: () -> Unit) {
         val trace = mutableListOf<String>()
         awaitStableRenderedFrames()
-        compose.onNodeWithTag("wake_settings_entry").performClick()
+        open()
         compose.waitUntil(10_000) {
-            route() == 11 && runCatching { compose.onNodeWithTag("wake_settings_back").assertIsDisplayed(); true }.getOrDefault(false)
+            route() == child && runCatching { compose.onNodeWithTag(backTag).assertIsDisplayed(); true }.getOrDefault(false)
         }
         awaitStableRenderedFrames()
         val childAtRest = childBounds()
@@ -521,7 +576,7 @@ class NavigationMotionComposeTest {
             val cancelPreview = childBounds()
             val cancelPreviewRoute = route()
             trace += "cancel-preview down=$cancelDown child=$cancelPreview route=$cancelPreviewRoute"
-            assertEquals("native back preview does not commit the child route", 11, cancelPreviewRoute)
+            assertEquals("native back preview does not commit the child route", child, cancelPreviewRoute)
             assertTrue("the real system edge gesture moves the outgoing child", cancelPreview.left > childAtRest.left + 12f)
 
             listOf(132f, 78f, 34f, 10f).forEach { x ->
@@ -531,7 +586,7 @@ class NavigationMotionComposeTest {
             SystemClock.sleep(32)
             injectPhysicalTouch(MotionEvent.ACTION_UP, cancelDown, 10f, touchY)
             compose.waitUntil(10_000) {
-                route() == 11 && kotlin.math.abs(childBounds().left - childAtRest.left) < 1f
+                route() == child && kotlin.math.abs(childBounds().left - childAtRest.left) < 1f
             }
             awaitStableRenderedFrames()
             assertSameBounds("pulling a native back preview to the edge cancels to the child", childAtRest, childBounds())
@@ -542,9 +597,9 @@ class NavigationMotionComposeTest {
             compose.waitUntil(5_000) { childBounds().left > childAtRest.left + screenWidth * .25f }
             val commitPreview = childBounds()
             trace += "commit-preview down=$commitDown child=$commitPreview route=${route()}"
-            assertEquals("route remains committed to the child until the real gesture completes", 11, route())
+            assertEquals("route remains committed to the child until the real gesture completes", child, route())
             injectPhysicalTouch(MotionEvent.ACTION_UP, commitDown, commitPoints.last(), touchY)
-            compose.waitUntil(10_000) { route() == 0 }
+            compose.waitUntil(10_000) { route() == parent }
             awaitStableRenderedFrames()
             compose.waitUntil(5_000) { runCatching { compose.onNodeWithTag("navigation_motion_child").assertDoesNotExist(); true }.getOrDefault(false) }
             trace += "commit-complete route=${route()} child=absent"
@@ -582,7 +637,7 @@ class NavigationMotionComposeTest {
         assertEquals("the Settings Pager page must become business-active after settling", 3, route())
     }
 
-    @Test fun exitingSubpageBlocksItsVisibleControlButGlobalNavigationCanInterruptEarly() {
+    @Test fun exitingSubpageBlocksHiddenControlsButRevealedTabsCanInterrupt() {
         awaitStableRenderedFrames()
         compose.onNodeWithTag("wake_settings_entry").assertIsDisplayed()
         compose.mainClock.autoAdvance = false
@@ -613,17 +668,27 @@ class NavigationMotionComposeTest {
                 blockedGeneration, animationGeneration())
             assertEquals(0, route())
 
-            // Unlike that hidden child, the global bar remains an intentional interruption target.
-            val nav = compose.onNodeWithTag("main_navigation").fetchSemanticsNode().boundsInRoot
-            val rtl = compose.activity.resources.configuration.layoutDirection == android.view.View.LAYOUT_DIRECTION_RTL
-            val settingsX = nav.left + nav.width * if (rtl) .125f else .875f
-            compose.onNodeWithTag("main_navigation").performTouchInput {
-                click(Offset(settingsX - nav.left, nav.center.y - nav.top))
-            }
-            compose.waitUntil(10_000) { route() == 3 }
+            // Tapping through the opaque page must not activate the still-covered tab.
+            val bar = compose.onNodeWithTag("main_navigation")
+            val nav = bar.fetchSemanticsNode().boundsInRoot
+            val leftToRight = compose.activity.resources.configuration.layoutDirection != android.view.View.LAYOUT_DIRECTION_RTL
+            val edge = if (leftToRight) childBounds().left else childBounds().right
+            fun tabCenter(fraction: Float) = nav.left + nav.width * if (leftToRight) fraction else 1f - fraction
+            fun isRevealed(x: Float) = if (leftToRight) x < edge else x > edge
+            fun tap(x: Float) = bar.performTouchInput { click(Offset(x - nav.left, nav.center.y - nav.top)) }
+
+            val covered = tabCenter(.875f)
+            assertFalse("the secondary page still covers the farthest tab in this frame", isRevealed(covered))
+            tap(covered)
+            assertEquals("tapping a covered tab must not change the route", 0, route())
+
+            val revealed = tabCenter(.375f)
+            assertTrue("the nearer tab is visible on the uncovered part of the rail", isRevealed(revealed))
+            tap(revealed)
+            compose.waitUntil(10_000) { route() == 1 }
             compose.mainClock.autoAdvance = true
             awaitStableRenderedFrames()
-            compose.onNodeWithTag("settings_list").assertIsDisplayed()
+            compose.onNodeWithTag("notifications_list").assertIsDisplayed()
             compose.onNodeWithTag("navigation_motion_child").assertDoesNotExist()
         } finally {
             compose.mainClock.autoAdvance = true

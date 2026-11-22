@@ -266,6 +266,7 @@ public class RearCastNotificationTest {
         assertTrue(copied.await(3, TimeUnit.SECONDS)); assertEquals(PixelCopy.SUCCESS, status[0]);
         File out = new File(context.getExternalFilesDir(null), "cast-capsule-" + name + ".png");
         try (FileOutputStream stream = new FileOutputStream(out)) { bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream); }
+        VisualAuditBitmap.write(inst, "audit-capsule-" + name, "notification-capsule", bitmap);
         bitmap.recycle();
     }
     void assertLabels(View view, int background) {

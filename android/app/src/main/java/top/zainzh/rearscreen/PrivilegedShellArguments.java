@@ -26,12 +26,20 @@ final class PrivilegedShellArguments {
     }
 
     static String stopRecording(int pid, String output, int signal) {
-        if (pid <= 0 || signal != 2 && signal != 15 || output == null
+        if (signal != 2 && signal != 15) throw new IllegalArgumentException("Invalid recording signal");
+        // A stale PID must never signal an unrelated process after a recording ends by itself.
+        return "if " + matchesRecording(pid, output) + "; then kill -" + signal + " " + pid + "; else exit 1; fi";
+    }
+
+    static String recordingStatus(int pid, String output) {
+        return "if " + matchesRecording(pid, output) + "; then echo active; else echo stopped; fi";
+    }
+
+    private static String matchesRecording(int pid, String output) {
+        if (pid <= 0 || output == null
                 || !output.matches("/storage/emulated/[0-9]+/Movies/ReMRSS_[0-9]{8}_[0-9]{6}(?:_[a-f0-9]{8})?\\.mp4"))
             throw new IllegalArgumentException("Invalid recording identity");
-        // A stale PID must never signal an unrelated process after a recording ends by itself.
-        return "if [ \"$(cat /proc/" + pid + "/comm 2>/dev/null)\" = screenrecord ] && "
-                + "tr '\\000' '\\n' < /proc/" + pid + "/cmdline | grep -Fqx -- " + quote(output)
-                + "; then kill -" + signal + " " + pid + "; else exit 1; fi";
+        return "[ \"$(cat /proc/" + pid + "/comm 2>/dev/null)\" = screenrecord ] && "
+                + "tr '\\000' '\\n' < /proc/" + pid + "/cmdline | grep -Fqx -- " + quote(output);
     }
 }

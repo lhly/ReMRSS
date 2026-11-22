@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -21,6 +23,7 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** Shared visuals only: the caller decides how selection and filtering work. */
 @Composable internal fun AppCatalogCard(
@@ -39,7 +42,7 @@ import top.yukonga.miuix.kmp.basic.TextFieldDefaults
             Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) { icon() }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(name, fontSize = 16.sp, color = if (muted) AppPalette.secondary() else AppPalette.text())
-                if (!detail.isNullOrEmpty()) Text(detail, fontSize = 12.sp, color = AppPalette.secondary())
+                if (!detail.isNullOrEmpty() && detail != name) Text(detail, fontSize = 12.sp, color = AppPalette.secondary())
             }
             trailing()
         }
@@ -47,15 +50,15 @@ import top.yukonga.miuix.kmp.basic.TextFieldDefaults
 }
 
 @Composable internal fun AppCatalogSearchField(
-    query: String,
-    change: (String) -> Unit,
+    input: TextFieldState,
     label: String,
     modifier: Modifier = Modifier,
     interactive: Boolean = true,
 ) {
-    TextField(query, { if (interactive) change(it) }, label = label, singleLine = true,
+    TextField(state = input, label = label, lineLimits = TextFieldLineLimits.SingleLine, readOnly = !interactive,
         modifier = modifier.fillMaxWidth().then(if (interactive) Modifier else Modifier.focusProperties { canFocus = false }),
         colors = TextFieldDefaults.textFieldColors(labelColor = AppPalette.secondary()),
+        textStyle = MiuixTheme.textStyles.main.copy(color = AppPalette.text()),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
         leadingIcon = {
             Icon(painterResource(R.drawable.ic_app_catalog_search), null,

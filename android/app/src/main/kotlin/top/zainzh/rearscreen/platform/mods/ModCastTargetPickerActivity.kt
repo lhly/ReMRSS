@@ -9,15 +9,20 @@ import androidx.activity.ComponentActivity
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
@@ -31,6 +36,8 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.zainzh.rearscreen.BuildConfig
 import top.zainzh.rearscreen.AppCard
+import top.zainzh.rearscreen.CastApprovalFailure
+import top.zainzh.rearscreen.CastApprovalPane
 import top.zainzh.rearscreen.AppPalette
 import top.zainzh.rearscreen.miuixContent
 import top.zainzh.rearscreen.platform.CastCommitResult
@@ -62,7 +69,9 @@ class ModCastTargetPickerActivity : ComponentActivity() {
     private var source: ModCastActivationSource? = null
     private var deliveredHandle: top.zainzh.rearscreen.platform.CastSessionHandle? = null
     private var completed = false
-    private var committing = false
+    private var committing by mutableStateOf(false)
+    private var uiReady = false
+    private var terminalFailure by mutableStateOf<String?>(null)
     private var mainChoicePreparationStarted = false
     private val mainSettingsFlow by lazy { intent.getBooleanExtra(EXTRA_MAIN_SETTINGS_FLOW, false) }
     private val requestId by lazy { intent.getStringExtra(EXTRA_REQUEST_ID).orEmpty() }
@@ -72,6 +81,13 @@ class ModCastTargetPickerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         traceFocus("picker_created")
+        savedInstanceState?.getString("terminal_failure")?.let { code ->
+            completed = true
+            terminalFailure = code
+            setResult(Activity.RESULT_CANCELED, intent.putExtra(EXTRA_RESULT_CODE, code))
+            renderPicker()
+            return
+        }
         modId = intent.getStringExtra(EXTRA_MOD_ID)
         mode = runCatching { CastMode.valueOf(intent.getStringExtra(EXTRA_MODE).orEmpty()) }.getOrNull()
         region = intent.getStringExtra(EXTRA_REGION)?.let { runCatching { CastRegion.valueOf(it) }.getOrNull() }
@@ -103,32 +119,47 @@ class ModCastTargetPickerActivity : ComponentActivity() {
         if (mainSettingsFlow) {
             message = "正在核对所选主屏任务…"
         } else loadChoices()
+        renderPicker()
+    }
+
+    private fun renderPicker() {
+        uiReady = true
         miuixContent {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                AppCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("选择要投放的主屏应用", fontSize = 22.sp, color = AppPalette.text())
-                        Text("仅使用宿主签发的一次性任务选择；确认前不会切换任务或启动投放。", color = AppPalette.secondary())
-                    }
-                }
-                error.takeIf { it.isNotBlank() }?.let { Text(it, color = AppPalette.destructive()) }
-                prepared?.let { ticket ->
-                    AppCard(Modifier.fillMaxWidth()) {
-                        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("目标应用：${selectedChoice?.label ?: "已选应用"}")
-                            Text("方式：${if (ticket.target.mode == CastMode.VIRTUAL) "虚拟投放" else "物理直投"}")
-                            Text("区域：${if (ticket.target.region == CastRegion.FULL) "FULL 全域" else "SAFE 安全区"}")
-                            Text("内容方向：${ticket.target.contentRotation * 90}°")
-                            Text(replacementSummary(ticket), color = AppPalette.secondary())
+            val terminal = terminalFailure
+            val ticket = prepared
+            when {
+                terminal != null -> CastApprovalFailure("未能启动背屏投放", castFailureMessage(terminal), ::finish)
+                ticket != null -> CastApprovalPane(
+                    application = selectedChoice?.label ?: "已选应用",
+                    mode = if (ticket.target.mode == CastMode.VIRTUAL) "虚拟投放" else "物理直投",
+                    region = if (ticket.target.region == CastRegion.FULL) "全域" else "安全区",
+                    rotationDegrees = ticket.target.contentRotation * 90,
+                    occupancy = replacementSummary(ticket),
+                    secondaryLabel = if (mainSettingsFlow) "取消" else "返回选择",
+                    submitting = committing, submittingLabel = "正在启动…",
+                    secondaryEnabled = mainSettingsFlow || !committing,
+                    onSecondary = if (mainSettingsFlow) ::finishCancelled else ::cancelPrepared,
+                    onConfirm = ::confirmPrepared,
+                    onCancelFlow = if (mainSettingsFlow) null else ::finishCancelled,
+                )
+                else -> LazyColumn(
+                    Modifier.fillMaxSize().safeDrawingPadding().imePadding()
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    item("intro") {
+                        AppCard(Modifier.fillMaxWidth()) {
+                            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("选择要投放的主屏应用", fontSize = 22.sp, color = AppPalette.text())
+                                Text("核对目标和占用后再确认；确认前不会切换任务。", color = AppPalette.secondary())
+                            }
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (!mainSettingsFlow) TextButton("返回选择", ::cancelPrepared, minHeight = 48.dp)
-                        TextButton(if (committing) "正在启动…" else "确认并投放", ::confirmPrepared,
-                            minHeight = 48.dp, enabled = !committing)
+                    error.takeIf { it.isNotBlank() }?.let { detail ->
+                        item("error") { Text(detail, color = AppPalette.destructive(),
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
                     }
-                } ?: LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (choices.isEmpty()) item { Text(message, color = AppPalette.secondary()) }
+                    if (choices.isEmpty()) item("message") { Text(message, color = AppPalette.secondary()) }
                     items(choices, key = { it.opaqueToken }) { choice ->
                         AppCard(Modifier.fillMaxWidth().clickable { select(choice) }) {
                             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -137,10 +168,15 @@ class ModCastTargetPickerActivity : ComponentActivity() {
                             }
                         }
                     }
+                    item("cancel") { TextButton("取消", ::finishCancelled, Modifier.fillMaxWidth(), minHeight = 48.dp) }
                 }
-                TextButton("取消", ::finishCancelled, minHeight = 48.dp)
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        terminalFailure?.let { outState.putString("terminal_failure", it) }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
@@ -151,7 +187,7 @@ class ModCastTargetPickerActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         traceFocus("picker_window_focus", hasFocus)
-        if (hasFocus && mainSettingsFlow && !mainChoicePreparationStarted) {
+        if (hasFocus && !completed && mainSettingsFlow && !mainChoicePreparationStarted) {
             mainChoicePreparationStarted = true
             prepareMainSettingsChoice()
         }
@@ -260,7 +296,7 @@ class ModCastTargetPickerActivity : ComponentActivity() {
         val request = CastTargetRequest(CastTargetSelector.ChoiceToken(choice.opaqueToken), activeMode, region, rotation, density)
         when (val result = runtime.coordinator.prepare(activeOwner, request)) {
             is CastPrepareResult.Accepted -> { selectedChoice = choice; prepared = result.ticket; error = "" }
-            is CastPrepareResult.Rejected -> error = "无法准备投放：E_${result.code.name}"
+            is CastPrepareResult.Rejected -> error = castFailureMessage("E_${result.code.name}")
         }
     }
 
@@ -389,7 +425,22 @@ class ModCastTargetPickerActivity : ComponentActivity() {
         prepared?.let { ticket -> owner?.let { runtime.coordinator.abort(it, ticket.ticketId, ticket.generation) } }
         if (mainSettingsFlow) source?.let { ModCastActivationSources.complete(it, requestId, false, code) }
         setResult(Activity.RESULT_CANCELED, intent.putExtra(EXTRA_RESULT_CODE, code))
-        finish()
+        if (uiReady && !isFinishing && code != "E_USER_CANCELLED") {
+            committing = false
+            terminalFailure = code
+        } else {
+            if (!isFinishing && code != "E_USER_CANCELLED")
+                android.widget.Toast.makeText(this, castFailureMessage(code), android.widget.Toast.LENGTH_LONG).show()
+            finish()
+        }
+    }
+
+    private fun castFailureMessage(code: String): String = when (code) {
+        "E_TICKET_STALE", "E_EXPIRED" -> "本次确认已过期。返回后重新选择投放目标。"
+        "E_TARGET_CHANGED", "E_TARGET_UNAVAILABLE" -> "主屏目标已变化。返回后重新打开要投放的应用。"
+        "E_MOD_REVOKED", "E_CAST_SOURCE_STALE" -> "来源已关闭或未获投放授权。请返回模块重新发起。"
+        "E_OCCUPANCY_CHANGED", "E_OCCUPIED" -> "背屏占用已变化。请检查背屏后重新发起。"
+        else -> "请检查背屏和连接状态，再发起投放。"
     }
 
     private fun traceFocus(stage: String, value: Any? = null) {

@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,9 +11,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
@@ -25,6 +26,8 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.zainzh.rearscreen.AppCard
 import top.zainzh.rearscreen.AppPalette
+import top.zainzh.rearscreen.AppRow
+import top.zainzh.rearscreen.PageFrame
 import top.zainzh.rearscreen.miuixContent
 import top.zainzh.rearscreen.platform.CastMode
 import top.zainzh.rearscreen.platform.ControlledCastRuntimeProvider
@@ -64,26 +67,8 @@ class ModCastForegroundTargetActivity : ComponentActivity() {
         }
         runtime.owners.modAuthorizationChanged(owner!!, true)
         miuixContent {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                AppCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("选择主屏应用", fontSize = 22.sp, color = AppPalette.text())
-                        Text("选择后会重新核实所选任务和活动，再显示预览并单独确认投放。", color = AppPalette.secondary())
-                    }
-                }
-                if (choices.isEmpty()) Text(status, color = AppPalette.secondary())
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(choices, key = { it.opaqueToken }) { choice ->
-                        AppCard(Modifier.fillMaxWidth().clickable(enabled = !working) { openConfirmationForChoice(choice) }) {
-                            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(choice.label)
-                                Text(choice.packageName, color = AppPalette.secondary())
-                            }
-                        }
-                    }
-                }
-                TextButton("取消", { finishWithError("E_USER_CANCELLED") }, minHeight = 48.dp, enabled = !working)
-            }
+            ForegroundCastTargetScreen(choices, status, working, ::openConfirmationForChoice,
+                cancel = { finishWithError("E_USER_CANCELLED") })
         }
         loadChoices()
     }
@@ -162,5 +147,32 @@ class ModCastForegroundTargetActivity : ComponentActivity() {
             ModCastActivationSource(i.getStringExtra(EXTRA_MOD_ID).orEmpty(), surface,
                 i.getStringExtra(ModCastTargetPickerActivity.EXTRA_SOURCE_INSTANCE).orEmpty(), session, generation).takeIf { it.isWellFormed() }
         }.getOrNull()
+    }
+}
+
+@Composable
+internal fun ForegroundCastTargetScreen(
+    choices: List<HostCastForegroundChoice>, status: String, working: Boolean,
+    choose: (HostCastForegroundChoice) -> Unit, cancel: () -> Unit,
+) {
+    PageFrame("选择主屏应用", cancel, "foreground_choice_back") { modifier, _ ->
+        Column(modifier.padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyColumn(Modifier.weight(1f, fill = false).testTag("foreground_choice_list"),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                item("help") {
+                    Text("选中应用后，还需单独确认投放。", fontSize = 14.sp,
+                        color = AppPalette.secondary(), modifier = Modifier.padding(vertical = 6.dp))
+                }
+                if (choices.isEmpty() || working) item("status") { Text(status, color = AppPalette.secondary()) }
+                items(choices, key = { it.opaqueToken }) { choice ->
+                    AppCard {
+                        AppRow(choice.label, choice.packageName.takeUnless { it == choice.label },
+                            enabled = !working, action = { choose(choice) })
+                    }
+                }
+            }
+            TextButton("取消", cancel, Modifier.fillMaxWidth().testTag("foreground_choice_cancel"),
+                minHeight = 48.dp, cornerRadius = 16.dp, enabled = !working)
+        }
     }
 }

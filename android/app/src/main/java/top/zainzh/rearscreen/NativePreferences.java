@@ -57,6 +57,12 @@ final class NativePreferences {
         legacy.edit().putBoolean("flutter." + key, enabled).apply();
     }
 
+    boolean showInRecents() { return settings.getBoolean("show_in_recents", false); }
+
+    void setShowInRecents(boolean shown) {
+        settings.edit().putBoolean("show_in_recents", shown).apply();
+    }
+
     int getDuration() {
         Object value = settings.getAll().get("notification_duration");
         if (!(value instanceof Number)) value = legacy.getAll().get("flutter.notification_duration");

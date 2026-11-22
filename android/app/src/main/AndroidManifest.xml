@@ -84,7 +84,7 @@
         <service
             android:name=".RearScreenRecordTileService"
             android:icon="@drawable/ic_tile_record"
-            android:label="@string/tile_record_label"
+            android:label="${recordTileLabel}"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
             <intent-filter>
@@ -121,11 +121,6 @@
             android:isolatedProcess="true"
             android:process=":modruntime" />
 
-        <service android:name=".ModuleDisplayRecoveryService" android:enabled="true" android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="用户主动模块显示期间的背屏遮挡与锁屏事件恢复" />
-        </service>
-        
         <!-- V2.3: 充电动画服务 -->
         <service
             android:name=".ChargingService"
@@ -194,7 +189,6 @@
             android:theme="@style/MiuixHostTheme">
             <meta-data android:name="miui.rear.policy" android:value="1" />
         </activity>
-        <activity android:name=".ModuleSettingsActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
         <activity android:name=".DensityCompatibilityActivity" android:exported="false" android:theme="@style/MiuixHostTheme" />
         <activity android:name=".AiRearWallpaperEditorActivity" android:exported="false" android:launchMode="singleTop"
             android:theme="@style/MiuixHostTheme" />

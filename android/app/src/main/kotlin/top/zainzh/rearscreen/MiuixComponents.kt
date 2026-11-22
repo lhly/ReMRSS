@@ -77,7 +77,7 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 /** Java controllers publish plain modal state; only this renderer creates UI. */
 class MiuixDialogUi(private val activity: ComponentActivity) {
     private data class Model(val title: String, val message: String, val labels: List<String>, val actions: List<Runnable?>,
-        val number: Boolean = false, val min: Int = 1, val max: Int = Int.MAX_VALUE, val save: java.util.function.IntConsumer? = null, val pinned: Int = 0)
+        val number: Boolean = false, val min: Int = 1, val max: Int = Int.MAX_VALUE, val save: java.util.function.IntConsumer? = null, val pinned: Int = 0, val selectedChoice: Int? = null)
     private var model by mutableStateOf<Model?>(null)
     private var showing by mutableStateOf(false)
     private var generation = 0L
@@ -90,6 +90,12 @@ class MiuixDialogUi(private val activity: ComponentActivity) {
     }
     fun show(title: String, message: String, labels: Array<String>, actions: Array<Runnable?>) {
         kind = null; generation++; model = Model(title, message, labels.toList(), actions.toList()); showing = true
+    }
+    fun showChoice(title: String, message: String, labels: Array<String>, actions: Array<Runnable?>, selected: Int) {
+        kind = null
+        generation++
+        model = Model(title, message, labels.toList(), actions.toList(), selectedChoice = selected)
+        showing = true
     }
     fun showWithPinnedActions(title: String, message: String, labels: Array<String>, actions: Array<Runnable?>) {
         kind = null; generation++; model = Model(title, message, labels.toList(), actions.toList(), pinned = minOf(2, labels.size)); showing = true
@@ -109,32 +115,48 @@ class MiuixDialogUi(private val activity: ComponentActivity) {
     fun isShowing(title: String): Boolean = showing && model?.title == title
     fun isVisible(): Boolean = showing
     fun dismiss() { showing = false }
+
+    private fun invoke(current: Model, index: Int, sessionGeneration: Long) {
+        if (!showing || generation != sessionGeneration) return
+        if (current.number && index == 0) {
+            val value = draft.trim().toIntOrNull()
+            if (value == null || value !in current.min..current.max) error = true
+            else { dismiss(); current.save?.accept(value) }
+        } else { dismiss(); current.actions[index]?.run() }
+    }
+
     @Composable private fun DialogAction(current: Model, index: Int, sessionGeneration: Long) {
         key(sessionGeneration, index) {
-            TextButton(current.labels[index], {
-                if (!showing || generation != sessionGeneration) return@TextButton
-                if (current.number && index == 0) {
-                    val value = draft.trim().toIntOrNull()
-                    if (value == null || value !in current.min..current.max) error = true
-                    else { dismiss(); current.save?.accept(value) }
-                } else { dismiss(); current.actions[index]?.run() }
-            }, Modifier.fillMaxWidth().testTag("modal_action_$index"), minHeight = 48.dp,
+            TextButton(current.labels[index], { invoke(current, index, sessionGeneration) },
+                Modifier.fillMaxWidth().testTag("modal_action_$index").then(
+                if (current.selectedChoice != null && current.actions[index] != null)
+                    Modifier.semantics { selected = current.selectedChoice == index } else Modifier
+            ), minHeight = 48.dp,
                 enabled = showing && generation == sessionGeneration,
-                colors = if (index == 0) ButtonDefaults.textButtonColorsPrimary() else ButtonDefaults.textButtonColors())
+                cornerRadius = 16.dp, colors = when {
+                    current.number && index >= 2 -> ButtonDefaults.textButtonColors().copy(
+                        color = Color.Transparent, textColor = AppPalette.accent())
+                    index == (current.selectedChoice ?: 0) -> ButtonDefaults.textButtonColorsPrimary()
+                    else -> ButtonDefaults.textButtonColors()
+                })
         }
     }
-    @Composable private fun DialogBody(current: Model, sessionGeneration: Long) {
+    @Composable private fun DialogBody(current: Model, sessionGeneration: Long, firstInBody: Int) {
         SelectionContainer { Text(current.message, fontSize = 14.sp, color = AppPalette.secondary(), modifier = Modifier.testTag("modal_message")) }
         if (current.number) {
             TextField(value = draft, onValueChange = {
                 if (showing && generation == sessionGeneration) { draft = it; error = false }
             }, label = current.title,
+                textStyle = MiuixTheme.textStyles.main.copy(color = AppPalette.text()),
                 singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth().testTag("number_input").semantics { if (error) error(current.message) },
+                modifier = Modifier.fillMaxWidth().testTag("number_input").semantics {
+                    if (error) error(activity.getString(R.string.ui_number_range_error, current.min, current.max))
+                },
                 enabled = showing)
-            if (error) Text(current.message, color = AppPalette.accent(), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            if (error) Text(activity.getString(R.string.ui_number_range_error, current.min, current.max), color = AppPalette.destructive(),
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         }
-        for (index in current.pinned until current.labels.size) DialogAction(current, index, sessionGeneration)
+        for (index in firstInBody until current.labels.size) DialogAction(current, index, sessionGeneration)
     }
     @Composable private fun Render() {
         val current = model
@@ -149,15 +171,27 @@ class MiuixDialogUi(private val activity: ComponentActivity) {
             }) {
             if (current != null) {
                 val maximum = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() * .65f }
-                if (current.pinned == 0) {
+                val footer = when {
+                    current.pinned > 0 -> current.pinned
+                    current.number -> minOf(2, current.labels.size)
+                    current.selectedChoice == null && current.labels.size <= 2 -> current.labels.size
+                    else -> 0
+                }
+                if (footer == 0) {
                     Column(Modifier.fillMaxWidth().heightIn(max = maximum).inactiveInteractionIsolation(!showing).verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)) { DialogBody(current, renderGeneration) }
+                        verticalArrangement = Arrangement.spacedBy(12.dp)) { DialogBody(current, renderGeneration, 0) }
                 } else {
-                    Column(Modifier.fillMaxWidth().heightIn(max = maximum).inactiveInteractionIsolation(!showing), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)) { DialogBody(current, renderGeneration) }
-                        for (index in 0 until current.pinned) DialogAction(current, index, renderGeneration)
-                    }
+                    AppDialogDecisionContent(
+                        modifier = Modifier.inactiveInteractionIsolation(!showing),
+                        footer = {
+                            if (footer == 2) key(renderGeneration) {
+                                AppActionPair(current.labels[1], { invoke(current, 1, renderGeneration) },
+                                    current.labels[0], { invoke(current, 0, renderGeneration) },
+                                    secondaryModifier = Modifier.testTag("modal_action_1"), primaryModifier = Modifier.testTag("modal_action_0"),
+                                    secondaryEnabled = showing, primaryEnabled = showing)
+                            } else DialogAction(current, 0, renderGeneration)
+                        },
+                    ) { DialogBody(current, renderGeneration, footer) }
                 }
             }
         }
@@ -186,32 +220,45 @@ class UpdateDialogUi(activity: ComponentActivity, private val cancel: Runnable) 
                     modifier = Modifier.inactiveInteractionIsolation(!showing),
                     onDismissRequest = { if (showing && generation == renderGeneration) cancel.run() },
                     onDismissFinished = { if (!showing && generation == renderGeneration) model = null }) {
-                    if (current != null) Column(Modifier.fillMaxWidth().heightIn(max = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() * .65f })
-                        .inactiveInteractionIsolation(!showing)
-                        .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(current.current, fontSize = 14.sp, color = AppPalette.secondary(), modifier = Modifier.testTag("update_dialog_current"))
-                        if (current.status.isNotEmpty()) Text(current.status, color = AppPalette.text(), modifier = Modifier.testTag("update_dialog_status").semantics { liveRegion = LiveRegionMode.Polite })
-                        if (current.progress >= 0) LinearProgressIndicator(progress = if (current.indeterminate) null else current.progress / 100f, modifier = Modifier.fillMaxWidth())
-                        Text(current.details, fontSize = 14.sp, color = AppPalette.secondary())
-                        if (current.showReleaseNotes) {
-                            val hasNotes = current.notesAdded.isNotEmpty() || current.notesImproved.isNotEmpty() || current.notesFixed.isNotEmpty()
-                            if (hasNotes) {
-                                ReleaseNoteGroup(current.notesAddedTitle, current.notesAdded)
-                                ReleaseNoteGroup(current.notesImprovedTitle, current.notesImproved)
-                                ReleaseNoteGroup(current.notesFixedTitle, current.notesFixed)
-                            } else {
-                                Text(current.notesEmpty, fontSize = 14.sp, color = AppPalette.secondary(),
-                                    modifier = Modifier.testTag("update_release_notes_empty"))
+                    if (current != null) Column(Modifier.fillMaxWidth().heightIn(max = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() * .74f })
+                        .inactiveInteractionIsolation(!showing), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        fun runAction(index: Int) {
+                            if (showing && generation == renderGeneration) current.actions[index].run()
+                        }
+                        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text(current.current, fontSize = 14.sp, color = AppPalette.secondary(), modifier = Modifier.testTag("update_dialog_current"))
+                            if (current.status.isNotEmpty()) Text(current.status, color = AppPalette.text(), modifier = Modifier.testTag("update_dialog_status").semantics { liveRegion = LiveRegionMode.Polite })
+                            if (current.progress >= 0) LinearProgressIndicator(progress = if (current.indeterminate) null else current.progress / 100f, modifier = Modifier.fillMaxWidth())
+                            Text(current.details, fontSize = 14.sp, color = AppPalette.secondary())
+                            for (index in 1 until current.labels.lastIndex) key(renderGeneration, index) {
+                                TextButton(current.labels[index], { runAction(index) },
+                                    Modifier.fillMaxWidth().testTag("update_dialog_action_$index"), minHeight = 48.dp, cornerRadius = 16.dp,
+                                    enabled = showing, colors = ButtonDefaults.textButtonColors().copy(
+                                        color = Color.Transparent, textColor = AppPalette.accent()))
+                            }
+                            if (current.showReleaseNotes) {
+                                val hasNotes = current.notesAdded.isNotEmpty() || current.notesImproved.isNotEmpty() || current.notesFixed.isNotEmpty()
+                                if (hasNotes) {
+                                    ReleaseNoteGroup(current.notesAddedTitle, current.notesAdded)
+                                    ReleaseNoteGroup(current.notesImprovedTitle, current.notesImproved)
+                                    ReleaseNoteGroup(current.notesFixedTitle, current.notesFixed)
+                                } else {
+                                    Text(current.notesEmpty, fontSize = 14.sp, color = AppPalette.secondary(),
+                                        modifier = Modifier.testTag("update_release_notes_empty"))
+                                }
                             }
                         }
-                        current.labels.forEachIndexed { index, label ->
-                            key(renderGeneration, index) {
-                                TextButton(label, {
-                                    if (showing && generation == renderGeneration) current.actions[index].run()
-                                }, Modifier.fillMaxWidth().testTag("update_dialog_action_$index"), minHeight = 48.dp,
-                                    enabled = showing && generation == renderGeneration,
-                                    colors = if (index == 0 && current.labels.size > 1) ButtonDefaults.textButtonColorsPrimary() else ButtonDefaults.textButtonColors())
-                            }
+                        if (current.labels.size >= 2) key(renderGeneration) {
+                            val last = current.labels.lastIndex
+                            AppActionPair(current.labels[last], { runAction(last) }, current.labels[0], { runAction(0) },
+                                secondaryModifier = Modifier.testTag("update_dialog_action_$last"),
+                                primaryModifier = Modifier.testTag("update_dialog_action_0"),
+                                secondaryEnabled = showing, primaryEnabled = showing)
+                        } else if (current.labels.size == 1) key(renderGeneration) {
+                            TextButton(current.labels[0], { runAction(0) },
+                                Modifier.fillMaxWidth().testTag("update_dialog_action_0"), minHeight = 48.dp,
+                                cornerRadius = 16.dp, enabled = showing)
                         }
                     }
                 }

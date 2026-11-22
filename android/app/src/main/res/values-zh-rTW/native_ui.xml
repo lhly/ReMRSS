@@ -11,7 +11,7 @@
     <string name="ui_auto_destroy_time" formatted="false">自動銷毀時間</string>
     <string name="ui_notification_duration_title" formatted="false">通知顯示時間</string>
     <string name="ui_notification_never_close" formatted="false">不自動關閉</string>
-    <string name="ui_notification_never_close_help" formatted="false">通知仍有效時持續顯示。保持螢幕開啟會增加耗電；通知撤回或關閉此功能時仍會結束。</string>
+    <string name="ui_notification_never_close_help" formatted="false">更耗電；通知撤回或關閉背屏通知時結束。</string>
     <string name="ui_notification_click_action" formatted="false">點擊通知</string>
     <string name="ui_notification_click_action_help" formatted="false">主螢幕鎖定且熄滅或處於常亮顯示時，優先開啟通知詳細資訊；不支援時嘗試開啟來源應用程式。投放期間，點按通知膠囊只會關閉提醒。</string>
     <string name="ui_notification_click_open" formatted="false">在主螢幕開啟應用程式</string>
@@ -40,7 +40,7 @@
     <string name="ui_connection_ready" formatted="false">Shizuku 已就緒</string>
     <string name="ui_copied" formatted="false">已複製</string>
     <string name="ui_dark_notification_help" formatted="false">背屏通知使用深色背景</string>
-    <string name="ui_deselect_all" formatted="false">全不選</string>
+    <string name="ui_deselect_all" formatted="false">取消目前 {0} 項</string>
     <string name="ui_diagnostics" formatted="false">診斷資訊</string>
     <string name="ui_display_wake" formatted="false">顯示與喚醒</string>
     <string name="ui_dnd_help" formatted="false">系統開啟勿擾時，暫停背屏通知</string>
@@ -95,7 +95,7 @@
     <string name="ui_screen_title" formatted="false">背屏</string>
     <string name="ui_search_apps" formatted="false">搜索應用</string>
     <string name="ui_seconds_value" formatted="false">{0} 秒</string>
-    <string name="ui_select_all" formatted="false">全選</string>
+    <string name="ui_select_all" formatted="false">選取目前 {0} 項</string>
     <string name="ui_selected_count" formatted="false">已選擇 {0} 個應用</string>
     <string name="ui_shizuku_not_running" formatted="false">Shizuku 未運行</string>
     <string name="ui_shizuku_permission_denied" formatted="false">Shizuku 權限被拒絕</string>
@@ -159,7 +159,7 @@
     <string name="ui_current_version" formatted="false">目前版本：{0}</string>
     <string name="ui_update_size" formatted="false">安裝套件大小：{0}</string>
     <string name="ui_nav_modules" formatted="false">模組</string>
-    <string name="ui_nav_settings" formatted="false">設定</string>
+    <string name="ui_nav_settings" formatted="false">更多</string>
     <string name="ui_nav_cast" formatted="false">投放與顯示</string>
     <string name="ui_nav_cast_help" formatted="false">選擇背屏投放方式並查看顯示選項。</string>
     <string name="ui_nav_wake" formatted="false">喚醒與息屏</string>
@@ -178,4 +178,12 @@
     <string name="ui_settings_runtime" formatted="false">執行狀態</string>
     <string name="ui_settings_usage" formatted="false">使用</string>
     <string name="ui_settings_support" formatted="false">版本與支援</string>
+    <string name="ui_wake_behavior">喚醒模式</string>
+    <string name="ui_rotation_unavailable">未讀取到目前方向</string>
+    <string name="ui_charging_standby">待生效</string>
+    <string name="ui_charging_requires_animation">開啟充電動畫後，常亮偏好才會生效。</string>
+    <string name="ui_notification_duration_scope">適用於轉發通知。SDK 和 Mod 通知按各自的期限關閉。</string>
+    <string name="ui_cancel_download">取消下載</string>
+    <string name="ui_number_range_error">請輸入 %1$d 至 %2$d 之間的數字。</string>
+    <string name="ui_notification_duration_current">目前：%1$s</string>
 </resources>

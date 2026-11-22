@@ -1,6 +1,6 @@
 <resources>
     <string name="registered_actions_title">快捷操作</string>
-    <string name="registered_actions_intro">选择要打开的应用，或添加系统提供的快捷方式。</string>
+    <string name="registered_actions_intro">可添加应用，或选用应用提供的快捷方式。</string>
     <string name="registered_actions_add_app">添加应用</string>
     <string name="registered_actions_add">添加快捷方式</string>
     <string name="registered_actions_working">正在保存…</string>

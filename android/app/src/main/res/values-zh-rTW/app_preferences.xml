@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_preferences_title">應用程式偏好</string>
+    <string name="recents_hide_title">在最近任務中隱藏</string>
+    <string name="recents_visibility_summary">只控制主畫面的任務卡片，不變更背景設定。</string>
+    <string name="recents_update_unavailable">無法變更最近任務的顯示狀態。請從主畫面開啟 ReMRSS 後再試。</string>
+</resources>

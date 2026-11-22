@@ -67,7 +67,6 @@ public class RearAnimationManager {
                 session.id, replacesAnimation ? previousSession.id : Long.MIN_VALUE, inheritedRearTaskId > 0)
                 ? session.id : Long.MIN_VALUE;
         RearInfoSession.animationChanged();
-        RearModuleSession.INSTANCE.animationChanged();
         return session;
     }
 
@@ -153,7 +152,6 @@ public class RearAnimationManager {
         interruptedChargingWasAlwaysOn = false;
         endSceneOverlay(previous.id);
         RearInfoSession.animationChanged();
-        RearModuleSession.INSTANCE.animationChanged();
         String action;
         String extra;
         if (previous.type == AnimationType.NOTIFICATION) {
@@ -225,7 +223,6 @@ public class RearAnimationManager {
         currentAnimation = AnimationType.NONE;
         endSceneOverlay(id);
         RearInfoSession.animationChanged();
-        RearModuleSession.INSTANCE.animationChanged();
         return true;
     }
 

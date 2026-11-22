@@ -50,7 +50,7 @@ import kotlinx.coroutines.selects.select
 /** Shared contract keeps API-33 drawing classes out of the older Android path. */
 internal interface NavigationMaterial {
     val samplesContent: Boolean get() = false
-    @Composable fun Modifier.surface(shape: Shape, press: () -> Float, indicator: Boolean = false, compact: Boolean = false): Modifier
+    @Composable fun Modifier.surface(shape: Shape, press: () -> Float, indicator: Boolean = false): Modifier
     fun Modifier.captureTabs(): Modifier = this
 }
 
@@ -63,7 +63,7 @@ internal object NavigationMotionProbe {
 }
 
 private object SolidNavigationMaterial : NavigationMaterial {
-    @Composable override fun Modifier.surface(shape: Shape, press: () -> Float, indicator: Boolean, compact: Boolean): Modifier {
+    @Composable override fun Modifier.surface(shape: Shape, press: () -> Float, indicator: Boolean): Modifier {
         val dark = isSystemInDarkTheme()
         val base = AppPalette.navigationSurface()
         val tint = if (indicator) AppPalette.accent().copy(alpha = .14f) else base
@@ -76,12 +76,17 @@ private object SolidNavigationMaterial : NavigationMaterial {
     modifier: Modifier = Modifier,
     content: @Composable (Modifier) -> Unit,
     navigation: @Composable BoxScope.() -> Unit,
+    foreground: @Composable BoxScope.() -> Unit,
 ) {
     if (Build.VERSION.SDK_INT >= 33) {
-        BlurredNavigationFrame(modifier, content, navigation)
+        BlurredNavigationFrame(modifier, content, navigation, foreground)
     } else {
         CompositionLocalProvider(LocalNavigationMaterial provides SolidNavigationMaterial) {
-            Box(modifier) { content(Modifier); navigation() }
+            Box(modifier) {
+                content(Modifier)
+                navigation()
+                foreground()
+            }
         }
     }
 }
@@ -130,8 +135,9 @@ internal class NavigationPress(private val canBegin: () -> Boolean = { true }) {
 ) {
     val material = LocalNavigationMaterial.current
     val density = LocalDensity.current
-    val interactions = remember { MutableInteractionSource() }
-    val pressed by interactions.collectIsPressedAsState()
+    val interactions = remember(labels.size) { List(labels.size) { MutableInteractionSource() } }
+    val pressedTabs = interactions.map { it.collectIsPressedAsState().value }
+    val pressed = pressedTabs.any { it }
     var dragging by remember { mutableStateOf(false) }
     var settling by remember { mutableStateOf(false) }
     var dragProgress by remember { mutableFloatStateOf(0f) }
@@ -219,7 +225,7 @@ internal class NavigationPress(private val canBegin: () -> Boolean = { true }) {
             labels.forEachIndexed { index, label ->
                 val color = if (tinted || (!material.samplesContent && index == selectedIndex)) AppPalette.accent() else AppPalette.text()
                 Column(Modifier.weight(1f).then(if (tinted) Modifier else Modifier
-                    .selectable(selected = index == selectedIndex, interactionSource = interactions, indication = null,
+                    .selectable(selected = index == selectedIndex, interactionSource = interactions[index], indication = null,
                         role = Role.Tab, onClick = {
                             NavigationMotionProbe.record("onSelected source=tab_click target=$index")
                             dockRequest = null; settling = false; currentOnSelected(index)
@@ -233,11 +239,10 @@ internal class NavigationPress(private val canBegin: () -> Boolean = { true }) {
                             dockRequest = null; settling = false; currentOnSelected(index); true
                         }
                     })
-                    .heightIn(min = 64.dp).padding(horizontal = 4.dp, vertical = 8.dp)
-                    .graphicsLayer {
-                        val scale = 1f + .12f * press.value
-                        scaleX = scale; scaleY = scale
-                    }, horizontalAlignment = Alignment.CenterHorizontally,
+                    .heightIn(min = 64.dp)
+                    .then(if (!tinted && pressedTabs[index]) Modifier.background(
+                        AppPalette.text().copy(alpha = .06f), CircleShape) else Modifier)
+                    .padding(horizontal = 4.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically)) {
                     icon(index, color)
                     Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = color,

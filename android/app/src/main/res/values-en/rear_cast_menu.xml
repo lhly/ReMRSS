@@ -1,8 +1,11 @@
 <resources>
-    <string name="rear_cast_menu_exit">Return to main screen</string>
+    <string name="rear_cast_menu_exit">End casting</string>
     <string name="rear_cast_menu_left">Rotate left</string>
     <string name="rear_cast_menu_right">Rotate right</string>
     <string name="rear_cast_menu_failed">Rotation failed. Try again.</string>
     <string name="rear_cast_menu_full">Use full display</string>
     <string name="rear_cast_menu_avoid_camera">Avoid camera area</string>
+    <string name="rear_cast_menu_rotating">Rotating…</string>
+    <string name="rear_cast_menu_resizing">Changing display area…</string>
+    <string name="rear_cast_menu_viewport_failed">Could not change the display area. Closing the cast.</string>
 </resources>

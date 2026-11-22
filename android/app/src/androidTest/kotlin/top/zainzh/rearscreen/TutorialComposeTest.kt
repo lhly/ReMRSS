@@ -41,8 +41,7 @@ class TutorialComposeTest {
     private fun saved(): Bundle {
         val bundle = Bundle()
         compose.runOnIdle {
-            val field = TutorialActivity::class.java.getDeclaredField("list").apply { isAccessible = true }
-            val list = field.get(compose.activity) as androidx.compose.foundation.lazy.LazyListState
+            val list = compose.activity.guide.list
             bundle.putInt("tutorial_scroll_index", list.firstVisibleItemIndex)
             bundle.putInt("tutorial_scroll_offset", list.firstVisibleItemScrollOffset)
         }

@@ -71,17 +71,24 @@ internal class NavigationMotion {
     }
 
     companion object {
+        @JvmStatic
         fun parentRoute(route: Int): Int? = when (route) {
-            in 10..13 -> 0
+            in 10..SCREENSHOT_SETTINGS_ROUTE -> 0
+            DENSITY_SETTINGS_ROUTE -> 10
+            WALLPAPER_STUDIO_ROUTE -> 0
+            WALLPAPER_SHORTCUTS_ROUTE, WALLPAPER_THEMES_ROUTE, WALLPAPER_WORKS_ROUTE -> WALLPAPER_STUDIO_ROUTE
             in 20..21, 100 -> 1
-            30 -> 2
-            40 -> 3
+            MOD_DETAIL_ROUTE -> MOD_MANAGEMENT_ROUTE
+            MOD_CONFIG_ROUTE, MOD_PREVIEW_ROUTE, MOD_WALLPAPER_STUDIO_ROUTE -> MOD_DETAIL_ROUTE
+            MOD_WALLPAPER_SHORTCUTS_ROUTE, MOD_WALLPAPER_WORKS_ROUTE -> MOD_WALLPAPER_STUDIO_ROUTE
+            40, TUTORIAL_ROUTE, PERMISSION_SETTINGS_ROUTE -> 3
+            TUTORIAL_PERMISSION_ROUTE -> TUTORIAL_ROUTE
             else -> null
         }
 
-        fun pairBetween(first: Int, second: Int): NavigationRoutePair? {
-            val firstParent = parentRoute(first)
-            val secondParent = parentRoute(second)
+        fun pairBetween(first: Int, second: Int, parentOf: (Int) -> Int? = ::parentRoute): NavigationRoutePair? {
+            val firstParent = parentOf(first)
+            val secondParent = parentOf(second)
             return when {
                 firstParent != null && firstParent == second -> NavigationRoutePair(second, first)
                 secondParent != null && secondParent == first -> NavigationRoutePair(first, second)
@@ -89,7 +96,11 @@ internal class NavigationMotion {
             }
         }
 
-        fun routeForTab(route: Int): Int = parentRoute(route) ?: route.coerceIn(0, 3)
+        fun routeForTab(route: Int, parentOf: (Int) -> Int? = ::parentRoute): Int =
+            parentOf(route)?.let { routeForTab(it, parentOf) } ?: route.coerceIn(0, 3)
+
+        fun containsRoute(route: Int, ancestor: Int, parentOf: (Int) -> Int?): Boolean =
+            generateSequence(route, parentOf).any { it == ancestor }
 
         fun routeProgressForBack(originProgress: Float, backProgress: Float): Float =
             originProgress.coerceIn(0f, 1f) * (1f - backProgress.coerceIn(0f, 1f))
@@ -97,6 +108,28 @@ internal class NavigationMotion {
     fun clampProgress(progress: Float): Float = progress.coerceIn(0f, 1f)
     }
 }
+
+internal const val TUTORIAL_ROUTE = 41
+internal const val PERMISSION_SETTINGS_ROUTE = 42
+internal const val TUTORIAL_PERMISSION_ROUTE = 43
+internal const val SCREENSHOT_SETTINGS_ROUTE = 13
+internal const val DENSITY_SETTINGS_ROUTE = 14
+internal const val WALLPAPER_STUDIO_ROUTE = 50
+internal const val WALLPAPER_SHORTCUTS_ROUTE = 51
+internal const val WALLPAPER_THEMES_ROUTE = 52
+internal const val WALLPAPER_WORKS_ROUTE = 53
+internal const val MOD_MANAGEMENT_ROUTE = 60
+internal const val MOD_CONFIG_ROUTE = 61
+internal const val MOD_WALLPAPER_STUDIO_ROUTE = 62
+internal const val MOD_WALLPAPER_SHORTCUTS_ROUTE = 63
+internal const val MOD_WALLPAPER_WORKS_ROUTE = 64
+internal const val MOD_PREVIEW_ROUTE = 65
+internal const val MOD_DETAIL_ROUTE = 66
+
+internal fun isModManagementRoute(route: Int) = route in MOD_MANAGEMENT_ROUTE..MOD_DETAIL_ROUTE
+internal fun isModWallpaperRoute(route: Int) = route in MOD_WALLPAPER_STUDIO_ROUTE..MOD_WALLPAPER_WORKS_ROUTE
+
+internal fun isWallpaperRoute(route: Int): Boolean = route in WALLPAPER_STUDIO_ROUTE..WALLPAPER_WORKS_ROUTE
 
 internal fun tabProgressAt(
     x: Float,

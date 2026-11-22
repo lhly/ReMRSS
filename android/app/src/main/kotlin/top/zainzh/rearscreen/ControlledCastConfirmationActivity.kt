@@ -5,21 +5,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextButton
 import top.zainzh.rearscreen.platform.ipc.RemoteRearPlatformService
 import android.util.Log
-import top.zainzh.rearscreen.BuildConfig
 import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 
@@ -60,38 +50,22 @@ class ControlledCastConfirmationActivity : ComponentActivity() {
         }
         expiresAtElapsedRealtimeMs = details.expiresAtElapsedRealtimeMs
         miuixContent {
-            Column(
-                Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                AppCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("确认投放到背屏", fontSize = 22.sp, color = AppPalette.text())
-                        Text("透明覆盖中保留原主屏目标；确认后仍会重新核验目标与占用。", color = AppPalette.secondary())
-                    }
+            val failure = failureCode
+            if (failure != null) {
+                CastApprovalFailure("未能启动背屏投放",
+                    if (failure == "E_TICKET_STALE") "此次确认已过期，请返回后重新发起投放。"
+                    else "提交未接受：$failure") {
+                    setResult(RESULT_CANCELED)
+                    finish()
                 }
-                AppCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("目标应用：${details.applicationLabel}")
-                        Text("投放方式：${details.modeLabel}")
-                        Text("背屏区域：${details.regionLabel}")
-                        Text(if (details.replacingLabel == null) "占用：背屏当前没有受控投放" else "替换：${details.replacingLabel}", color = AppPalette.secondary())
-                    }
-                }
-                when {
-                    submitting -> Text("正在提交到背屏…", color = AppPalette.secondary())
-                    failureCode != null -> Text(
-                        if (failureCode == "E_TICKET_STALE") "此确认已过期，请返回样例重新开始。"
-                        else "提交未接受：$failureCode",
-                        color = AppPalette.destructive()
-                    )
-                }
-                if (failureCode != null) {
-                    TextButton("返回样例", onClick = { setResult(RESULT_CANCELED); finish() }, minHeight = 48.dp)
-                } else {
-                    TextButton("取消", onClick = { complete(false) }, minHeight = 48.dp, enabled = !submitting)
-                    TextButton(if (submitting) "正在提交…" else "确认并投放", onClick = { complete(true) }, minHeight = 48.dp, enabled = !submitting)
-                }
+            } else {
+                CastApprovalPane(
+                    application = details.applicationLabel, mode = details.modeLabel, region = details.regionLabel,
+                    rotationDegrees = details.rotationDegrees,
+                    occupancy = if (details.replacingLabel == null) "背屏占用：当前没有受控投放"
+                        else "替换：${details.replacingLabel}",
+                    submitting = submitting, onSecondary = { complete(false) }, onConfirm = { complete(true) },
+                )
             }
         }
         window.decorView.post {

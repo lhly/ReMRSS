@@ -3,6 +3,7 @@ package top.zainzh.rearscreen
 import android.app.KeyguardManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
@@ -12,6 +13,7 @@ import android.graphics.ImageDecoder
 import android.media.MediaMetadataRetriever
 import android.os.Bundle
 import android.os.IBinder
+import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,18 +31,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -59,12 +63,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
-import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import java.io.File
 import java.io.FileOutputStream
 import java.text.DateFormat
 import java.util.Date
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
@@ -73,29 +81,119 @@ import org.json.JSONArray
 import org.json.JSONObject
 import top.zainzh.rearscreen.platform.mods.InstalledMod
 import top.zainzh.rearscreen.platform.mods.ModPackageStore
-import top.zainzh.rearscreen.platform.mods.ModSettingsActivity
 import top.zainzh.rearscreen.AiRearWallpaperInstallations.Placement
-import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.window.WindowBottomSheet
 import top.yukonga.miuix.kmp.window.WindowDialog
 
-class AiRearWallpaperEditorActivity : ComponentActivity() {
+/** Module and external callers keep their own window but use the same child routes as Home. */
+open class AiRearWallpaperEditorActivity : ComponentActivity() {
+    private lateinit var pages: WallpaperModNavigation
+    private lateinit var motion: AppRouteMotion
+    private var route by mutableIntStateOf(WALLPAPER_STUDIO_ROUTE)
+
+    protected open fun hasEditorDevice() = AiRearWallpaperSupport.supported()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (!hasEditorDevice()) {
+            finish()
+            return
+        }
+        route = savedInstanceState?.getInt("wallpaper_route")?.takeIf {
+            isWallpaperRoute(it) || isModManagementRoute(it)
+        } ?: when {
+            savedInstanceState?.getBoolean("choosing_apps") == true ||
+                (savedInstanceState?.getInt("picking", -1) ?: -1) in 0..5 -> WALLPAPER_SHORTCUTS_ROUTE
+            savedInstanceState?.getBoolean("choosing_theme") == true -> WALLPAPER_THEMES_ROUTE
+            savedInstanceState?.getBoolean("choosing_work") == true -> WALLPAPER_WORKS_ROUTE
+            else -> WALLPAPER_STUDIO_ROUTE
+        }
+        pages = WallpaperModNavigation(this, savedInstanceState, { route }, ::navigate, ::hasEditorDevice,
+            standalone = true, entryModId = intent.getStringExtra(EXTRA_MOD_ID),
+            wallpaperState = savedInstanceState?.getBundle("native_wallpaper") ?: savedInstanceState)
+        motion = AppRouteMotion(this, route, ::parentRoute)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackStarted(backEvent: BackEventCompat) {
+                val parent = parentRoute(route) ?: return
+                if (pages.canPreviewBack()) motion.startBackPreview(route, parent, backEvent.progress)
+            }
+
+            override fun handleOnBackProgressed(backEvent: BackEventCompat) {
+                motion.updateBackPreview(backEvent.progress, android.os.SystemClock.uptimeMillis())
+            }
+
+            override fun handleOnBackCancelled() = motion.cancelBackPreview(route)
+            override fun handleOnBackPressed() {
+                if (!pages.consumeOwnedBack()) navigate(parentRoute(route) ?: 0)
+            }
+        })
+        miuixContent {
+            AppStandaloneRoutes(WALLPAPER_STUDIO_ROUTE, route, motion, pages::releaseUnusedPages) { page, active ->
+                pages.Content(page, active)
+            }
+        }
+    }
+
+    private fun parentRoute(page: Int): Int? =
+        if (page == WALLPAPER_STUDIO_ROUTE) null else pages.parentRoute(page)
+
+    private fun navigate(target: Int) {
+        if (target == 0) {
+            finish()
+            return
+        }
+        val previous = route
+        pages.prepare(target)
+        route = target
+        motion.showPage(previous, target)
+        pages.onRouteChanged(previous, target)
+        if (motion.transitionPair == null) pages.releaseUnusedPages()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        if (::pages.isInitialized) {
+            outState.putInt("wallpaper_route", route)
+            pages.save(outState)
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        if (::pages.isInitialized) pages.close()
+        super.onDestroy()
+    }
+
+    companion object {
+        private const val EXTRA_MOD_ID = "wallpaper_theme_mod_id"
+        internal fun supportsThemes() = AiRearWallpaperSupport.supported()
+        internal fun open(context: Context, modId: String? = null) =
+            Intent(context, AiRearWallpaperEditorActivity::class.java).putExtra(EXTRA_MOD_ID, modId)
+    }
+}
+
+/** Session owns drafts, privileged connection, and scroll states, not a second settings window. */
+internal class AiRearWallpaperEditor(
+    private val activity: ComponentActivity,
+    savedState: Bundle?,
+    private val entryModId: String? = null,
+    private val navigate: (Int) -> Unit,
+    imageResultKey: String = "rear_wallpaper_image",
+    private val openModManagement: (String?) -> Unit,
+) : ContextWrapper(activity) {
     private data class Slot(val id: String, val title: String, val modified: Long, val available: Boolean)
     private data class ReplaceConfirmation(val placement: Placement, val legacyTicket: String?)
     private var service by mutableStateOf<ITaskService?>(null)
     private var builtInDraft by mutableStateOf(AiRearShortcutDraft())
     private var modDraft by mutableStateOf(AiRearShortcutDraft())
-    private val entryModId get() = intent.getStringExtra(EXTRA_MOD_ID)
     private var modId by mutableStateOf<String?>(null)
     private var themes by mutableStateOf(emptyList<InstalledMod>())
     private var modTheme by mutableStateOf<AiRearModWallpaperTheme?>(null)
     private var templateBackground by mutableStateOf<Bitmap?>(null)
     private var themeSequence = 0
     private var themeLoading by mutableStateOf(false)
-    private var choosingTheme by mutableStateOf(false)
     private val shortcuts get() = if (modId != null) modDraft else builtInDraft
     private val currentThemeName get() = if (modId == null) getString(R.string.ai_rear_builtin_theme)
         else themes.firstOrNull { it.id == modId }?.name ?: modId.orEmpty()
@@ -105,8 +203,6 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
     private var selected by mutableStateOf<String?>(null)
     private var apps by mutableStateOf(emptyList<AiRearApp>())
     private var loadingApps by mutableStateOf(true)
-    private var choosingApps by mutableStateOf(false)
-    private var choosingWork by mutableStateOf(false)
     private var appearance by mutableStateOf(false)
     private var previewViewport by mutableStateOf(AiRearWallpaperArt.referenceViewport)
     private var message by mutableStateOf("")
@@ -122,10 +218,10 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
     private var sequence = 0
     private val prefs by lazy { getSharedPreferences(AiRearWallpaperBinding.PREFS, Context.MODE_PRIVATE) }
     private val wallpaperFile by lazy { File(filesDir, "ai-rear-background.jpg") }
-    private val installations by lazy { AiRearWallpaperInstallations.forApp(this) }
+    private val installations by lazy { AiRearWallpaperInstallations.forApp(activity) }
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            if (!AiRearWallpaperSupport.shellReady(this@AiRearWallpaperEditorActivity)) return
+            if (!AiRearWallpaperSupport.shellReady(activity)) return
             service = ITaskService.Stub.asInterface(binder)
             loadSlots()
         }
@@ -138,12 +234,19 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
             loading = false
         }
     }
-    private val chooseImage = registerForActivityResult(object : ActivityResultContracts.OpenDocument() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val lifecycle = object : DefaultLifecycleObserver {
+        override fun onResume(owner: LifecycleOwner) {
+            allowUnlocked = AiRearWallpaperSupport.unlockedLaunchEnabled(activity)
+            refreshThemes()
+        }
+    }
+    private val chooseImage = activity.activityResultRegistry.register(imageResultKey, object : ActivityResultContracts.OpenDocument() {
         override fun createIntent(context: Context, input: Array<String>): Intent =
             super.createIntent(context, input).putExtra(Intent.EXTRA_LOCAL_ONLY, true)
     }) { uri ->
-        if (uri == null || backgroundBusy) return@registerForActivityResult
-        lifecycleScope.launch {
+        if (uri == null || backgroundBusy) return@register
+        scope.launch {
             backgroundBusy = true
             try {
                 background = withContext(Dispatchers.IO) {
@@ -174,64 +277,63 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         } finally { staged.delete() }
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        if (!AiRearWallpaperSupport.supported()) { finish(); return }
+    private val studioScroll = savedState.listState("studio_scroll")
+    private val themeScroll = savedState.listState("theme_scroll")
+    private val workScroll = LazyGridState(savedState?.getInt("work_index") ?: 0, savedState?.getInt("work_offset") ?: 0)
+
+    init {
         builtInDraft = AiRearShortcutDraft.fromGrid(
             AiRearGrid(List(6) { prefs.getString("app_$it", null) }, prefs.getBoolean("all_apps", false)),
         )
-        modId = savedInstanceState?.takeIf { it.containsKey("theme_mod") }?.getString("theme_mod") ?: entryModId
-        selected = savedInstanceState?.getString("selected")
-        choosingTheme = savedInstanceState?.getBoolean("choosing_theme") == true
-        choosingApps = savedInstanceState?.getBoolean("choosing_apps") == true ||
-            (savedInstanceState?.getInt("picking", -1) ?: -1) in 0..5
-        choosingWork = savedInstanceState?.getBoolean("choosing_work") == true
-        appearance = savedInstanceState?.getBoolean("appearance") == true
-        lifecycleScope.launch {
+        modId = if (savedState?.containsKey("theme_mod") == true) savedState.getString("theme_mod") else entryModId
+        selected = savedState?.getString("selected")
+        appearance = savedState?.getBoolean("appearance") == true
+        scope.launch {
             val loaded = withContext(Dispatchers.IO) {
-                runCatching { AiRearAppCatalog.list(this@AiRearWallpaperEditorActivity) }
-                    .getOrDefault(emptyList()) to BitmapFactory.decodeFile(wallpaperFile.path)
+                runCatching { AiRearAppCatalog.list(activity) }.getOrDefault(emptyList()) to
+                    BitmapFactory.decodeFile(wallpaperFile.path)
             }
             apps = loaded.first
             loadingApps = false
             background = loaded.second
         }
-        if (!TaskServiceManager.isRoot(this)) TaskServiceManager.acquire(this, connection)
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (!applying && !preparing) back()
-            }
-        })
-        miuixContent {
-            AiRearArtworkScope {
-                // Keep the studio's reading position and icons when returning from a picker.
-                val studioScroll = rememberLazyListState()
-                val workScroll = rememberLazyGridState()
-                when {
-                    choosingApps && (modId == null || modTheme != null) -> AiRearShortcutEditor(shortcuts, apps, loadingApps, ::back,
-                        limit = modTheme?.buttons ?: 6, allowAllApps = modTheme?.art.isNullOrEmpty(), update = ::saveShortcuts)
-                    choosingTheme -> ThemeChooser()
-                    choosingWork -> Works(workScroll)
-                    else -> Editor(studioScroll)
+        if (!TaskServiceManager.isRoot(activity)) TaskServiceManager.acquire(activity, connection)
+        activity.lifecycle.addObserver(lifecycle)
+    }
+
+    val canNavigateBack get() = !applying && !preparing && !appearance && confirmReplace == null
+
+    fun consumeBack(): Boolean = when {
+        applying || preparing -> true
+        confirmReplace != null -> { confirmReplace = null; true }
+        appearance -> { appearance = false; true }
+        else -> false
+    }
+
+    fun back(route: Int) {
+        if (!consumeBack()) navigate(checkNotNull(NavigationMotion.parentRoute(route)))
+    }
+
+    @Composable
+    fun Content(route: Int, active: Boolean) {
+        AiRearArtworkScope {
+            when (route) {
+                WALLPAPER_STUDIO_ROUTE -> Editor(studioScroll, active)
+                WALLPAPER_SHORTCUTS_ROUTE -> {
+                    if (modId == null || modTheme != null) {
+                        AiRearShortcutEditor(shortcuts, apps, loadingApps, { back(route) },
+                            limit = modTheme?.buttons ?: 6, allowAllApps = modTheme?.art.isNullOrEmpty(),
+                            update = ::saveShortcuts)
+                    } else {
+                        AppPageContent(getString(R.string.ai_rear_shortcuts_title), { back(route) },
+                            "ai_rear_shortcuts_back") { modifier, _ ->
+                            Text(getString(R.string.ai_rear_loading), modifier.padding(20.dp), color = AppPalette.secondary())
+                        }
+                    }
                 }
+                WALLPAPER_THEMES_ROUTE -> ThemeChooser()
+                WALLPAPER_WORKS_ROUTE -> Works(workScroll)
             }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        allowUnlocked = AiRearWallpaperSupport.unlockedLaunchEnabled(this)
-        refreshThemes()
-    }
-
-    private fun back() {
-        if (applying || preparing) return
-        when {
-            appearance -> appearance = false
-            choosingApps -> choosingApps = false
-            choosingTheme -> choosingTheme = false
-            choosingWork -> choosingWork = false
-            else -> finish()
         }
     }
 
@@ -241,10 +343,10 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
             .onFailure { message = getString(R.string.ai_rear_write_error) }
     }
 
-    private fun refreshThemes() {
-        lifecycleScope.launch {
+    fun refreshThemes() {
+        scope.launch {
             refreshPlacements()
-            withContext(Dispatchers.IO) { runCatching { ModPackageStore.list(this@AiRearWallpaperEditorActivity) } }
+            withContext(Dispatchers.IO) { runCatching { ModPackageStore.list(activity) } }
                 .onSuccess { records -> themes = records.filter { it.wallpaperTheme != null } }
                 .onFailure { message = getString(R.string.ai_rear_theme_unreadable) }
             if (modId != null && selected == null) {
@@ -257,21 +359,26 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
     private fun selectTheme(id: String?, workId: String? = null) {
         modId = id
         selected = workId ?: activePlacements.firstOrNull { it.modId == id }?.id
-        choosingTheme = false
+        navigate(WALLPAPER_STUDIO_ROUTE)
         message = ""
         loadThemeArtwork()
     }
 
+    private var artworkThemeId: String? = null
+
     private fun loadThemeArtwork() {
         val request = ++themeSequence
         val id = modId
-        modTheme = null
-        templateBackground = null
+        if (artworkThemeId != id) {
+            modTheme = null
+            templateBackground = null
+            artworkThemeId = id
+        }
         themeLoading = id != null
         if (id == null) return
-        lifecycleScope.launch {
+        scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching {
-                val art = ModPackageStore.wallpaperArtwork(this@AiRearWallpaperEditorActivity, id)
+                val art = ModPackageStore.wallpaperArtwork(activity, id)
                 val image = art?.takeIf { it.art.isEmpty() }?.let {
                     checkNotNull(BitmapFactory.decodeByteArray(it.backdrop, 0, it.backdrop.size))
                 }
@@ -283,23 +390,29 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                 modTheme = art
                 templateBackground = image
                 if (art != null) readModDraft(id, art)
-            }.onFailure { message = getString(R.string.ai_rear_theme_unreadable) }
+            }.onFailure {
+                modTheme = null
+                templateBackground = null
+                message = getString(R.string.ai_rear_theme_unreadable)
+            }
         }
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
+    fun save(outState: Bundle) {
         outState.putString("selected", selected)
         outState.putString("theme_mod", modId)
-        outState.putBoolean("choosing_apps", choosingApps)
-        outState.putBoolean("choosing_theme", choosingTheme)
-        outState.putBoolean("choosing_work", choosingWork)
         outState.putBoolean("appearance", appearance)
-        super.onSaveInstanceState(outState)
+        outState.saveList("studio_scroll", studioScroll)
+        outState.saveList("theme_scroll", themeScroll)
+        outState.putInt("work_index", workScroll.firstVisibleItemIndex)
+        outState.putInt("work_offset", workScroll.firstVisibleItemScrollOffset)
     }
 
-    override fun onDestroy() {
+    fun close() {
+        activity.lifecycle.removeObserver(lifecycle)
+        chooseImage.unregister()
+        scope.cancel()
         TaskServiceManager.release(connection)
-        super.onDestroy()
     }
 
     private fun modDraftKey(id: String, work: String? = selected) =
@@ -340,7 +453,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         val request = ++sequence
         loading = true
         message = ""
-        lifecycleScope.launch {
+        scope.launch {
             val (result, area) = withContext(Dispatchers.IO) {
                 val area = runCatching {
                     AiRearWallpaperArchive.Viewport.fromCast(RearCastGeometry.decode(remote.rearCastViewport))
@@ -403,7 +516,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         val placement = selected?.let { Placement(it, modId) } ?: return
         checkingWork = true
         message = ""
-        lifecycleScope.launch {
+        scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     runCatching {
@@ -453,7 +566,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         if (!restore && !targetsValid { options[it]?.canCast == true }) return
         applying = true
         message = ""
-        lifecycleScope.launch {
+        scope.launch {
             val (result, keepStandby) = withContext(Dispatchers.IO) {
                 synchronized(AiRearWallpaperInstallations.writeLock) {
                     val result = runCatching {
@@ -468,10 +581,10 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                         } else {
                             check(installations.canInstall(placement)) { "WALLPAPER_USED_BY_OTHER_THEME" }
                             checkLegacyOwner(legacyTicket)
-                            if (owner != null) check(ModPackageStore.usableWallpaperTheme(this@AiRearWallpaperEditorActivity, owner) != null)
+                            if (owner != null) check(ModPackageStore.usableWallpaperTheme(activity, owner) != null)
                             val binding = java.util.UUID.randomUUID().toString().replace("-", "")
                             check(targetsValid {
-                                AiRearAppCatalog.isCastTarget(this@AiRearWallpaperEditorActivity,
+                                AiRearAppCatalog.isCastTarget(activity,
                                     ComponentName.unflattenFromString(it), packageName)
                             })
                             val viewport = AiRearWallpaperArchive.Viewport.fromCast(
@@ -509,7 +622,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                         }
                     }
                     result to runCatching {
-                        installations.hasLiveBinding { ModPackageStore.usableWallpaperTheme(this@AiRearWallpaperEditorActivity, it) != null }
+                        installations.hasLiveBinding { ModPackageStore.usableWallpaperTheme(activity, it) != null }
                     }.getOrDefault(true)
                 }
             }
@@ -542,7 +655,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         }
         preparing = true
         message = ""
-        lifecycleScope.launch {
+        scope.launch {
             try {
                 val launched = withContext(Dispatchers.IO) {
                     runCatching { prepareHost(remote, placement) }.getOrDefault(false)
@@ -564,7 +677,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
             return false
         if (placement.modId != null && ModPackageStore.usableWallpaperTheme(this, placement.modId) == null) return false
         val lock = getSystemService(KeyguardManager::class.java)
-        fun current(): Boolean = !lock.isDeviceLocked && !isFinishing && !isDestroyed &&
+        fun current(): Boolean = !lock.isDeviceLocked && !activity.isFinishing && !activity.isDestroyed &&
             TaskServiceManager.isConnectedServiceCurrent(remote) && AiRearWallpaperSupport.shellReady(this) &&
             installations.binding(placement) == binding && installations.isActive(placement)
         if (!current()) return false
@@ -609,7 +722,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun Editor(scroll: androidx.compose.foundation.lazy.LazyListState) {
+    private fun Editor(scroll: LazyListState, activeRoute: Boolean) {
         val standby by RearWallpaperStandby.readiness().collectAsState()
         val appLookup = remember(apps) { apps.associateBy { it.component } }
         val active = activePlacement
@@ -622,8 +735,8 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
             service != null, active != null, standby == RearWallpaperStandby.Readiness.PREPARED,
             applying, preparing || standby == RearWallpaperStandby.Readiness.PREPARING,
             backgroundBusy, allowUnlocked, message, isModTheme = id != null, modTheme = modTheme,
-            loadingTheme = themeLoading, checkingWork = checkingWork)
-        AiRearWallpaperStudio(model, scroll, ::back, { choosingApps = true },
+            loadingTheme = themeLoading, checkingWork = checkingWork, virtualCasting = rememberVirtualRearCastMode())
+        AiRearWallpaperStudio(model, scroll, { back(WALLPAPER_STUDIO_ROUTE) }, { navigate(WALLPAPER_SHORTCUTS_ROUTE) },
             {
                 AiRearWallpaperSupport.setUnlockedLaunchEnabled(this, it)
                 allowUnlocked = it
@@ -632,7 +745,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                 when (action) {
                     AiRearStudioAction.APPEARANCE -> if (id == null) appearance = true
                     AiRearStudioAction.PICK_WORK -> {
-                        choosingWork = true
+                        navigate(WALLPAPER_WORKS_ROUTE)
                         if (slots == null && !loading) loadSlots()
                     }
                     AiRearStudioAction.REPLACE -> requestReplacement()
@@ -646,37 +759,33 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                     AppRow(getString(R.string.ai_rear_theme), currentThemeName,
                         Modifier.testTag("ai_rear_theme_selector"),
                         enabled = !model.busy,
-                        action = if (entryModId == null) ({ choosingTheme = true }) else null)
+                        action = if (entryModId == null) ({ navigate(WALLPAPER_THEMES_ROUTE) }) else null)
                 }
             },
             thumbnail = { modifier -> WorkThumbnail(work, modifier) })
+        if (!activeRoute) return
         if (id == null) AppearanceSheet()
         val replacement = confirmReplace
-        val legacy = replacement?.legacyTicket != null
-        WindowDialog(show = replacement != null,
-            title = getString(if (legacy) R.string.ai_rear_legacy_title else R.string.ai_rear_backup_replace),
-            onDismissRequest = { confirmReplace = null }) {
-            Text(getString(if (legacy) R.string.ai_rear_legacy_confirm else R.string.ai_rear_grid_confirm),
-                color = AppPalette.text())
-            Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(getString(android.R.string.cancel), { confirmReplace = null }, modifier = Modifier.weight(1f),
-                    minHeight = 48.dp)
-                TextButton(getString(if (legacy) R.string.ai_rear_legacy_continue else android.R.string.ok), {
-                    if (replacement != null && replacement == confirmReplace) {
-                        confirmReplace = null
-                        changeWallpaper(false, replacement)
-                    }
-                }, modifier = Modifier.weight(1f), minHeight = 48.dp, colors = ButtonDefaults.textButtonColorsPrimary())
-            }
-        }
+        AiRearWallpaperReplaceDialog(
+            show = replacement != null,
+            legacy = replacement?.legacyTicket != null,
+            onCancel = { confirmReplace = null },
+            onConfirm = {
+                if (replacement != null && replacement == confirmReplace) {
+                    confirmReplace = null
+                    changeWallpaper(false, replacement)
+                }
+            },
+        )
     }
 
     @Composable
     private fun ThemeChooser() {
-        PageFrame(getString(R.string.ai_rear_theme_works), ::back, "ai_rear_theme_back") { modifier, inset ->
-            Column(modifier.padding(horizontal = 20.dp).verticalScroll(rememberScrollState())
-                .padding(top = inset + 12.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (activePlacements.isNotEmpty()) AppCard {
+        AppPageContent(getString(R.string.ai_rear_theme_works), { back(WALLPAPER_THEMES_ROUTE) },
+            "ai_rear_theme_back", scrollState = themeScroll) { modifier, inset ->
+            LazyColumn(modifier, state = themeScroll, contentPadding = PaddingValues(20.dp, inset + 12.dp, 20.dp, 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (activePlacements.isNotEmpty()) item("configured") { AppCard {
                     AppSection(getString(R.string.ai_rear_configured_works))
                     activePlacements.forEach { placement ->
                         val work = slots?.firstOrNull { it.id == placement.id }
@@ -691,8 +800,8 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                                 WorkThumbnail(work, Modifier.size(width = 56.dp, height = 38.dp).clip(RoundedCornerShape(8.dp)))
                             }))
                     }
-                }
-                AppCard {
+                } }
+                item("themes") { AppCard {
                     AppSection(getString(R.string.ai_rear_available_themes))
                     AppRow(getString(R.string.ai_rear_builtin_theme), null, Modifier.testTag("ai_rear_theme_builtin"),
                         action = { selectTheme(null) })
@@ -701,14 +810,14 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                         AppRow(theme.name, if (enabled) theme.authorName else getString(R.string.ai_rear_theme_enable_in_modules),
                             Modifier.testTag("ai_rear_theme_${theme.id}"),
                             action = if (enabled) ({ selectTheme(theme.id) }) else ({
-                                startActivity(ModSettingsActivity.open(this@AiRearWallpaperEditorActivity, theme.id))
+                                openModManagement(theme.id)
                             }))
                     }
                     AppDivider()
                     AppRow(getString(R.string.ai_rear_install_in_modules), null, action = {
-                        startActivity(ModSettingsActivity.open(this@AiRearWallpaperEditorActivity))
+                        openModManagement(null)
                     })
-                }
+                } }
             }
         }
     }
@@ -738,13 +847,14 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
 
     @Composable
     private fun Works(scroll: LazyGridState) {
-        PageFrame(getString(R.string.ai_rear_pick_wallpaper), ::back, "ai_rear_work_back") { modifier, inset ->
+        AppPageContent(getString(R.string.ai_rear_pick_wallpaper), { back(WALLPAPER_WORKS_ROUTE) },
+            "ai_rear_work_back", gridState = scroll) { modifier, inset ->
             LazyVerticalGrid(GridCells.Adaptive(140.dp), modifier.testTag("ai_rear_works"), state = scroll,
                 contentPadding = PaddingValues(20.dp, inset + 10.dp, 20.dp, 24.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(getString(R.string.ai_rear_pick_hint), fontSize = 14.sp, color = AppPalette.secondary())
+                        if (service != null) Text(getString(R.string.ai_rear_pick_hint), fontSize = 14.sp, color = AppPalette.secondary())
                         val detail = when {
                             service == null -> getString(R.string.ai_rear_connect)
                             loading -> getString(R.string.ai_rear_loading)
@@ -767,7 +877,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                         val art = modTheme
                         if (owner != null && art != null) readModDraft(owner, art, previous)
                         message = ""
-                        choosingWork = false
+                        navigate(WALLPAPER_STUDIO_ROUTE)
                     }) {
                         val label = workTitle(slot)
                         WorkThumbnail(slot, Modifier.fillMaxWidth().aspectRatio(1.65f)
@@ -812,12 +922,28 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
         }
     }
 
-    companion object {
-        private const val EXTRA_MOD_ID = "wallpaper_theme_mod_id"
-        internal fun supportsThemes() = AiRearWallpaperSupport.supported()
-        internal fun open(context: Context, modId: String? = null) =
-            Intent(context, AiRearWallpaperEditorActivity::class.java).putExtra(EXTRA_MOD_ID, modId)
+    private companion object {
+        val thumbnailWorker = Dispatchers.IO.limitedParallelism(2)
+    }
+}
 
-        private val thumbnailWorker = Dispatchers.IO.limitedParallelism(2)
+@Composable
+internal fun AiRearWallpaperReplaceDialog(show: Boolean, legacy: Boolean, onCancel: () -> Unit, onConfirm: () -> Unit) {
+    WindowDialog(
+        show = show,
+        title = stringResource(if (legacy) R.string.ai_rear_legacy_title else R.string.ai_rear_backup_replace),
+        onDismissRequest = onCancel,
+    ) {
+        AppDialogDecisionContent(footer = {
+            AppActionPair(
+                stringResource(android.R.string.cancel), onCancel,
+                stringResource(if (legacy) R.string.ai_rear_legacy_continue else android.R.string.ok), onConfirm,
+                secondaryModifier = Modifier.testTag("wallpaper_replace_cancel"),
+                primaryModifier = Modifier.testTag("wallpaper_replace_confirm"),
+            )
+        }) {
+            Text(stringResource(if (legacy) R.string.ai_rear_legacy_confirm else R.string.ai_rear_grid_confirm),
+                color = AppPalette.text())
+        }
     }
 }

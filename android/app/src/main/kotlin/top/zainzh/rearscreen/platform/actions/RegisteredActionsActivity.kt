@@ -5,41 +5,46 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.zainzh.rearscreen.AppCard
+import top.zainzh.rearscreen.AppActionPair
 import top.zainzh.rearscreen.AppPalette
 import top.zainzh.rearscreen.AppRow
-import top.zainzh.rearscreen.AppPageHeader
+import top.zainzh.rearscreen.AppPageContent
+import top.zainzh.rearscreen.AppRouteMotion
+import top.zainzh.rearscreen.AppStandaloneRoutes
+import top.zainzh.rearscreen.listState
+import top.zainzh.rearscreen.saveList
 import top.zainzh.rearscreen.R
 import top.zainzh.rearscreen.miuixContent
 import top.zainzh.rearscreen.platform.SessionOwner
@@ -48,11 +53,15 @@ import top.zainzh.rearscreen.platform.SessionPrincipal
 /** Private host route. Its caller must pass the owner already resolved by Core/Mod host. */
 class RegisteredActionsActivity : ComponentActivity() {
     private var owner: SessionOwner? = null
-    private var launcherOnly=false
+    private var launcherOnly = false
     private var selectionMode by mutableStateOf(false)
     private var actions by mutableStateOf<List<RegisteredActionSummary>>(emptyList())
     private var shortcutProviders by mutableStateOf<List<ShortcutProviderChoice>>(emptyList())
-    private var showProviderPicker by mutableStateOf(false)
+    private var route by mutableIntStateOf(ACTION_LIST)
+    private lateinit var motion: AppRouteMotion
+    private lateinit var actionList: LazyListState
+    private lateinit var providerList: LazyListState
+    private var providerQuery: Job? = null
     private var feedback by mutableStateOf("")
     private var working by mutableStateOf(false)
 
@@ -67,140 +76,200 @@ class RegisteredActionsActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         owner = decodeOwner(intent)
         selectionMode = intent.getBooleanExtra(EXTRA_SELECT_ACTION, false)
-        launcherOnly=intent.getBooleanExtra("launcher_only",false)
+        launcherOnly = intent.getBooleanExtra("launcher_only", false)
         if (owner == null) {
             finish()
             return
         }
-        reload()
-        miuixContent {
-            val currentOwner = owner
-            val actionListState = rememberLazyListState()
-            LaunchedEffect(showProviderPicker, feedback) {
-                if (feedback.isNotBlank()) actionListState.scrollToItem(0)
+        route = if (!launcherOnly && savedInstanceState?.getBoolean("show_provider_list") == true)
+            PROVIDER_LIST else ACTION_LIST
+        feedback = savedInstanceState?.getString("action_feedback").orEmpty()
+        actionList = savedInstanceState.listState("action_list")
+        providerList = savedInstanceState.listState("provider_list")
+        motion = AppRouteMotion(this, route) { if (it == PROVIDER_LIST) ACTION_LIST else null }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackStarted(event: BackEventCompat) {
+                if (route == PROVIDER_LIST) motion.startBackPreview(route, ACTION_LIST, event.progress)
             }
-            Box(Modifier.fillMaxSize().background(AppPalette.background()).safeDrawingPadding().imePadding()) {
-                Column(Modifier.fillMaxSize()) {
-                    Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), contentAlignment = Alignment.TopCenter) {
-                        AppPageHeader(stringResource(R.string.registered_actions_title), ::finish, "registered_actions_back", Modifier.widthIn(max = 680.dp))
-                    }
-                LazyColumn(
-                    Modifier.widthIn(max = 680.dp).fillMaxSize().align(Alignment.CenterHorizontally).padding(horizontal = 20.dp),
-                    state = actionListState,
-                    contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    item(key = "registered_actions_controls") {
-                        AppCard {
-                            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(selectionIntro(), color = AppPalette.secondary())
-                                TextButton(
-                                    stringResource(R.string.registered_actions_add_app),
-                                    { if (!working) chooseApp() },
-                                    Modifier.fillMaxWidth(), minHeight = 48.dp, enabled = !working && !showProviderPicker
-                                )
-                                if(!launcherOnly) TextButton(
-                                    if (working) stringResource(R.string.registered_actions_working)
-                                    else stringResource(R.string.registered_actions_add),
-                                    { if (!working) chooseShortcutProvider() },
-                                    Modifier.fillMaxWidth(), minHeight = 48.dp, enabled = !working && !showProviderPicker
-                                )
+
+            override fun handleOnBackProgressed(event: BackEventCompat) {
+                motion.updateBackPreview(event.progress, android.os.SystemClock.uptimeMillis())
+            }
+
+            override fun handleOnBackCancelled() = motion.cancelBackPreview(route)
+            override fun handleOnBackPressed() = back()
+        })
+        reload()
+        if (route == PROVIDER_LIST) chooseShortcutProvider(restoring = true)
+        miuixContent {
+            AppStandaloneRoutes(ACTION_LIST, route, motion, onPopSettled = {
+                shortcutProviders = emptyList()
+            }) { page, _ ->
+                when (page) {
+                    ACTION_LIST -> ActionList()
+                    PROVIDER_LIST -> ProviderList()
+                }
+            }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        if (::motion.isInitialized) {
+            outState.putBoolean("show_provider_list", route == PROVIDER_LIST)
+            outState.putString("action_feedback", feedback)
+            outState.saveList("action_list", actionList)
+            outState.saveList("provider_list", providerList)
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun back() {
+        if (route == PROVIDER_LIST) {
+            if (providerQuery != null) {
+                providerQuery?.cancel()
+                providerQuery = null
+                working = false
+            }
+            navigate(ACTION_LIST)
+        } else finish()
+    }
+
+    private fun navigate(target: Int) {
+        val previous = route
+        if (previous == target) return
+        route = target
+        motion.showPage(previous, target)
+    }
+
+    @Composable
+    private fun ActionList() {
+        AppPageContent(stringResource(R.string.registered_actions_title), ::back, "registered_actions_back",
+            scrollState = actionList) { modifier, inset ->
+            LazyColumn(modifier.testTag("registered_actions_list"), state = actionList,
+                contentPadding = PaddingValues(20.dp, inset + 12.dp, 20.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                item(key = "registered_actions_controls") {
+                    AppCard {
+                        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(selectionIntro(), color = AppPalette.secondary())
+                            val canAdd = !working
+                            val addApp = stringResource(R.string.registered_actions_add_app)
+                            if (launcherOnly) {
+                                TextButton(addApp, { if (canAdd) chooseApp() },
+                                    Modifier.fillMaxWidth(), minHeight = 48.dp, enabled = canAdd,
+                                    colors = ButtonDefaults.textButtonColorsPrimary())
+                            } else {
+                                AppActionPair(addApp, { if (canAdd) chooseApp() },
+                                    stringResource(if (working) R.string.registered_actions_working else R.string.registered_actions_add),
+                                    { if (canAdd) chooseShortcutProvider() }, secondaryEnabled = canAdd,
+                                    primaryEnabled = canAdd, emphasizePrimary = false)
                             }
                         }
                     }
-                    if (showProviderPicker) {
-                        item(key = "registered_actions_provider_title") {
-                            AppCard {
-                                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text(stringResource(R.string.registered_actions_picker_title), color = AppPalette.text())
-                                    TextButton(
-                                        stringResource(R.string.registered_actions_provider_cancel),
-                                        { showProviderPicker = false; shortcutProviders = emptyList() },
-                                        Modifier.fillMaxWidth(), minHeight = 48.dp
-                                    )
-                                }
-                            }
-                        }
-                        items(shortcutProviders, key = { it.component.flattenToString() }) { provider ->
-                            AppCard {
-                                AppRow(provider.label, provider.packageName, action = { launchShortcutProvider(provider) })
-                            }
-                        }
-                    } else {
-                        if (feedback.isNotBlank()) item(key = "registered_actions_feedback") {
-                            AppCard { Text(feedback, Modifier.padding(18.dp), color = AppPalette.secondary()) }
-                        }
-                        if (actions.isEmpty()) item(key = "registered_actions_empty") {
-                            AppCard { AppRow(stringResource(R.string.registered_actions_empty), null) }
-                        }
-                        items(actions, key = { it.ref.id }) { action ->
-                            AppCard {
-                                Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(action.label, Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
-                                    Text(
-                                        if (action.available) action.targetLabel else stringResource(R.string.registered_action_target_unavailable),
-                                        Modifier.padding(horizontal = 18.dp), fontSize = 13.sp,
-                                        color = if (action.available) AppPalette.secondary() else AppPalette.destructive()
-                                    )
-                                    if (selectionMode) TextButton(
-                                        stringResource(R.string.registered_action_select),
-                                        { select(action.ref) },
-                                        Modifier.fillMaxWidth().padding(horizontal = 10.dp), minHeight = 48.dp, enabled = action.available
-                                    )
-                                    TextButton(
-                                        stringResource(R.string.registered_action_revoke),
-                                        { currentOwner?.let { revoke(it, action.ref) } },
-                                        Modifier.fillMaxWidth().padding(horizontal = 10.dp), minHeight = 48.dp
-                                    )
-                                }
-                            }
+                }
+                if (feedback.isNotBlank()) item(key = "registered_actions_feedback") {
+                    AppCard { Text(feedback, Modifier.padding(18.dp), color = AppPalette.secondary()) }
+                }
+                if (actions.isEmpty()) item(key = "registered_actions_empty") {
+                    AppCard { AppRow(stringResource(R.string.registered_actions_empty), null) }
+                }
+                items(actions, key = { it.ref.id }) { action ->
+                    AppCard {
+                        Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(action.label, Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+                            Text(
+                                if (action.available) action.targetLabel else stringResource(R.string.registered_action_target_unavailable),
+                                Modifier.padding(horizontal = 18.dp), fontSize = 13.sp,
+                                color = if (action.available) AppPalette.secondary() else AppPalette.destructive()
+                            )
+                            if (selectionMode) TextButton(
+                                stringResource(R.string.registered_action_select),
+                                { select(action.ref) },
+                                Modifier.fillMaxWidth().padding(horizontal = 10.dp), minHeight = 48.dp, enabled = action.available
+                            )
+                            if (!selectionMode) TextButton(
+                                stringResource(R.string.registered_action_revoke),
+                                { owner?.let { revoke(it, action.ref) } },
+                                Modifier.fillMaxWidth().padding(horizontal = 10.dp), minHeight = 48.dp
+                            )
                         }
                     }
                 }
             }
         }
     }
+
+    @Composable
+    private fun ProviderList() {
+        val collisions = remember(shortcutProviders) {
+            shortcutProviders.groupingBy { it.label.lowercase(java.util.Locale.ROOT) to it.packageName }.eachCount()
+        }
+        AppPageContent(stringResource(R.string.registered_actions_picker_title), ::back,
+            "registered_actions_provider_back", scrollState = providerList) { modifier, inset ->
+            if (shortcutProviders.isEmpty()) {
+                Text(stringResource(R.string.registered_actions_working), modifier.padding(20.dp),
+                    color = AppPalette.secondary())
+            } else LazyColumn(modifier.testTag("registered_actions_provider_list"), state = providerList,
+                contentPadding = PaddingValues(20.dp, inset + 12.dp, 20.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(shortcutProviders, key = { it.component.flattenToString() }) { provider ->
+                    AppCard {
+                        val key = provider.label.lowercase(java.util.Locale.ROOT) to provider.packageName
+                        val detail = if ((collisions[key] ?: 0) > 1) {
+                            "${provider.packageName} · ${provider.component.flattenToShortString().substringAfter('/')}"
+                        } else provider.packageName
+                        AppRow(provider.label, detail,
+                            modifier = Modifier.testTag("registered_provider_${provider.component.flattenToString()}"),
+                            action = { launchShortcutProvider(provider) })
+                    }
+                }
+            }
+        }
     }
 
-    private fun chooseShortcutProvider() {
+    private fun chooseShortcutProvider(restoring: Boolean = false) {
         if (working) return
         working = true
         lastProviderUiProbe = ShortcutProviderUiProbe("querying", null, null, emptyList())
-        lifecycleScope.launch {
+        providerQuery = lifecycleScope.launch {
             val query = withContext(Dispatchers.IO) { queryShortcutProviders(packageManager) }
+            providerQuery = null
             working = false
             when {
                 query == null -> {
                     lastProviderUiProbe = ShortcutProviderUiProbe("query_failed", null, null, emptyList())
-                    feedback = getString(R.string.registered_actions_no_provider)
+                    showFeedback(getString(R.string.registered_actions_no_provider))
                 }
                 query.providers.size > MAX_SHORTCUT_PROVIDERS -> {
                     lastProviderUiProbe = query.toUiProbe("limit")
-                    feedback = getString(R.string.registered_actions_provider_limit)
+                    showFeedback(getString(R.string.registered_actions_provider_limit))
                 }
                 query.providers.isEmpty() -> {
                     lastProviderUiProbe = query.toUiProbe("empty")
-                    feedback = getString(R.string.registered_actions_no_provider)
+                    showFeedback(getString(R.string.registered_actions_no_provider))
                 }
                 else -> {
                     shortcutProviders = query.providers
-                    showProviderPicker = true
+                    if (!restoring) providerList.requestScrollToItem(0)
+                    navigate(PROVIDER_LIST)
                     lastProviderUiProbe = query.toUiProbe("list_shown")
                 }
             }
+            if (restoring && shortcutProviders.isEmpty()) navigate(ACTION_LIST)
         }
     }
 
     private fun launchShortcutProvider(provider: ShortcutProviderChoice) {
-        showProviderPicker = false
+        if (route != PROVIDER_LIST || working) return
         working = true
+        navigate(ACTION_LIST)
         lastProviderUiProbe = lastProviderUiProbe?.copy(phase = "launching:${provider.component.flattenToString()}")
         val request = Intent(Intent.ACTION_CREATE_SHORTCUT).setComponent(provider.component)
         runCatching { shortcutProvider.launch(request) }
             .onFailure {
                 working = false
                 lastProviderUiProbe = lastProviderUiProbe?.copy(phase = "launch_rejected:${provider.component.flattenToString()}")
-                feedback = getString(R.string.registered_actions_no_provider)
+                showFeedback(getString(R.string.registered_actions_no_provider))
             }
     }
 
@@ -208,7 +277,7 @@ class RegisteredActionsActivity : ComponentActivity() {
         val launcherFilter = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val picker = Intent(Intent.ACTION_PICK_ACTIVITY).putExtra(Intent.EXTRA_INTENT, launcherFilter)
         runCatching { launcherPicker.launch(picker) }
-            .onFailure { feedback = getString(R.string.registered_actions_no_app_picker) }
+            .onFailure { showFeedback(getString(R.string.registered_actions_no_app_picker)) }
     }
 
     private fun completeSelection(
@@ -237,11 +306,11 @@ class RegisteredActionsActivity : ComponentActivity() {
                 }
             }
             working = false
-            feedback = when (registered) {
+            showFeedback(when (registered) {
                 is ActionRegistrationResult.Registered -> getString(R.string.registered_action_saved)
                 ActionRegistrationResult.UserCancelled -> getString(R.string.registered_action_cancelled)
                 is ActionRegistrationResult.Rejected -> actionErrorText(registered.error)
-            }
+            })
             if (source == "shortcut-provider") {
                 lastProviderUiProbe = lastProviderUiProbe?.copy(phase = when (registered) {
                     is ActionRegistrationResult.Registered -> "result_registered:${registered.ref.id}:${registered.ref.version};$providerResultEvidence"
@@ -251,6 +320,11 @@ class RegisteredActionsActivity : ComponentActivity() {
             }
             reload()
         }
+    }
+
+    private fun showFeedback(message: String) {
+        feedback = message
+        actionList.requestScrollToItem(0)
     }
 
     private fun reload() {
@@ -272,7 +346,7 @@ class RegisteredActionsActivity : ComponentActivity() {
         lifecycleScope.launch {
             val revoked = withContext(Dispatchers.IO) { PlatformRegisteredActionRegistry.get(applicationContext).revoke(currentOwner, ref) }
             working = false
-            feedback = getString(if (revoked) R.string.registered_action_revoked else R.string.registered_action_missing)
+            showFeedback(getString(if (revoked) R.string.registered_action_revoked else R.string.registered_action_missing))
             reload()
         }
     }
@@ -303,6 +377,8 @@ class RegisteredActionsActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val ACTION_LIST = 0
+        private const val PROVIDER_LIST = 1
         internal const val MAX_SHORTCUT_PROVIDERS = 32
         @Volatile internal var lastProviderUiProbe: ShortcutProviderUiProbe? = null
         /** Only trusted in-process host code should call this with a Core-resolved owner. */
@@ -415,7 +491,8 @@ internal fun queryShortcutProviders(packageManager: PackageManager): ShortcutPro
     }
     val providers = eligible.distinctBy { it.component }.sortedWith(Comparator { left, right ->
         val byLabel = left.label.compareTo(right.label, ignoreCase = true)
-        if (byLabel != 0) byLabel else left.packageName.compareTo(right.packageName)
+        if (byLabel != 0) byLabel
+        else left.component.flattenToString().compareTo(right.component.flattenToString())
     })
     ShortcutProviderQuery(matches.size, eligible.size, providers)
 }.getOrNull()

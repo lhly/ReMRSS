@@ -28,7 +28,7 @@ public class RearScreenRecordTileService extends TileService {
     @Override
     public void onStartListening() {
         super.onStartListening();
-        updateTile(ScreenRecordService.isRunning());
+        updateTile();
     }
     
     @Override
@@ -37,26 +37,23 @@ public class RearScreenRecordTileService extends TileService {
         
         unlockAndRun(() -> {
             Intent intent = new Intent(this, ScreenRecordService.class);
-            // Stopping an existing recording must not depend on opening a new overlay.
-            if (ScreenRecordService.isRunning()) {
-                stopService(intent);
-                updateTile(false);
-                return;
-            }
+            // An existing overlay owns the save and close sequence.
+            if (ScreenRecordService.closeFromTile()) return;
             if (TilePermissionPrompt.needsConnection(this)) return;
             if (!Settings.canDrawOverlays(this)) {
                 TilePermissionPrompt.openOverlaySettings(this);
                 return;
             }
             startForegroundService(intent);
-            updateTile(true);
         });
     }
 
-    private void updateTile(boolean running) {
+    private void updateTile() {
         Tile tile = getQsTile();
         if (tile != null) {
-            tile.setState(running ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE);
+            RecordingPhase phase = ScreenRecordService.currentPhase();
+            tile.setState(phase != null ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE);
+            tile.setSubtitle(phase == null ? null : getString(ScreenRecordService.phaseLabel(phase)));
             tile.updateTile();
         }
     }

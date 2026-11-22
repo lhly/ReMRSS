@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_preferences_title">App preferences</string>
+    <string name="recents_hide_title">Hide from Recents</string>
+    <string name="recents_visibility_summary">Only controls the main ReMRSS card. Background settings stay the same.</string>
+    <string name="recents_update_unavailable">Could not change Recents visibility. Open ReMRSS from the home screen and try again.</string>
+</resources>

@@ -25,12 +25,7 @@ class PermissionComposeTest {
     }
     private fun saved(): Bundle {
         val bundle = Bundle()
-        compose.runOnIdle {
-            val field = PermissionChecksActivity::class.java.getDeclaredField("list").apply { isAccessible = true }
-            val state = field.get(compose.activity) as androidx.compose.foundation.lazy.LazyListState
-            bundle.putInt("permissions_scroll_index", state.firstVisibleItemIndex)
-            bundle.putInt("permissions_scroll_offset", state.firstVisibleItemScrollOffset)
-        }
+        compose.runOnIdle { compose.activity.page.save(bundle) }
         return bundle
     }
     @Test fun recreationKeepsIndependentReadingPosition() {

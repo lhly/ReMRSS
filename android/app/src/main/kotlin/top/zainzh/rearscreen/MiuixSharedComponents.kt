@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -28,24 +29,29 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.*
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -108,10 +114,104 @@ internal fun ComponentActivity.miuixComposeView(content: @Composable () -> Unit)
         .background(AppPalette.secondary().copy(alpha = .12f)))
 }
 
+/** One action group: matching button geometry, with enough room for the actual labels. */
+@Composable internal fun AppActionPair(
+    secondary: String, onSecondary: () -> Unit,
+    primary: String, onPrimary: () -> Unit,
+    modifier: Modifier = Modifier,
+    secondaryModifier: Modifier = Modifier, primaryModifier: Modifier = Modifier,
+    secondaryEnabled: Boolean = true, primaryEnabled: Boolean = true,
+    destructive: Boolean = false, emphasizePrimary: Boolean = true,
+) {
+    val primaryColors = when {
+        destructive -> ButtonDefaults.textButtonColorsPrimary().copy(
+            color = AppPalette.destructive(), textColor = AppPalette.onDestructive())
+        emphasizePrimary -> ButtonDefaults.textButtonColorsPrimary()
+        else -> ButtonDefaults.textButtonColors()
+    }
+    val buttons: @Composable (Boolean, Modifier) -> Unit = { main, layout ->
+        TextButton(if (main) primary else secondary, if (main) onPrimary else onSecondary,
+            layout.then(if (main) primaryModifier else secondaryModifier),
+            enabled = if (main) primaryEnabled else secondaryEnabled, minHeight = 48.dp, cornerRadius = 16.dp,
+            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+            colors = if (main) primaryColors else ButtonDefaults.textButtonColors())
+    }
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val measure = rememberTextMeasurer()
+        val style = MiuixTheme.textStyles.main.copy(fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        val width = with(LocalDensity.current) {
+            maxOf(measure.measure(AnnotatedString(secondary), style, softWrap = false).size.width,
+                measure.measure(AnnotatedString(primary), style, softWrap = false).size.width).toDp()
+        }
+        if ((maxWidth - 8.dp) / 2 >= width + 32.dp) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                buttons(false, Modifier.weight(1f))
+                buttons(true, Modifier.weight(1f))
+            }
+        } else {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                buttons(true, Modifier.fillMaxWidth())
+                buttons(false, Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+/** Keep decisions in view on short windows and at large system font sizes. */
+@Composable internal fun AppDialogDecisionContent(
+    modifier: Modifier = Modifier,
+    footer: @Composable () -> Unit,
+    body: @Composable ColumnScope.() -> Unit,
+) {
+    val maximum = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() * .65f }
+    Column(modifier.fillMaxWidth().heightIn(max = maximum),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState())
+            .testTag("dialog_decision_scroll"),
+            verticalArrangement = Arrangement.spacedBy(12.dp), content = body)
+        footer()
+    }
+}
+
+/** A consent heading and its decision stay visible while the disclosures scroll. */
+@Composable internal fun AppConsentPage(
+    title: String, modifier: Modifier = Modifier, footer: @Composable () -> Unit,
+    body: @Composable ColumnScope.() -> Unit,
+) {
+    Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
+        AppDecisionLayout(Modifier.widthIn(max = 680.dp).fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 18.dp), bodyModifier = modifier,
+            heading = { AppDecisionHeading(title) }, footer = footer, body = body)
+    }
+}
+
+/** The body yields height to the heading and actions; the window owns the backdrop. */
+@Composable internal fun AppDecisionLayout(
+    modifier: Modifier = Modifier,
+    bodyModifier: Modifier = Modifier,
+    scroll: ScrollState = rememberScrollState(),
+    heading: (@Composable () -> Unit)? = null,
+    spacing: Dp = 14.dp,
+    footer: @Composable () -> Unit,
+    body: @Composable ColumnScope.() -> Unit,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(spacing)) {
+        heading?.invoke()
+        Column(bodyModifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(scroll),
+            verticalArrangement = Arrangement.spacedBy(spacing), content = body)
+        footer()
+    }
+}
+
+@Composable internal fun AppDecisionHeading(title: String, fontSize: TextUnit = 22.sp) {
+    Text(title, Modifier.semantics { heading() }, fontSize = fontSize,
+        fontWeight = FontWeight.SemiBold, color = AppPalette.text())
+}
+
 // Match the existing drawer's ease-out curve. Compose applies the system duration scale.
-private val settingsRevealEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
-private const val SETTINGS_ENTER_MS = 200
-private const val SETTINGS_EXIT_MS = 150
+internal val settingsRevealEasing = CubicBezierEasing(.23f, 1f, .32f, 1f)
+internal const val SETTINGS_ENTER_MS = 200
+internal const val SETTINGS_EXIT_MS = 150
 
 @Composable internal fun AppSettingsReveal(visible: Boolean, content: @Composable ColumnScope.() -> Unit) {
     AnimatedVisibility(visible = visible,
@@ -124,9 +224,9 @@ private const val SETTINGS_EXIT_MS = 150
 }
 
 @Composable internal fun AppRow(title: String, summary: String?, modifier: Modifier = Modifier,
-    enabled: Boolean = true, action: (() -> Unit)? = null, trailing: @Composable (() -> Unit)? = null) {
+    enabled: Boolean = true, action: (() -> Unit)? = null, value: String? = null, trailing: @Composable (() -> Unit)? = null) {
     val interactionSource = remember { MutableInteractionSource() }
-    AppRowContent(title, summary, modifier, enabled, interactionSource, action, action != null, trailing)
+    AppRowContent(title, summary, modifier, enabled, interactionSource, action, action != null, value, trailing)
 }
 
 @Composable internal fun AppToggle(title: String, summary: String?, checked: Boolean, enabled: Boolean = true,
@@ -134,14 +234,14 @@ private const val SETTINGS_EXIT_MS = 150
     val interactionSource = remember { MutableInteractionSource() }
     val toggleModifier = modifier.toggleable(value = checked, enabled = enabled, role = Role.Switch,
         interactionSource = interactionSource, indication = null, onValueChange = onChange)
-    AppRowContent(title, summary, toggleModifier, enabled, interactionSource, action = null, observePress = true) {
+    AppRowContent(title, summary, toggleModifier, enabled, interactionSource, action = null, observePress = true, value = null) {
         Switch(checked, onCheckedChange = null, enabled = enabled, modifier = Modifier.clearAndSetSemantics { })
     }
 }
 
 @Composable private fun AppRowContent(title: String, summary: String?, modifier: Modifier,
     enabled: Boolean, interactionSource: MutableInteractionSource, action: (() -> Unit)?,
-    observePress: Boolean, trailing: @Composable (() -> Unit)?) {
+    observePress: Boolean, value: String?, trailing: @Composable (() -> Unit)?) {
     val pressed by interactionSource.collectIsPressedAsState()
     var pointerPressed by remember { mutableStateOf(false) }
     val pointerPressObserver = if (observePress) Modifier.pointerInput(enabled) {
@@ -187,6 +287,7 @@ private const val SETTINGS_EXIT_MS = 150
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(title, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = AppPalette.text())
+            if (!value.isNullOrEmpty()) Text(value, fontSize = 14.sp, color = AppPalette.accent())
             if (!summary.isNullOrEmpty()) Text(summary, fontSize = 13.sp, color = AppPalette.secondary())
         }
         if (trailing != null) trailing()
@@ -211,19 +312,21 @@ internal fun Modifier.inactiveInteractionIsolation(inactive: Boolean): Modifier 
     val label = stringResource(R.string.ui_back)
     val feedback = remember { NavigationPress() }
     val press = animateFloatAsState(if (feedback.down) 1f else 0f,
-        spring(dampingRatio = .7f, stiffness = 450f), label = "back_press")
-    val material = LocalNavigationMaterial.current
+        if (feedback.down) androidx.compose.animation.core.snap() else spring(dampingRatio = 1f, stiffness = 650f),
+        label = "back_press")
+    val ink = AppPalette.text()
     IconButton(onClick = back, modifier = modifier.size(48.dp).then(feedback.modifier)
-        .graphicsLayer { scaleX = 1f + .06f * press.value; scaleY = scaleX }
-        .shadow(4.dp, CircleShape, clip = false)
-        .then(with(material) { Modifier.surface(CircleShape, { press.value }, compact = true) }).clearAndSetSemantics {
+        .background(ink.copy(alpha = .07f * press.value), CircleShape)
+        .border(1.dp, ink.copy(alpha = .12f), CircleShape)
+        .clearAndSetSemantics {
         contentDescription = label
         role = Role.Button
         onClick { back(); true }
     }, minWidth = 48.dp, minHeight = 48.dp,
         backgroundColor = Color.Transparent) {
         Icon(painterResource(R.drawable.ic_navigation_back), contentDescription = null,
-            modifier = Modifier.size(26.dp), tint = AppPalette.text())
+            modifier = Modifier.size(26.dp).graphicsLayer { scaleX = 1f - .04f * press.value; scaleY = scaleX },
+            tint = ink)
     }
 }
 
@@ -237,17 +340,25 @@ internal fun Modifier.inactiveInteractionIsolation(inactive: Boolean): Modifier 
 }
 
 @Composable internal fun PageFrame(title: String, back: () -> Unit, backTag: String,
+    scrollState: LazyListState? = null,
     content: @Composable (Modifier, Dp) -> Unit) {
+    AppPageWindow { AppPageContent(title, back, backTag, scrollState = scrollState, content = content) }
+}
+
+/** Standalone Activity adapter: the main settings shell already owns these insets. */
+@Composable internal fun AppPageWindow(content: @Composable () -> Unit) {
     Box(Modifier.fillMaxSize().background(AppPalette.background()).safeDrawingPadding().imePadding()) {
-        AppPageContent(title, back, backTag, content = content)
+        content()
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable internal fun AppPageContent(title: String, back: () -> Unit, backTag: String,
-    modifier: Modifier = Modifier, content: @Composable (Modifier, Dp) -> Unit) {
-    val density = LocalDensity.current
+    modifier: Modifier = Modifier, scrollState: LazyListState? = null, gridState: LazyGridState? = null,
+    bodyScrollState: ScrollState? = null, fadeEnabled: Boolean = true,
+    content: @Composable (Modifier, Dp) -> Unit) {
     val background = AppPalette.background()
+    val density = LocalDensity.current
     val host = LocalView.current
     var insetsReady by remember(host) { mutableStateOf(host.isLaidOut && host.rootWindowInsets != null) }
     DisposableEffect(host) {
@@ -266,41 +377,88 @@ internal fun Modifier.inactiveInteractionIsolation(inactive: Boolean): Modifier 
     }
     // A short restored list must not be clamped against the pre-insets viewport.
     if (!insetsReady) return
-    AppNavigationFrame(modifier.fillMaxSize(), content = { capture ->
-        SubcomposeLayout(Modifier.fillMaxSize()) { constraints ->
-            val header = subcompose("header") {
-                Box(Modifier.fillMaxWidth()
-                    .pointerInput(Unit) { detectTapGestures {} }
-                    .background(Brush.verticalGradient(listOf(background, background.copy(alpha = .92f), background.copy(alpha = .0f)))),
-                    contentAlignment = Alignment.TopCenter) {
-                    AppPageHeader(title, back, backTag, Modifier.widthIn(max = 680.dp)
-                        .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 12.dp))
-                }
-            }.single().measure(constraints.copy(minHeight = 0))
-            val headerInset = with(density) { header.height.toDp() }
-            val body = subcompose("body") {
-                val focusScroll = remember(headerInset, density) { object : BringIntoViewSpec {
-                    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
-                        val top = with(density) { headerInset.toPx() }
-                        return when {
-                            offset < top -> offset - top
-                            offset + size > containerSize -> offset + size - containerSize
-                            else -> 0f
-                        }
+    Column(modifier.fillMaxSize().background(background), horizontalAlignment = Alignment.CenterHorizontally) {
+        AppPageHeader(title, back, backTag, Modifier.widthIn(max = 680.dp)
+            .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 12.dp))
+        CompositionLocalProvider(LocalBringIntoViewSpec provides PageBodyFocus) {
+            Box(Modifier.fillMaxWidth().weight(1f).clipToBounds(), contentAlignment = Alignment.TopCenter) {
+                val viewport = Modifier.widthIn(max = 680.dp).fillMaxSize()
+                val fade = when {
+                    !fadeEnabled -> viewport
+                    scrollState != null -> viewport.pageBodyFade(background) {
+                        scrollFadeOpacity(scrollState.firstVisibleItemIndex, scrollState.firstVisibleItemScrollOffset,
+                            scrollState.layoutInfo.beforeContentPadding)
                     }
-                } }
-                CompositionLocalProvider(LocalBringIntoViewSpec provides focusScroll) {
-                    Box(capture.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                        content(Modifier.widthIn(max = 680.dp).fillMaxSize(), headerInset)
+                    gridState != null -> viewport.pageBodyFade(background) {
+                        scrollFadeOpacity(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset,
+                            gridState.layoutInfo.beforeContentPadding)
                     }
+                    bodyScrollState != null -> viewport.pageBodyFade(background) {
+                        scrollFadeOpacity(0, bodyScrollState.value, with(density) { 12.dp.roundToPx() })
+                    }
+                    else -> viewport
                 }
-            }.single().measure(constraints)
-            layout(constraints.maxWidth, constraints.maxHeight) {
-                body.placeRelative(0, 0)
-                header.placeRelative(0, 0)
+                content(fade, 0.dp)
             }
         }
-    }, navigation = {})
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+private object PageBodyFocus : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = when {
+        offset < 0f -> offset
+        offset + size > containerSize -> offset + size - containerSize
+        else -> 0f
+    }
+}
+
+/** The body alone has a fade; enable it for reading lists, not focused forms. */
+internal fun Modifier.pageBodyFade(
+    background: Color,
+    depth: Dp = 28.dp,
+    trailing: Boolean = false,
+    scrollOpacity: () -> Float,
+) = drawWithCache {
+    val height = minOf(depth.toPx(), size.height)
+    val y = if (trailing) size.height - height else 0f
+    val gradient = if (trailing) {
+        Brush.verticalGradient(0f to background.copy(alpha = 0f), .6f to background.copy(alpha = .68f),
+            1f to background, startY = y, endY = size.height)
+    } else {
+        Brush.verticalGradient(0f to background, .4f to background.copy(alpha = .68f),
+            1f to background.copy(alpha = 0f), endY = height)
+    }
+    onDrawWithContent {
+        drawContent()
+        val opacity = scrollOpacity()
+        if (height > 0f && opacity > 0f) {
+            drawRect(gradient, topLeft = Offset(0f, y), size = Size(size.width, height), alpha = opacity)
+        }
+    }
+}
+
+private fun scrollFadeOpacity(index: Int, offset: Int, startPadding: Int): Float =
+    if (index > 0) 1f else (offset.toFloat() / startPadding.coerceAtLeast(1)).coerceIn(0f, 1f)
+
+// Scroll a keyboard-focused row clear of the rail without shortening the drawn viewport.
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun MainTabFocus(tailPadding: Dp, content: @Composable () -> Unit) {
+    val tailPx = with(LocalDensity.current) { tailPadding.toPx() }
+    val spec = remember(tailPx) {
+        object : BringIntoViewSpec {
+            override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+                val clearEnd = (containerSize - tailPx).coerceAtLeast(0f)
+                return when {
+                    offset < 0f -> offset
+                    offset + size > clearEnd -> offset + size.coerceAtMost(clearEnd) - clearEnd
+                    else -> 0f
+                }
+            }
+        }
+    }
+    CompositionLocalProvider(LocalBringIntoViewSpec provides spec, content = content)
 }
 
 internal fun Bundle?.listState(key: String) = LazyListState(this?.getInt(key + "_index", 0) ?: 0, this?.getInt(key + "_offset", 0) ?: 0)

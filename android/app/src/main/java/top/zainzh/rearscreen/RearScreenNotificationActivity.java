@@ -22,7 +22,8 @@ import android.os.Bundle;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
-import android.view.animation.AccelerateDecelerateInterpolator;
+import android.animation.ValueAnimator;
+import android.view.animation.PathInterpolator;
 import android.widget.ImageView;
 import android.widget.TextView;
 
@@ -184,14 +185,11 @@ public class RearScreenNotificationActivity extends Activity {
         applySafeAreaPadding();
         
         // 获取视图
-        ImageView appIconCenter = findViewById(R.id.app_icon_center);
         ImageView appIconSmall = findViewById(R.id.app_icon_small);
         TextView appNameText = findViewById(R.id.app_name);
         TextView notificationTitle = findViewById(R.id.notification_title);
         TextView notificationContent = findViewById(R.id.notification_content);
         View container = findViewById(R.id.notification_container);
-        View appNameContainer = findViewById(R.id.app_name_container);
-        View contentContainer = findViewById(R.id.notification_content_container);
         
         // 加载应用信息
         try {
@@ -201,7 +199,6 @@ public class RearScreenNotificationActivity extends Activity {
             Drawable icon = pm.getApplicationIcon(packageName);
             
             // 设置图标和应用名
-            appIconCenter.setImageDrawable(icon);
             appIconSmall.setImageDrawable(icon);
             appNameText.setText(appName);
             
@@ -236,13 +233,14 @@ public class RearScreenNotificationActivity extends Activity {
             notificationContent.setText(text);
         }
         
-        // 开始动画
-        startNotificationAnimation(appIconCenter, appNameContainer, contentContainer);
+        // 首帧就显示完整内容
+        animateReadableNotification();
         renderSessionGate.markRendered(animationId);
         contentInitialized = true;
         reportOwnedNotificationDisplayedWhenVisible();
         
-        // 点击跳转到应用（优先在背屏启动）
+        setNotificationClickLabel(container);
+        // 依据当前通知规则关闭或在主屏打开来源应用。
         container.setOnClickListener(v -> {
             if (tryOpenOnRear()) return;
             handleOrdinaryNotificationUserAction();
@@ -371,82 +369,17 @@ public class RearScreenNotificationActivity extends Activity {
         }
     }
     
-    /**
-     * 执行通知动画
-     * 1. 大图标从中心缩放
-     * 2. 应用名和图标淡入
-     * 3. 通知内容淡入
-     */
-    private void startNotificationAnimation(ImageView iconCenter, View appNameContainer, View contentContainer) {
-        // 卡片随内容入场，避免遮住第一阶段的中心应用图标。
+    /** The first frame already contains readable text, including with animators disabled. */
+    private void animateReadableNotification() {
         View wrapper = findViewById(R.id.notification_wrapper);
-        wrapper.setAlpha(0f);
-        // 初始状态
-        appNameContainer.setAlpha(0f);
-        appNameContainer.setScaleX(0.9f);
-        appNameContainer.setScaleY(0.9f);
-        contentContainer.setAlpha(0f);
-        contentContainer.setTranslationY(30f);
-        
-        // 启用硬件加速
-        iconCenter.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        appNameContainer.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        contentContainer.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        
-        // 阶段1: 中心图标放大 (0-300ms)
-        iconCenter.animate()
-            .scaleX(1.3f)
-            .scaleY(1.3f)
-            .setDuration(300)
-            .setInterpolator(new AccelerateDecelerateInterpolator())
-            .withEndAction(() -> {
-                // 阶段1.5: 停留展示 (300-800ms) - 增加500ms停留时间
-                iconCenter.postDelayed(() -> {
-                    // 阶段2: 中心图标缩小淡出 (800-1000ms)
-                    iconCenter.animate()
-                        .scaleX(0.5f)
-                        .scaleY(0.5f)
-                        .alpha(0f)
-                        .setDuration(200)
-                        .setInterpolator(new AccelerateDecelerateInterpolator())
-                        .withEndAction(() -> {
-                            iconCenter.setVisibility(View.GONE);
-                            iconCenter.setLayerType(View.LAYER_TYPE_NONE, null);
-                        })
-                        .start();
-                    
-                    wrapper.animate().alpha(1f).setDuration(250)
-                        .setInterpolator(new AccelerateDecelerateInterpolator()).start();
-
-                    // 阶段3: 应用名和图标淡入并缩放(800-1050ms)
-                    appNameContainer.animate()
-                        .alpha(1f)
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .setDuration(250)
-                        .setStartDelay(50)
-                        .setInterpolator(new AccelerateDecelerateInterpolator())
-                        .withEndAction(() -> {
-                            appNameContainer.setLayerType(View.LAYER_TYPE_NONE, null);
-                        })
-                        .start();
-                    
-                    // 阶段4: 通知内容从下方滑入 (950-1250ms)
-                    contentContainer.animate()
-                        .alpha(1f)
-                        .translationY(0f)
-                        .setDuration(300)
-                        .setStartDelay(150)
-                        .setInterpolator(new AccelerateDecelerateInterpolator())
-                        .withEndAction(() -> {
-                            contentContainer.setLayerType(View.LAYER_TYPE_NONE, null);
-                        })
-                        .start();
-                }, 500); // 停留500ms
-            })
-            .start();
+        wrapper.animate().cancel();
+        wrapper.setTranslationY(0f);
+        if (!ValueAnimator.areAnimatorsEnabled()) return;
+        wrapper.setTranslationY(4f * getResources().getDisplayMetrics().density);
+        wrapper.animate().translationY(0f).setDuration(150)
+                .setInterpolator(new PathInterpolator(.23f, 1f, .32f, 1f)).start();
     }
-    
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -505,13 +438,10 @@ public class RearScreenNotificationActivity extends Activity {
                 applySafeAreaPadding();
                 
                 // 获取视图
-                ImageView appIconCenter = findViewById(R.id.app_icon_center);
                 ImageView appIconSmall = findViewById(R.id.app_icon_small);
                 TextView appNameText = findViewById(R.id.app_name);
                 TextView notificationTitle = findViewById(R.id.notification_title);
                 TextView notificationContent = findViewById(R.id.notification_content);
-                View appNameContainer = findViewById(R.id.app_name_container);
-                View contentContainer = findViewById(R.id.notification_content_container);
                 
                 // 加载应用信息
                 try {
@@ -521,7 +451,6 @@ public class RearScreenNotificationActivity extends Activity {
                     Drawable icon = pm.getApplicationIcon(packageName);
                     
                     // 设置图标和应用名
-                    appIconCenter.setImageDrawable(icon);
                     appIconSmall.setImageDrawable(icon);
                     appNameText.setText(appName);
                     
@@ -557,9 +486,10 @@ public class RearScreenNotificationActivity extends Activity {
                 }
                 
                 // 启动动画
-                startNotificationAnimation(appIconCenter, appNameContainer, contentContainer);
+                animateReadableNotification();
                 
                 // 设置点击事件和自动关闭
+                setNotificationClickLabel(container);
                 container.setOnClickListener(v -> {
                     if (tryOpenOnRear()) return;
                     handleOrdinaryNotificationUserAction();
@@ -921,6 +851,15 @@ public class RearScreenNotificationActivity extends Activity {
     private void handleOrdinaryNotificationUserAction() {
         if (!isOwnedNotification())
             NotificationService.ordinaryNotificationUserHandled(acceptedAnimationId);
+    }
+
+    private void setNotificationClickLabel(View container) {
+        boolean dismissOnly = getSharedPreferences("mrss_settings", MODE_PRIVATE).getBoolean("notification_dismiss_only", false);
+        int label = NotificationDisplayOptions.shouldLaunchSourceApp(isOwnedNotification(), dismissOnly)
+                ? R.string.ui_notification_click_open : R.string.ui_notification_click_dismiss;
+        androidx.core.view.ViewCompat.replaceAccessibilityAction(container,
+                androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_CLICK,
+                getString(label), (view, arguments) -> view.performClick());
     }
 
     private boolean finishIfDismissOnly() {

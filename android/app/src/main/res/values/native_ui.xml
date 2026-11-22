@@ -11,7 +11,7 @@
     <string name="ui_auto_destroy_time" formatted="false">Auto Destroy Time</string>
     <string name="ui_notification_duration_title" formatted="false">Notification display time</string>
     <string name="ui_notification_never_close" formatted="false">Don’t close automatically</string>
-    <string name="ui_notification_never_close_help" formatted="false">Stays visible while the notification is active. Keeping the screen on uses more battery; it still ends if the notification is removed or the feature is turned off.</string>
+    <string name="ui_notification_never_close_help" formatted="false">Uses more battery. Ends when the notification is removed or rear notifications are turned off.</string>
     <string name="ui_notification_click_action" formatted="false">Tap notification</string>
     <string name="ui_notification_click_action_help" formatted="false">While the main screen is locked (off or showing Always-on display), try the notification details first, then its app. During casting, taps only dismiss banners.</string>
     <string name="ui_notification_click_open" formatted="false">Open app on main screen</string>
@@ -40,7 +40,7 @@
     <string name="ui_connection_ready" formatted="false">Shizuku is ready</string>
     <string name="ui_copied" formatted="false">Copied</string>
     <string name="ui_dark_notification_help" formatted="false">Use a dark background for rear-screen notifications</string>
-    <string name="ui_deselect_all" formatted="false">Deselect All</string>
+    <string name="ui_deselect_all" formatted="false">Clear visible ({0})</string>
     <string name="ui_diagnostics" formatted="false">Diagnostics</string>
     <string name="ui_display_wake" formatted="false">Display &amp; wake</string>
     <string name="ui_dnd_help" formatted="false">Pause delivery while Do Not Disturb is enabled</string>
@@ -95,7 +95,7 @@
     <string name="ui_screen_title" formatted="false">Rear screen</string>
     <string name="ui_search_apps" formatted="false">Search Apps</string>
     <string name="ui_seconds_value" formatted="false">{0} seconds</string>
-    <string name="ui_select_all" formatted="false">Select All</string>
+    <string name="ui_select_all" formatted="false">Select visible ({0})</string>
     <string name="ui_selected_count" formatted="false">{0} apps selected</string>
     <string name="ui_shizuku_not_running" formatted="false">Shizuku not running</string>
     <string name="ui_shizuku_permission_denied" formatted="false">Shizuku permission denied</string>
@@ -159,7 +159,7 @@
     <string name="ui_current_version" formatted="false">Current version: {0}</string>
     <string name="ui_update_size" formatted="false">APK size: {0}</string>
     <string name="ui_nav_modules" formatted="false">Modules</string>
-    <string name="ui_nav_settings" formatted="false">Settings</string>
+    <string name="ui_nav_settings" formatted="false">More</string>
     <string name="ui_nav_cast" formatted="false">Casting &amp; display</string>
     <string name="ui_nav_cast_help" formatted="false">Choose where the rear screen is shown and review display options.</string>
     <string name="ui_nav_wake" formatted="false">Wake and screen-off</string>
@@ -178,4 +178,12 @@
     <string name="ui_settings_runtime" formatted="false">Runtime</string>
     <string name="ui_settings_usage" formatted="false">Use</string>
     <string name="ui_settings_support" formatted="false">Version and support</string>
+    <string name="ui_wake_behavior">Wake mode</string>
+    <string name="ui_rotation_unavailable">Current orientation is unavailable</string>
+    <string name="ui_charging_standby">Waiting for animation</string>
+    <string name="ui_charging_requires_animation">Turn on the charging animation to keep it visible.</string>
+    <string name="ui_notification_duration_scope">Display time for forwarded notifications. SDK and Mod notifications use their own expiry.</string>
+    <string name="ui_cancel_download">Cancel download</string>
+    <string name="ui_number_range_error">Enter a number from %1$d to %2$d.</string>
+    <string name="ui_notification_duration_current">Current: %1$s</string>
 </resources>

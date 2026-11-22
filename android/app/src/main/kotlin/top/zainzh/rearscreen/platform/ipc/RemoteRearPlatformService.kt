@@ -123,6 +123,7 @@ class RemoteRearPlatformService : Service() {
         val modeLabel: String,
         val regionLabel: String,
         val replacingLabel: String?,
+        val rotationDegrees: Int,
         val expiresAtElapsedRealtimeMs: Long
     )
     private class DataSubscription(val connection: ClientConnection) {
@@ -450,7 +451,7 @@ class RemoteRearPlatformService : Service() {
             val nonce = newOpaqueId()
             val pending = PendingCastActivation(nonce, requestId, client.owner, client, prepared, appLabel,
                 if (mode == CastMode.VIRTUAL) "虚拟投放" else "物理直投",
-                when (prepared.target.region) { CastRegion.FULL -> "FULL 全域"; CastRegion.SAFE -> "SAFE 安全区" },
+                when (prepared.target.region) { CastRegion.FULL -> "全域"; CastRegion.SAFE -> "安全区" },
                 replacingLabel, prepared.expiresAtElapsedRealtimeMs)
             pendingCastActivations.values.filter { SystemClock.elapsedRealtime() >= it.expiresAt || it.connection.dead }
                 .forEach { expired -> if (pendingCastActivations.remove(expired.nonce, expired)) {
@@ -1160,7 +1161,7 @@ class RemoteRearPlatformService : Service() {
             }
             castFlowLog("confirmation_ticket_validated")
             CastConfirmationDetails(pending.applicationLabel, pending.modeLabel, pending.regionLabel,
-                pending.replacingLabel, pending.expiresAt)
+                pending.replacingLabel, pending.ticket.target.contentRotation * 90, pending.expiresAt)
         }
 
         /** Called only after the host confirmation Activity's explicit positive/negative action. */

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mod_scene_cover_behavior_note">When cover handling is enabled, the rear display turns fully black and pauses UI updates, then resumes when uncovered. Black is not hardware screen-off and may use more power.</string>
+</resources>

@@ -3,4 +3,12 @@
     <string name="ui_recording_start">開始錄製</string>
     <string name="ui_recording_stop">停止錄製</string>
     <string name="ui_recording_close">關閉錄影控制台</string>
+    <string name="ui_recording_idle">待錄製</string>
+    <string name="ui_recording_preparing">正在準備錄製…</string>
+    <string name="ui_recording_running">正在錄製</string>
+    <string name="ui_recording_saving">正在儲存錄屏…</string>
+    <string name="ui_recording_saved">已儲存至 Movies</string>
+    <string name="ui_recording_start_failed">啟動失敗，點按重試</string>
+    <string name="ui_recording_stop_failed">未確認停止，點按重試</string>
+    <string name="ui_recording_save_failed">無法確認錄屏已儲存</string>
 </resources>

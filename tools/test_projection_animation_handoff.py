@@ -10,7 +10,15 @@ STUBS = {
     'android/util/Log.java': '''package android.util;public class Log {public static int d(String a,String b){return 0;}public static int e(String a,String b,Throwable c){return 0;}}''',
     'android/content/Intent.java': '''package android.content;import java.util.*;public class Intent {public final String action;public String pkg;public final Map<String,Long> extras=new HashMap<>();public Intent(String a){action=a;}public Intent setPackage(String p){pkg=p;return this;}public Intent putExtra(String k,long v){extras.put(k,v);return this;}}''',
     'android/content/Context.java': '''package android.content;import java.util.*;public class Context {public final List<Intent> sent=new ArrayList<>();public String getPackageName(){return "top.zainzh.rearscreen";}public void sendBroadcast(Intent i){sent.add(i);}}''',
-    'Dependencies.java': '''package top.zainzh.rearscreen;class BuildConfig {static final String APPLICATION_ID="top.zainzh.rearscreen";}class RearInfoSession {static void animationChanged(){}}class RearModuleSession {static final RearModuleSession INSTANCE=new RearModuleSession();void animationChanged(){}}class RearScreenChargingActivity {static final String EXTRA_REQUEST_ID="chargingRequestId";}''',
+    'Dependencies.java': '''package top.zainzh.rearscreen;class BuildConfig {static final String APPLICATION_ID="top.zainzh.rearscreen";}class RearInfoSession {static void animationChanged(){}}class RearScreenChargingActivity {static final String EXTRA_REQUEST_ID="chargingRequestId";} class NotificationService {static void ordinaryNotificationUserHandled(long session){}}''',
+    'top/zainzh/rearscreen/platform/RearCapabilityCore.java': '''package top.zainzh.rearscreen.platform;
+import android.content.Context;
+public class RearCapabilityCore {
+    public static boolean beginTransientOverlay(long session, long replaced, boolean holdsTask) { return false; }
+    public static boolean endTransientOverlay(long session) { return false; }
+    public static void onLegacyProjectionStarted(Context context, int task, String pkg) {}
+    public static void onControlledProjectionStarted(Context context, int task, String pkg) {}
+}''',
     'ProjectionHandoffCheck.java': r'''package top.zainzh.rearscreen;
 import android.content.*;import java.util.*;import java.util.concurrent.*;
 public class ProjectionHandoffCheck {
@@ -62,6 +70,9 @@ with tempfile.TemporaryDirectory(prefix='remrss-projection-handoff-') as tmp:
     java_home = Path(os.environ.get('JAVA_HOME', ROOT / '.local/toolchains/jdk21'))
     javac = str(java_home / 'bin/javac') if (java_home / 'bin/javac').exists() else 'javac'
     java = str(java_home / 'bin/java') if (java_home / 'bin/java').exists() else 'java'
-    production = ROOT / 'android/app/src/main/java/top/zainzh/rearscreen/RearAnimationManager.java'
-    subprocess.run([javac, '-d', str(tmp), str(production), *map(str, tmp.rglob('*.java'))], check=True)
+    sources = ROOT / 'android/app/src/main/java/top/zainzh/rearscreen'
+    production = [sources / name for name in (
+        'RearAnimationManager.java', 'DisplayActionGate.java', 'PersistentNotificationChargeGate.java',
+    )]
+    subprocess.run([javac, '-d', str(tmp), *map(str, production), *map(str, tmp.rglob('*.java'))], check=True)
     subprocess.run([java, '-cp', str(tmp), 'top.zainzh.rearscreen.ProjectionHandoffCheck'], check=True, timeout=15)

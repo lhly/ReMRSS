@@ -11,13 +11,21 @@ class NavigationMotionTest {
         assertEquals(NavigationRoutePair(0, 10), NavigationMotion.pairBetween(0, 10))
         assertEquals(NavigationRoutePair(1, 100), NavigationMotion.pairBetween(100, 1))
         assertEquals(NavigationRoutePair(1, 20), NavigationMotion.pairBetween(1, 20))
-        assertEquals(NavigationRoutePair(2, 30), NavigationMotion.pairBetween(30, 2))
+        assertNull(NavigationMotion.pairBetween(30, 2))
+        assertEquals(NavigationRoutePair(MOD_DETAIL_ROUTE, MOD_CONFIG_ROUTE),
+            NavigationMotion.pairBetween(MOD_CONFIG_ROUTE, MOD_DETAIL_ROUTE))
         assertEquals(NavigationRoutePair(3, 40), NavigationMotion.pairBetween(3, 40))
         assertNull(NavigationMotion.pairBetween(0, 2))
         assertEquals(0, NavigationMotion.routeForTab(10))
         assertEquals(1, NavigationMotion.routeForTab(100))
-        assertEquals(2, NavigationMotion.routeForTab(30))
         assertEquals(3, NavigationMotion.routeForTab(40))
+        assertEquals(NavigationRoutePair(3, TUTORIAL_ROUTE), NavigationMotion.pairBetween(3, TUTORIAL_ROUTE))
+        assertEquals(NavigationRoutePair(10, DENSITY_SETTINGS_ROUTE), NavigationMotion.pairBetween(DENSITY_SETTINGS_ROUTE, 10))
+        assertEquals(NavigationRoutePair(TUTORIAL_ROUTE, TUTORIAL_PERMISSION_ROUTE),
+            NavigationMotion.pairBetween(TUTORIAL_ROUTE, TUTORIAL_PERMISSION_ROUTE))
+        assertEquals(0, NavigationMotion.routeForTab(DENSITY_SETTINGS_ROUTE))
+        assertEquals(3, NavigationMotion.routeForTab(TUTORIAL_PERMISSION_ROUTE))
+        assertNull(NavigationMotion.pairBetween(TUTORIAL_PERMISSION_ROUTE, 3))
     }
 
     @Test fun previewTracksDirectProgressAndPreservesDirectionOnCancellation() {

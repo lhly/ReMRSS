@@ -1,9 +1,12 @@
 package top.zainzh.rearscreen.platform.mods
 
+import android.app.Activity
 import android.app.ActivityOptions
+import android.content.ContextWrapper
 import android.os.Bundle
 import android.view.View
 import android.view.ViewTreeObserver
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -11,16 +14,19 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.Closeable
 import top.yukonga.miuix.kmp.basic.Text
+import top.zainzh.rearscreen.AppPageContent
+import top.zainzh.rearscreen.AppPageWindow
 import top.zainzh.rearscreen.AppPalette
 import top.zainzh.rearscreen.miuixContent
 import top.zainzh.rearscreen.platform.actions.RegisteredActionRef
@@ -71,15 +77,50 @@ internal fun isModConfigSceneVisible(
     windowVisible: Boolean,
     displayId: Int?,
     closing: Boolean,
-): Boolean = resumed && attached && shown && windowVisible && isModConfigMainDisplay(displayId) && !closing
+    routeActive: Boolean = true,
+): Boolean = routeActive && resumed && attached && shown && windowVisible && isModConfigMainDisplay(displayId) && !closing
 
-/** Settings scene Activity for a single installed, trusted Mod. */
+/** External entry point. Main uses the same ModConfigPage without opening another window. */
 class ModConfigActivity : ComponentActivity() {
-    private var modId: String = ""
+    private lateinit var page: ModConfigPage
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val modId = intent.getStringExtra("mod_id").orEmpty()
+        page = ModConfigPage(this, modId, savedInstanceState, ::finish)
+        page.setRouteActive(true)
+        miuixContent { AppPageWindow { page.Content() } }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        page.save(outState)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        page.close()
+        super.onDestroy()
+    }
+}
+
+/** Owns one verified settings scene independently of how the host navigates to it. */
+internal class ModConfigPage(
+    private val activity: ComponentActivity,
+    val modId: String,
+    savedState: Bundle?,
+    private val navigateBack: () -> Unit,
+) : ContextWrapper(activity) {
+    @Volatile private var closed = false
+    @Volatile private var routeActive = false
+    private var entered = false
+    private var packageUnavailable = false
     private var packageInfo by mutableStateOf<VerifiedModPackage?>(null)
-    private var model by mutableStateOf<ModPersistedModel?>(null)
-    private var error by mutableStateOf("")
-    private var sceneVisible by mutableStateOf(false)
+    var model by mutableStateOf<ModPersistedModel?>(null)
+        private set
+    var error by mutableStateOf("")
+        private set
+    var sceneVisible by mutableStateOf(false)
+        private set
     private var visibilityDecor: View? = null
     private val windowVisibilityListener = ViewTreeObserver.OnWindowVisibilityChangeListener {
         updateSceneVisibility()
@@ -107,23 +148,25 @@ class ModConfigActivity : ComponentActivity() {
     private val hostDataEpoch = ModDataSubscriptionEpoch()
     private val core by lazy { top.zainzh.rearscreen.platform.RearCapabilityCore.get(this) }
     private val broker by lazy { ModBrokerProvider.get(this) }
-    private var pendingActionBinding: String? = null
-    private var pendingActionModId: String? = null
-    private var registeredActionDrafts by mutableStateOf<Map<String, RegisteredActionRef>>(emptyMap())
+    private val restoredPicker = ModConfigPickerState.read(savedState)
+    private var pendingActionBinding = restoredPicker.pendingBinding
+    private var pendingActionModId = restoredPicker.pendingModId
+    private var registeredActionDrafts by mutableStateOf(restoredPicker.drafts)
+    private var deferredPickerResult: ActivityResult? = null
     private var castSource: ModCastActivationSource? = null
     private var castSourceRegistration: Closeable? = null
-    private lateinit var castState: ModConfigCastState
+    private val castState = ViewModelProvider(activity)[ModConfigCastState::class.java]
     private val castConsumer = object : ModHostEffectRouter.Consumer {
         override fun request(mod: InstalledMod, eventId: String, effect: ModRearOpenEffect) {
             throw IllegalStateException("E_CAST_SOURCE_UNSUPPORTED_EFFECT")
         }
         override fun requestCastWithResult(mod: InstalledMod, eventId: String, effect: ModCastStartEffect,
             source: ModCastActivationSource, complete: (Boolean, String?, JSONObject?) -> Unit) {
-            runOnUiThread { launchCastPicker(mod, effect, source, complete) }
+            activity.runOnUiThread { launchCastPicker(mod, effect, source, complete) }
         }
         override fun completeCast(source: ModCastActivationSource, requestId: String, accepted: Boolean, code: String?, result: JSONObject?) {
-            runOnUiThread {
-                if (source != castSource || castState.requestId != requestId ||
+            activity.runOnUiThread {
+                if (closed || !routeActive || source != castSource || castState.requestId != requestId ||
                     !ModCastActivationSources.isRegistered(source, modId)) return@runOnUiThread
                 val completion = castState.completion ?: return@runOnUiThread
                 castState.completion = null
@@ -132,14 +175,24 @@ class ModConfigActivity : ComponentActivity() {
             }
         }
         override fun isCastRequestCurrent(source: ModCastActivationSource, requestId: String): Boolean =
-            source == castSource && castState.requestId == requestId && castState.completion != null &&
+            !closed && routeActive && source == castSource && castState.requestId == requestId && castState.completion != null &&
                 ModCastActivationSources.isRegistered(source, modId)
     }
-    private val actionPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+    private val actionPicker = activity.activityResultRegistry.register(
+        "mod_config_registered_action", ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        // The registry may return a result before a recreated page has loaded the signed package.
+        if (!closed && (!entered || routeActive)) {
+            if (packageInfo == null || !routeActive) deferredPickerResult = result
+            else acceptPickerResult(result)
+        }
+    }
+
+    private fun acceptPickerResult(result: ActivityResult) {
         val data = result.data
         val id = data?.getStringExtra(RegisteredActionsActivity.EXTRA_SELECTED_REF_ID)
         val version = data?.getIntExtra(RegisteredActionsActivity.EXTRA_SELECTED_REF_VERSION, 0) ?: 0
-        val ref = if (result.resultCode == RESULT_OK && !id.isNullOrBlank() && version == 1) RegisteredActionRef(id, version) else null
+        val ref = if (result.resultCode == Activity.RESULT_OK && !id.isNullOrBlank() && version == 1) RegisteredActionRef(id, version) else null
         val binding = pendingActionBinding
         val expectedModId = pendingActionModId
         pendingActionBinding = null
@@ -147,79 +200,136 @@ class ModConfigActivity : ComponentActivity() {
         if (ref != null && binding != null && expectedModId == modId && packageInfo?.id == modId) {
             registeredActionDrafts = registeredActionDrafts + (binding to ref)
             error = "动作已选择；点击保存设置后生效"
-        } else if (result.resultCode == RESULT_OK) error = "动作选择已取消或设置场景已变化"
+        } else if (result.resultCode == Activity.RESULT_OK) error = "动作选择已取消或设置场景已变化"
     }
     private val brokerListener = object : ModBrokerListener {
-        override fun onReady(modId: String, model: ModPersistedModel) { this@ModConfigActivity.model = model }
-        override fun onModelCommitted(modId: String, eventId: String?, model: ModPersistedModel) { this@ModConfigActivity.model = model }
+        override fun onReady(modId: String, model: ModPersistedModel) { this@ModConfigPage.model = model }
+        override fun onModelCommitted(modId: String, eventId: String?, model: ModPersistedModel) { this@ModConfigPage.model = model }
         override fun onError(modId: String, code: String, message: String) {
-            if (code in setOf("E_PACKAGE_REPLACED", "E_MOD_REVOKED", "E_MOD_UNINSTALLED")) finish()
-            else error = "$code：$message"
+            if (code in setOf("E_PACKAGE_REPLACED", "E_MOD_REVOKED", "E_MOD_UNINSTALLED")) {
+                packageUnavailable = true
+                if (routeActive) navigateBack()
+            } else error = "$code：$message"
         }
         override fun onEffectRequested(modId: String, eventId: String) = Unit
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        castState = ViewModelProvider(this)[ModConfigCastState::class.java]
-        modId = intent.getStringExtra("mod_id").orEmpty()
-        val restoredPickerState = ModConfigPickerState.read(savedInstanceState)
-        pendingActionBinding = restoredPickerState.pendingBinding
-        pendingActionModId = restoredPickerState.pendingModId
-        registeredActionDrafts = restoredPickerState.drafts
-        val installed = ModPackageStore.installed(this, modId)
-        if (installed == null || !installed.enabled || !ModPackageStore.isAuthorTrusted(this, installed.authorFingerprint)) { finish(); return }
-        packageInfo = runCatching { ModPackageStore.find(this, modId) }.getOrNull()
-        model = ModPackageStore.model(this, modId)
-        val verified = packageInfo ?: run { finish(); return }
-        castSource = castState.sourceFor(modId)
-        castSourceRegistration = ModCastActivationSources.register(requireNotNull(castSource), castConsumer)
-        broker.open(modId, mainExecutor, brokerListener)
-        miuixContent {
-            val active = packageInfo
-            val current = model
-            if (active == null || current == null) {
-                Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) { Text(if (error.isEmpty()) "正在加载设置…" else error, color = AppPalette.secondary()) }
-            } else {
-                val bindings = withModRearInfo(this@ModConfigActivity, active, hostData, sceneVisible)
-                ModNativeScene(active, active.settingsScene, current.state, current.config, bindings, false,
-                    onBack = ::finish,
-                    onEvent = {
-                        if (!sceneVisible || isFinishing || isDestroyed ||
-                            !broker.submitUserEvent(active.id, it, castSource = castSource)
-                        ) {
-                            error = "操作暂未提交：输入队列已满、设置页不可见或场景正在切换，请稍后重试"
-                        }
-                    },
-                    visible = sceneVisible,
-                    onRegisteredAction = ::invokeRegisteredAction,
-                    registeredActionDrafts = registeredActionDrafts,
-                    onSelectRegisteredAction = ::selectRegisteredAction,
-                    onClearRegisteredActionDrafts = { registeredActionDrafts = emptyMap() },
-                    onSaveConfig = { config, done -> broker.saveConfig(active.id, config, mainExecutor) { saved, reason ->
-                        if (saved) model = ModPackageStore.model(this@ModConfigActivity, active.id)
-                        done(saved, reason)
-                    } },
-                    notice = error.ifBlank { null })
-            }
-        }
-        val decor = window.decorView
+    init {
+        val decor = activity.window.decorView
         visibilityDecor = decor
         decor.addOnAttachStateChangeListener(decorAttachListener)
         if (decor.isAttachedToWindow) decorAttachListener.onViewAttachedToWindow(decor)
-        lifecycle.addObserver(visibilityLifecycle)
+        activity.lifecycle.addObserver(visibilityLifecycle)
+        activity.lifecycleScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    val installed = ModPackageStore.installed(activity, modId)
+                    if (installed == null || !installed.enabled ||
+                        !ModPackageStore.isAuthorTrusted(activity, installed.authorFingerprint)) return@runCatching null
+                    val verified = ModPackageStore.find(activity, modId)
+                        ?.takeIf { it.id == modId && it.authorFingerprint == installed.authorFingerprint }
+                        ?: return@runCatching null
+                    verified to ModPackageStore.model(activity, modId)
+                }.getOrNull()
+            }
+            if (closed) return@launch
+            packageUnavailable = loaded == null
+            if (loaded != null) {
+                packageInfo = loaded.first
+                model = loaded.second
+            }
+            activateScene()
+        }
     }
+
+    fun setRouteActive(active: Boolean) {
+        if (closed || routeActive == active) return
+        routeActive = active
+        if (active) {
+            entered = true
+            activateScene()
+        } else {
+            invalidateCastRequest()
+            deferredPickerResult = null
+            pendingActionBinding = null
+            pendingActionModId = null
+            updateSceneVisibility()
+        }
+    }
+
+    private fun activateScene() {
+        if (!routeActive || closed) return
+        if (packageUnavailable) {
+            navigateBack()
+            return
+        }
+        if (packageInfo == null) return
+        if (castSourceRegistration == null) {
+            val source = castState.sourceFor(modId)
+            castSource = source
+            castSourceRegistration = ModCastActivationSources.register(source, castConsumer)
+            broker.open(modId, mainExecutor, brokerListener)
+        }
+        consumeDeferredPickerResult()
+        updateSceneVisibility()
+    }
+
+    private fun consumeDeferredPickerResult() {
+        if (!routeActive || packageInfo == null) return
+        val result = deferredPickerResult ?: return
+        deferredPickerResult = null
+        acceptPickerResult(result)
+    }
+
+    @Composable
+    fun Content() {
+        val active = packageInfo
+        val current = model
+        if (active == null || current == null) {
+            AppPageContent("Mod 设置", navigateBack, "mod_back_$modId") { modifier, _ ->
+                Text(error.ifBlank { "正在加载设置…" }, modifier.padding(24.dp), color = AppPalette.secondary())
+            }
+        } else {
+            val bindings = withModRearInfo(this, active, hostData, sceneVisible)
+            ModNativeScene(active, active.settingsScene, current.state, current.config, bindings, false,
+                onBack = navigateBack,
+                onEvent = {
+                    if (!sceneVisible || closing ||
+                        !broker.submitUserEvent(active.id, it, castSource = castSource)
+                    ) {
+                        error = "操作暂未提交：输入队列已满、设置页不可见或场景正在切换，请稍后重试"
+                    }
+                },
+                visible = sceneVisible,
+                onRegisteredAction = ::invokeRegisteredAction,
+                registeredActionDrafts = registeredActionDrafts,
+                onSelectRegisteredAction = ::selectRegisteredAction,
+                onClearRegisteredActionDrafts = { registeredActionDrafts = emptyMap() },
+                onSaveConfig = { config, done ->
+                    if (!sceneVisible || closing) done(false, "设置页不可见")
+                    else broker.saveConfig(active.id, config, mainExecutor) { saved, reason ->
+                        if (saved) model = ModPackageStore.model(activity, active.id)
+                        done(saved, reason)
+                    }
+                },
+                notice = error.ifBlank { null },
+                standaloneWindow = false)
+        }
+    }
+
+    private val closing get() = closed || activity.isFinishing || activity.isDestroyed
 
     private fun updateSceneVisibility() {
         val decor = visibilityDecor ?: return
         publishSceneVisibility(
             isModConfigSceneVisible(
-                resumed = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+                resumed = activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
                 attached = decor.isAttachedToWindow,
                 shown = decor.isShown,
                 windowVisible = decor.windowVisibility == View.VISIBLE,
                 displayId = decor.display?.displayId,
-                closing = isFinishing || isDestroyed,
+                closing = closing,
+                routeActive = routeActive && packageInfo != null,
             ),
         )
     }
@@ -231,13 +341,13 @@ class ModConfigActivity : ComponentActivity() {
         if (visible) startHostData() else stopHostData()
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
+    fun save(outState: Bundle) {
         ModConfigPickerState.write(outState, pendingActionBinding, pendingActionModId, registeredActionDrafts)
-        super.onSaveInstanceState(outState)
     }
 
-    override fun onDestroy() {
-        lifecycle.removeObserver(visibilityLifecycle)
+    fun close() {
+        closed = true
+        activity.lifecycle.removeObserver(visibilityLifecycle)
         visibilityDecor?.let { decor ->
             decor.removeOnAttachStateChangeListener(decorAttachListener)
             decor.viewTreeObserver.takeIf { it.isAlive }
@@ -245,16 +355,22 @@ class ModConfigActivity : ComponentActivity() {
         }
         visibilityDecor = null
         publishSceneVisibility(false)
-        if (modId.isNotEmpty()) broker.closeObserver(modId, brokerListener)
+        if (castSource != null) broker.closeObserver(modId, brokerListener)
         castSourceRegistration?.close()
         castSourceRegistration = null
-        if (!isChangingConfigurations) {
-            castState.completion?.invoke(false, "E_CAST_SOURCE_STALE", null)
-            castState.completion = null
+        actionPicker.unregister()
+        if (!activity.isChangingConfigurations && castState.source?.modId == modId &&
+            (castSource == null || castSource == castState.source)) {
+            invalidateCastRequest()
             castState.source = null
-            castState.requestId = null
         }
-        super.onDestroy()
+    }
+
+    private fun invalidateCastRequest() {
+        val completion = castState.completion
+        castState.completion = null
+        castState.requestId = null
+        completion?.invoke(false, "E_CAST_SOURCE_STALE", null)
     }
 
     private fun launchCastPicker(
@@ -266,7 +382,7 @@ class ModConfigActivity : ComponentActivity() {
         val active = packageInfo
         val currentSource = castSource
         if (source != currentSource || !ModCastActivationSources.isRegistered(source, modId) ||
-            !sceneVisible || !isModConfigMainDisplay(display?.displayId) || isFinishing || isDestroyed ||
+            !sceneVisible || !isModConfigMainDisplay(activity.display?.displayId) || closing ||
             active == null || active.id != mod.id || active.authorFingerprint != mod.authorFingerprint) {
             complete(false, "E_CAST_SOURCE_STALE", null)
             return
@@ -305,8 +421,8 @@ class ModConfigActivity : ComponentActivity() {
         if (fields.isEmpty()) return
         val owner = core.modDataOwner(modId) ?: return
         dataSubscription = ModHostDataSnapshot.observe(core, owner, fields) { snapshot ->
-            runOnUiThread {
-                if (sceneVisible && hostDataEpoch.isCurrent(generation) && !isFinishing && !isDestroyed) hostData = snapshot
+            activity.runOnUiThread {
+                if (sceneVisible && hostDataEpoch.isCurrent(generation) && !closing) hostData = snapshot
             }
         }
     }
@@ -320,6 +436,7 @@ class ModConfigActivity : ComponentActivity() {
 
     private fun selectRegisteredAction(binding: String, currentRef: RegisteredActionRef?) {
         val active = packageInfo ?: return
+        if (!sceneVisible || closing) return
         val declared = active.requiredCapabilities.any { it.name == "action.invoke" } || active.optionalCapabilities.any { it.name == "action.invoke" }
         if (!declared) { error = "此 Mod 未声明已登记动作能力"; return }
         val installed = ModPackageStore.installed(this, modId)
@@ -337,7 +454,7 @@ class ModConfigActivity : ComponentActivity() {
     /** Settings-scene action buttons are real native clicks, dispatched locally through Core. */
     private fun invokeRegisteredAction(ref: RegisteredActionRef) {
         val active = packageInfo ?: return
-        if (!sceneVisible || isFinishing || isDestroyed) return
+        if (!sceneVisible || closing) return
         val installed = ModPackageStore.installed(this, active.id)
         val declared = active.requiredCapabilities.any { it.name == "action.invoke" } || active.optionalCapabilities.any { it.name == "action.invoke" }
         val owner = core.modDataOwner(active.id)
@@ -350,8 +467,8 @@ class ModConfigActivity : ComponentActivity() {
             .getOrElse { error = "无法确认此快捷操作，请重新点击"; return }
         Thread {
             val result = core.invokeRegisteredAction(owner, ref, activation)
-            runOnUiThread {
-                if (!sceneVisible || isFinishing || isDestroyed) return@runOnUiThread
+            activity.runOnUiThread {
+                if (!sceneVisible || closing) return@runOnUiThread
                 error = when (result) {
                     top.zainzh.rearscreen.platform.actions.ActionDispatchResult.Accepted -> ""
                     is top.zainzh.rearscreen.platform.actions.ActionDispatchResult.Rejected -> "无法执行快捷操作：${result.error}"
