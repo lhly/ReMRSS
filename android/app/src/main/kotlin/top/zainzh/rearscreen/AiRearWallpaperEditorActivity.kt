@@ -497,7 +497,7 @@ class AiRearWallpaperEditorActivity : ComponentActivity() {
                                 AiRearWallpaperArchive.write(original, destination, viewport, configuration, badges,
                                     AiRearWallpaperArchive.Badge(getString(R.string.ai_rear_all_apps),
                                         getDrawable(R.drawable.ic_ai_rear_all_apps)?.let(::encodedIcon)),
-                                    getString(R.string.ai_rear_empty_slot), backdrop,
+                                    backdrop,
                                     AiRearWallpaperArchive.Activation(packageName,
                                         AiRearWallpaperActivationActivity::class.java.name, binding), art)
                             }

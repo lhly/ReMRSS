@@ -107,8 +107,11 @@ internal data class AiRearStudioModel(
     val busy get() = applying || preparing || editingImage || loadingTheme || checkingWork
     val usable get() = !isModTheme || modTheme != null
     val customControls get() = modTheme?.art?.isNotEmpty() == true
-    val visibleSlots get() = if (customControls) checkNotNull(modTheme).buttons else if (grid.allApps) 5 else 6
-    val assigned get() = (0 until visibleSlots).count { apps[grid.apps[it]]?.canCast == true }
+    val appCapacity get() = if (customControls) checkNotNull(modTheme).buttons else grid.appCapacity
+    val assigned get() = grid.apps.take(appCapacity).count { apps[it]?.canCast == true }
+    val bindingsReady get() = if (isModTheme) modTheme?.validGrid(grid, ::canCast) == true else grid.isReady(::canCast)
+
+    private fun canCast(component: String) = apps[component]?.canCast == true
 }
 
 @Composable internal fun AiRearWallpaperStudio(
@@ -167,12 +170,16 @@ internal data class AiRearStudioModel(
         }
         if (!model.usable) return@Column
         AiRearWallpaperCanvas(model, editShortcuts)
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-            Text(stringResource(if (model.installed) R.string.ai_rear_edit_draft else R.string.ai_rear_tap_to_edit),
-                modifier = Modifier.weight(1f), fontSize = 13.sp, color = AppPalette.secondary())
-            Text(stringResource(R.string.ai_rear_bound_count, model.assigned, model.visibleSlots),
-                Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                fontSize = 13.sp, color = AppPalette.secondary())
+        if (model.isModTheme || model.installed || model.grid.occupiedSlots.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+                Text(stringResource(if (model.installed) R.string.ai_rear_edit_draft else R.string.ai_rear_tap_to_edit),
+                    modifier = Modifier.weight(1f), fontSize = 13.sp, color = AppPalette.secondary())
+                val count = if (model.isModTheme)
+                    stringResource(R.string.ai_rear_bound_count, model.assigned, model.appCapacity)
+                    else stringResource(R.string.ai_rear_visible_buttons, model.grid.occupiedSlots.size)
+                Text(count, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    fontSize = 13.sp, color = AppPalette.secondary())
+            }
         }
     }
 }
@@ -225,7 +232,7 @@ internal data class AiRearStudioModel(
                 TextButton(stringResource(id), { action(primary) },
                     Modifier.fillMaxWidth().testTag("ai_rear_primary_action"),
                     enabled = !model.busy && model.connected && model.usable &&
-                        (model.installed || model.assigned == model.visibleSlots),
+                        (model.installed || model.bindingsReady),
                     minHeight = 48.dp, cornerRadius = 16.dp,
                     colors = ButtonDefaults.textButtonColorsPrimary())
             }
@@ -255,7 +262,12 @@ internal data class AiRearStudioModel(
         model.ready && model.installed -> R.string.ai_rear_prepared
         model.installed -> R.string.ai_rear_prepare_hint
         model.work == null -> R.string.ai_rear_pick_hint
-        model.assigned < model.visibleSlots -> if (model.customControls) R.string.ai_rear_theme_bindings else R.string.ai_rear_complete_grid
+        !model.bindingsReady -> when {
+            model.customControls -> R.string.ai_rear_theme_bindings
+            model.isModTheme -> R.string.ai_rear_complete_grid
+            model.grid.occupiedSlots.isEmpty() -> R.string.ai_rear_minimum_shortcut
+            else -> R.string.ai_rear_unavailable_shortcuts
+        }
         else -> R.string.ai_rear_replace_ready
     }
     val label = model.message.takeIf { !model.applying && !model.preparing && it.isNotBlank() }
@@ -296,8 +308,31 @@ internal data class AiRearStudioModel(
                 }
             }
         }
-        val cells = remember(viewport, artwork) { artwork?.art?.map { it.cell(viewport) } ?: AiRearWallpaperArchive.cells(viewport) }
-        cells.forEachIndexed { index, cell ->
+        val cells = remember(viewport, artwork, model.isModTheme, model.grid) {
+            when {
+                artwork != null -> artwork.art.map { AiRearWallpaperArchive.TileCell(it.index, it.cell(viewport)) }
+                model.isModTheme -> AiRearWallpaperArchive.cells(viewport).mapIndexed { index, cell ->
+                    AiRearWallpaperArchive.TileCell(index, cell)
+                }
+                else -> AiRearWallpaperArchive.occupiedCells(viewport, model.grid)
+            }
+        }
+        if (cells.isEmpty()) {
+            Box(Modifier.absoluteOffset(unit * viewport.left, unit * viewport.top)
+                .size(unit * (viewport.width - viewport.left - viewport.right),
+                    unit * (viewport.height - viewport.top - viewport.bottom))
+                .testTag("ai_rear_add_shortcuts").aiRearPressable(!model.busy, onClick = editShortcuts),
+                contentAlignment = Alignment.Center) {
+                Column(Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(painterResource(R.drawable.ic_ai_rear_add), null, Modifier.size(22.dp),
+                        tint = Color(AiRearWallpaperArt.TEXT))
+                    Text(stringResource(R.string.ai_rear_add_shortcuts), color = Color(AiRearWallpaperArt.TEXT),
+                        textAlign = TextAlign.Center, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+        cells.forEachIndexed { position, (index, cell) ->
             val tile = model.grid.tile(index)
             val library = tile == AiRearGrid.Tile.AllApps
             val app = (tile as? AiRearGrid.Tile.App)?.let { model.apps[it.component] }
@@ -307,7 +342,7 @@ internal data class AiRearStudioModel(
                 tile is AiRearGrid.Tile.App -> stringResource(R.string.ai_rear_unavailable)
                 else -> stringResource(R.string.ai_rear_empty_slot)
             }
-            val spoken = stringResource(R.string.ai_rear_slot_summary, index + 1, label)
+            val spoken = stringResource(R.string.ai_rear_slot_summary, position + 1, label)
             val face = AiRearWallpaperArt.face(cell.width, cell.height, icon = true, library = library)
             val frame = RoundedCornerShape(unit * face.radius)
             val labelHeight = unit * (face.textSize + 6)

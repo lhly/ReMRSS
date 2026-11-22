@@ -46,6 +46,10 @@
     <string name="ai_rear_legacy_changed">This wallpaper changed while you were confirming. Check it and try again.</string>
     <string name="ai_rear_legacy_not_written">Could not write this wallpaper. The previous theme and the original backup are unchanged.</string>
     <string name="ai_rear_grid_confirm">Only the selected work is replaced, with a backup. Apply it again in Xiaomi rear screen settings. Choose apps you are comfortable using while the main screen is locked.</string>
+    <string name="ai_rear_add_shortcuts">Add shortcuts</string>
+    <string name="ai_rear_visible_buttons">%1$d selected</string>
+    <string name="ai_rear_minimum_shortcut">Add at least one shortcut or turn on All apps.</string>
+    <string name="ai_rear_unavailable_shortcuts">Some shortcuts are unavailable. Edit your selection before replacing.</string>
     <string name="ai_rear_complete_grid">Fill all six tiles to replace the wallpaper. All apps can occupy one tile.</string>
     <string name="ai_rear_search_apps">Find an app</string>
     <string name="ai_rear_list_empty">No apps to display.</string>

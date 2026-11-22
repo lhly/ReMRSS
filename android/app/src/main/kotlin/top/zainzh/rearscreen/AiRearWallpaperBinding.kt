@@ -3,7 +3,7 @@ package top.zainzh.rearscreen
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Only the choices baked into the applied wallpaper can be used by its activation URI. */
+/** [buttonCount] is the slot range, not the number of drawn tiles in the built-in grid. */
 internal data class AiRearWallpaperBinding(val wallpaper: String, val token: String, val grid: AiRearGrid,
                                          val buttonCount: Int = 6) {
     init {
@@ -24,7 +24,7 @@ internal data class AiRearWallpaperBinding(val wallpaper: String, val token: Str
         if (authority != token || installedWallpaper != wallpaper || path?.length != 2 || path[0] != '/')
             return null
         val slot = path[1] - '0'
-        return slot.takeIf { it in 0 until buttonCount }?.let(grid::tile)
+        return slot.takeIf { it in 0 until buttonCount }?.let(grid::tile)?.takeUnless { it == AiRearGrid.Tile.Empty }
     }
 
     companion object {

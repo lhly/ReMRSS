@@ -25,7 +25,10 @@ class AiRearShortcutDraftTest {
         assertFalse(cleared.full)
         assertFalse(cleared.parked(4))
         assertTrue(cleared.grid.isReady { true })
-        assertFalse(cleared.withAllApps(false).grid.isReady { true })
+        val withoutLibrary = cleared.withAllApps(false).grid
+        assertEquals((0..4).toList(), withoutLibrary.occupiedSlots)
+        assertTrue(withoutLibrary.isReady { true })
+        assertFalse(withoutLibrary.isFull { true })
     }
 
     @Test fun editingLegacyDraftKeepsDuplicatesAndPacksOnlyOnARealChange() {

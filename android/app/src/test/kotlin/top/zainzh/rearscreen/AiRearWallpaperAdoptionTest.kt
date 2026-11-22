@@ -207,11 +207,12 @@ class AiRearWallpaperAdoptionTest {
 
         fun render(original: File, output: OutputStream, owner: String, token: String) {
             val app = "com.example.calc/.Main"
+            val slots = if (owner == FORMAL) listOf(app, null, null, null, null, null) else List(6) { app }
             AiRearWallpaperArchive.write(
                 original, output, AiRearWallpaperArchive.Viewport(960, 480, 256, 0, 0, 0),
-                AiRearGrid(listOf(app, null, null, null, null, null), true),
+                AiRearGrid(slots, allApps = true),
                 mapOf(app to AiRearWallpaperArchive.Badge("Calculator", byteArrayOf(1, 2))),
-                AiRearWallpaperArchive.Badge("All apps", byteArrayOf(3, 4)), "Empty", null,
+                AiRearWallpaperArchive.Badge("All apps", byteArrayOf(3, 4)), null,
                 AiRearWallpaperArchive.Activation(owner, "$FORMAL.AiRearWallpaperActivationActivity", token),
             )
         }

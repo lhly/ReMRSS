@@ -3,6 +3,7 @@ package top.zainzh.rearscreen
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import kotlin.math.abs
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -43,7 +44,7 @@ class AiRearWallpaperArchiveTest {
         val file = temp.newFile()
         file.outputStream().use {
             AiRearWallpaperArchive.write(carrier(), it, viewport, grid, lookup,
-                AiRearWallpaperArchive.Badge("全部应用"), "未绑定", custom, action)
+                AiRearWallpaperArchive.Badge("全部应用"), custom, action)
         }
         return file
     }
@@ -58,7 +59,9 @@ class AiRearWallpaperArchiveTest {
 
     @Test fun bothModesStayInsideSameSixBounds() {
         val list = AiRearWallpaperArchive.cells(viewport)
-        assertEquals(6, list.size)
+        assertEquals(listOf(30, 305).flatMap { y ->
+            listOf(314, 532, 750).map { x -> AiRearWallpaperArchive.Cell(x, y, 206, 263) }
+        }, list)
         assertTrue(list.all { it.x >= viewport.left && it.x + it.width <= viewport.width - viewport.right
             && it.y >= viewport.top && it.y + it.height <= viewport.height - viewport.bottom })
         assertEquals(3, list.map { it.x }.distinct().size)
@@ -87,14 +90,54 @@ class AiRearWallpaperArchiveTest {
         }
     }
 
-    @Test fun emptyCellsDoNotConsumeTheOfficialSwipe() {
-        ZipFile(compile(AiRearGrid())).use { zip ->
+    @Test fun eachSparseRowAndTheWholeGroupAreCenteredInsideTheSafeArea() {
+        val rows = listOf(listOf(1), listOf(2), listOf(3), listOf(2, 2), listOf(3, 2))
+        rows.forEachIndexed { i, sizes ->
+            val cells = AiRearWallpaperArchive.cells(viewport, i + 1)
+            val byRow = cells.groupBy { it.y }.values
+            assertEquals(sizes, byRow.map { it.size })
+            val centerX2 = viewport.left + viewport.width - viewport.right
+            val centerY2 = viewport.top + viewport.height - viewport.bottom
+            assertTrue(abs(cells.first().y + cells.last().y + cells.last().height - centerY2) <= 1)
+            byRow.forEach { row ->
+                assertTrue(abs(row.first().x + row.last().x + row.last().width - centerX2) <= 1)
+                assertTrue(row.zipWithNext().all { (a, b) -> a.x + a.width + 12 == b.x })
+                assertTrue(row.first().x >= viewport.left)
+                assertTrue(row.last().x + row.last().width <= viewport.width - viewport.right)
+            }
+            assertTrue(cells.first().y >= viewport.top)
+            assertTrue(cells.last().y + cells.last().height <= viewport.height - viewport.bottom)
+        }
+        assertTrue(AiRearWallpaperArchive.cells(viewport, 0).isEmpty())
+    }
+
+    @Test fun twoAppsAndOptionalListPublishOnlyTheirOriginalTouchSlots() {
+        val draft = apps.copy(apps = listOf(apps.apps[0], null, apps.apps[2], null, null, null))
+        for (mixed in listOf(false, true)) ZipFile(compile(draft.copy(allApps = mixed))).use { zip ->
             val root = zip.getInputStream(zip.getEntry("manifest.xml")).use {
                 DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(it).documentElement
             }
-            assertEquals(0, root.getElementsByTagName("Button").length)
-            assertEquals(0, root.getElementsByTagName("IntentCommand").length)
-            assertEquals(6, root.getElementsByTagName("Group").length)
+            val slots = if (mixed) listOf(0, 2, 5) else listOf(0, 2)
+            val buttons = root.getElementsByTagName("Button")
+            assertEquals(slots.size, buttons.length)
+            assertEquals(slots.size * 2, root.getElementsByTagName("Group").length)
+            val intents = root.getElementsByTagName("IntentCommand")
+            assertEquals(slots.map { "remrss-ai-activation://${action.binding}/$it" },
+                (0 until intents.length).map { (intents.item(it) as Element).getAttribute("uri") })
+            val positions = (0 until buttons.length).map { buttons.item(it) as Element }
+            assertEquals(1, positions.map { it.getAttribute("y") }.distinct().size)
+            assertNull(zip.getEntry("remrss_ai/icon-1.png"))
+        }
+    }
+
+    @Test fun emptyOrUnresolvableConfigurationNeverStartsWriting() {
+        for (grid in listOf(AiRearGrid(), AiRearGrid().bind(0, "missing/.Main"))) {
+            val out = ByteArrayOutputStream()
+            assertThrows(IllegalArgumentException::class.java) {
+                AiRearWallpaperArchive.write(carrier(), out, viewport, grid, lookup,
+                    AiRearWallpaperArchive.Badge("全部应用"), null, action)
+            }
+            assertEquals(0, out.size())
         }
     }
 
@@ -172,7 +215,7 @@ class AiRearWallpaperArchiveTest {
             val out = ByteArrayOutputStream()
             assertThrows(IOException::class.java) {
                 AiRearWallpaperArchive.write(carrier(entries), out, viewport, apps, lookup,
-                    AiRearWallpaperArchive.Badge("全部应用"), "未绑定", null, action)
+                    AiRearWallpaperArchive.Badge("全部应用"), null, action)
             }
             assertEquals(0, out.size())
         }
@@ -184,7 +227,7 @@ class AiRearWallpaperArchiveTest {
         }
         assertThrows(IllegalArgumentException::class.java) {
             AiRearWallpaperArchive.write(carrier(), ByteArrayOutputStream(), viewport, apps, lookup,
-                AiRearWallpaperArchive.Badge("全部应用"), "未绑定", ByteArray(4 * 1024 * 1024 + 1), action)
+                AiRearWallpaperArchive.Badge("全部应用"), ByteArray(4 * 1024 * 1024 + 1), action)
         }
     }
 }

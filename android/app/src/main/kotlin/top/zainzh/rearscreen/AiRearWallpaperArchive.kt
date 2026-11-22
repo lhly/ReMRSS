@@ -24,6 +24,7 @@ internal object AiRearWallpaperArchive {
         }
     }
     data class Cell(val x: Int, val y: Int, val width: Int, val height: Int)
+    data class TileCell(val slot: Int, val cell: Cell)
     data class Badge(val label: String, val icon: ByteArray? = null)
     data class Activation(val packageName: String, val className: String, val binding: String) {
         init {
@@ -41,23 +42,44 @@ internal object AiRearWallpaperArchive {
     private const val margin = 18
     private const val gap = 12
 
-    fun cells(v: Viewport): List<Cell> {
-        val availableWidth = v.width - v.left - v.right - 2 * margin - 2 * gap
-        val availableHeight = v.height - v.top - v.bottom - 2 * margin - gap
-        val cw = availableWidth / 3
-        val ch = availableHeight / 2
-        return List(6) { i ->
-            Cell(v.left + margin + (i % 3) * (cw + gap), v.top + margin + (i / 3) * (ch + gap), cw, ch)
+    fun cells(v: Viewport, count: Int = 6): List<Cell> {
+        val rows = when (count) {
+            0 -> return emptyList()
+            in 1..3 -> listOf(count)
+            4 -> listOf(2, 2)
+            5 -> listOf(3, 2)
+            6 -> listOf(3, 3)
+            else -> error("Invalid wallpaper tile count: $count")
         }
+        val safeWidth = v.width - v.left - v.right
+        val safeHeight = v.height - v.top - v.bottom
+        val cellWidth = (safeWidth - 2 * margin - 2 * gap) / 3
+        val cellHeight = (safeHeight - 2 * margin - gap) / 2
+        val height = rows.size * cellHeight + (rows.size - 1) * gap
+        // Keep the existing pixel rounding when all six cells are in use.
+        val y = v.top + if (count == 6) margin else (safeHeight - height) / 2
+        return rows.flatMapIndexed { row, columns ->
+            val width = columns * cellWidth + (columns - 1) * gap
+            val x = v.left + if (count == 6) margin else (safeWidth - width) / 2
+            List(columns) { column ->
+                Cell(x + column * (cellWidth + gap), y + row * (cellHeight + gap), cellWidth, cellHeight)
+            }
+        }
+    }
+
+    fun occupiedCells(v: Viewport, grid: AiRearGrid): List<TileCell> {
+        val slots = grid.occupiedSlots
+        return slots.zip(cells(v, slots.size), ::TileCell)
     }
 
     fun write(
         original: File, out: OutputStream, physical: Viewport, grid: AiRearGrid, apps: Map<String, Badge>,
-        listBadge: Badge, emptyText: String, backdropJpeg: ByteArray?, activation: Activation,
+        listBadge: Badge, backdropJpeg: ByteArray?, activation: Activation,
         themeArt: AiRearModWallpaperTheme? = null,
     ) {
         require(backdropJpeg == null || backdropJpeg.size in 1..(4 * 1024 * 1024))
-        require(themeArt == null || themeArt.art.isNotEmpty() && themeArt.validGrid(grid, apps::containsKey))
+        require(if (themeArt == null) grid.isReady(apps::containsKey)
+            else themeArt.art.isNotEmpty() && themeArt.validGrid(grid, apps::containsKey))
         ZipFile(original).use { source ->
             val manifestEntry = source.getEntry(manifest) ?: throw IOException("NO_WALLPAPER_MANIFEST")
             if (source.getEntry("var_config.xml")?.isDirectory != false ||
@@ -107,25 +129,22 @@ internal object AiRearWallpaperArchive {
                         val text = artLabelSize(cell)
                         append("<Text x=\"${cell.width / 2}\" y=\"${artLabelY(cell)}\" align=\"center\" alignV=\"center\" w=\"${cell.width - 16}\" size=\"$text\" color=\"#ffffffff\" text=\"$label\"/>")
                     }
-                } else cells(viewport).forEachIndexed { index, cell ->
+                } else occupiedCells(viewport, grid).forEach { (index, cell) ->
                     val tile = grid.tile(index)
                     val badge = when (tile) {
                         AiRearGrid.Tile.AllApps -> listBadge
-                        AiRearGrid.Tile.Empty -> null
-                        is AiRearGrid.Tile.App -> apps[tile.component]
+                        is AiRearGrid.Tile.App -> apps.getValue(tile.component)
+                        AiRearGrid.Tile.Empty -> error("Empty slots must not have a touch target")
                     }
-                    val asset = badge?.icon?.let { bytes ->
+                    val asset = badge.icon?.let { bytes ->
                         require(bytes.size in 1..(128 * 1024))
                         "${assetPrefix}icon-$index.png".also { assets[it] = bytes }
                     }
-                    val label = escape(badge?.label ?: emptyText)
-                    val (x, y, w, h) = cell
+                    val label = escape(badge.label)
                     val library = tile == AiRearGrid.Tile.AllApps
-                    if (badge == null) {
-                        append("<Group x=\"$x\" y=\"$y\">")
-                        face(w, h, label, null, library, false)
-                        append("</Group>")
-                    } else button(cell, index, activation) { pressed -> face(w, h, label, asset, library, pressed) }
+                    button(cell, index, activation) { pressed ->
+                        face(cell.width, cell.height, label, asset, library, pressed)
+                    }
                 }
                 append(closing)
             }.toByteArray(Charsets.UTF_8)

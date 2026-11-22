@@ -11,7 +11,7 @@ internal class AiRearModWallpaperTheme private constructor(
     val buttons get() = if (art.isEmpty()) 6 else art.size
 
     fun validGrid(grid: AiRearGrid, canCast: (String) -> Boolean): Boolean =
-        if (art.isEmpty()) grid.isReady(canCast) else validControls(grid, buttons, canCast)
+        if (art.isEmpty()) grid.isFull(canCast) else validControls(grid, buttons, canCast)
 
     data class Button(val index: Int, val x: Int, val y: Int, val width: Int, val height: Int, val png: ByteArray) {
         fun cell(v: AiRearWallpaperArchive.Viewport): AiRearWallpaperArchive.Cell {

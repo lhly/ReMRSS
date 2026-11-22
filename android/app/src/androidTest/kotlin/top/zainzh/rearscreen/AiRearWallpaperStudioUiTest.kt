@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.click
@@ -47,12 +48,67 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
+import kotlin.math.abs
 
 @RunWith(AndroidJUnit4::class)
 class AiRearWallpaperStudioUiTest {
     @get:Rule val compose = createEmptyComposeRule()
     private val instrument get() = InstrumentationRegistry.getInstrumentation()
     private val contentId = View.generateViewId()
+
+    @Test fun sparsePreviewStaysCenteredAndCanReplaceAcrossRecreation() {
+        val apps = demoApps()
+        val model = mutableStateOf(studio(apps).copy(grid = AiRearGrid(),
+            work = AiRearStudioWork("林间微光", "11月19日 · 91ae27")))
+        var edits = 0
+        var requested: AiRearStudioAction? = null
+        ActivityScenario.launch(NativeModuleRendererTestHostActivity::class.java).use { scene ->
+            fun install(dark: Boolean, font: Float = 1f) = scene.onActivity { activity ->
+                present(activity, dark, font) {
+                    AiRearWallpaperStudio(model.value, rememberLazyListState(), {}, { edits++ },
+                        {}, { requested = it }, thumbnail = {})
+                }
+            }
+            fun checkRow(slots: List<Int>) {
+                val canvas = compose.onNodeWithTag("ai_rear_canvas").performScrollTo().fetchSemanticsNode().boundsInRoot
+                val area = slots.map { compose.onNodeWithTag("ai_rear_tile_$it").fetchSemanticsNode().boundsInRoot }
+                val viewport = model.value.viewport
+                val expectedX = canvas.left + canvas.width *
+                    (viewport.left + viewport.width - viewport.right) / (2 * viewport.width)
+                assertTrue(abs((area.first().left + area.last().right) / 2 - expectedX) < 3f)
+                assertTrue(abs(area.first().center.y - canvas.center.y) < 3f)
+                assertTrue(area.all { abs(it.center.y - area.first().center.y) < 2f })
+            }
+
+            install(dark = false)
+            compose.onNodeWithTag("ai_rear_add_shortcuts").performClick()
+            assertEquals(1, edits)
+            compose.onNodeWithTag("ai_rear_primary_action").performScrollTo().assertIsNotEnabled()
+            compose.runOnIdle {
+                model.value = model.value.copy(grid = AiRearGrid().bind(0, apps[0].component).bind(2, apps[2].component))
+            }
+            checkRow(listOf(0, 2))
+            compose.onNodeWithTag("ai_rear_tile_1").assertDoesNotExist()
+            compose.onNodeWithTag("ai_rear_tile_5").assertDoesNotExist()
+            capture("adaptive-grid-light-two")
+            compose.onNodeWithTag("ai_rear_primary_action").performScrollTo().assertIsEnabled().performClick()
+            assertEquals(AiRearStudioAction.REPLACE, requested)
+
+            compose.runOnIdle { model.value = model.value.copy(grid = model.value.grid.copy(allApps = true)) }
+            scene.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
+            compose.waitUntil(10_000) {
+                var landscape = false
+                scene.onActivity { landscape = it.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE }
+                landscape
+            }
+            install(dark = true, font = 1.6f)
+            checkRow(listOf(0, 2, 5))
+            compose.onNodeWithTag("ai_rear_tile_5").assertHasClickAction().performClick()
+            assertEquals(2, edits)
+            capture("adaptive-grid-dark-large-with-list")
+            compose.onNodeWithTag("ai_rear_primary_action").performScrollTo().assertIsEnabled()
+        }
+    }
 
     @Test fun previewTilesEditDirectlyAndWorkActionsStayTogether() {
         val apps = demoApps()

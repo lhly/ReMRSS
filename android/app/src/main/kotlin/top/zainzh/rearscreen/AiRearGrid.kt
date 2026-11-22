@@ -1,6 +1,6 @@
 package top.zainzh.rearscreen
 
-/** Six stable settings slots; List is a view of slot six, not a seventh slot or a destructive edit. */
+/** Six stable slot IDs. Visible tiles are compacted for display, not renumbered for activation. */
 internal data class AiRearGrid(
     val apps: List<String?> = List(6) { null },
     val allApps: Boolean = false,
@@ -19,8 +19,23 @@ internal data class AiRearGrid(
         return apps[index]?.let { Tile.App(it) } ?: Tile.Empty
     }
 
-    fun isReady(available: (String) -> Boolean): Boolean =
-        (0 until if (allApps) 5 else 6).all { apps[it]?.let(available) == true }
+    val appCapacity get() = if (allApps) 5 else apps.size
+    val occupiedSlots get() = apps.indices.filter { tile(it) != Tile.Empty }
+
+    fun isReady(available: (String) -> Boolean): Boolean {
+        val occupied = occupiedSlots
+        return occupied.isNotEmpty() && occupied.all { index ->
+            when (val item = tile(index)) {
+                is Tile.App -> available(item.component)
+                Tile.AllApps -> true
+                Tile.Empty -> false
+            }
+        }
+    }
+
+    /** Signed six-slot templates still require exactly the layout their asset path declares. */
+    fun isFull(available: (String) -> Boolean): Boolean =
+        apps.take(appCapacity).all { it?.let(available) == true }
 
     fun bind(index: Int, component: String?): AiRearGrid {
         require(index in apps.indices && !(index == 5 && allApps))

@@ -78,6 +78,9 @@ class AiRearThemeCoexistenceTest {
         assertEquals(6, artwork.buttons)
         assertTrue(artwork.defaultAllApps)
         assertTrue(artwork.art.isEmpty())
+        val oneAndList = AiRearGrid(allApps = true).bind(0, "com.example.one/.Main")
+        assertTrue(oneAndList.isReady { true })
+        assertFalse(artwork.validGrid(oneAndList) { true })
         assertEquals(ModWallpaperThemeKind.DRAWN_CONTROLS, AiRearModWallpaperTheme.classify(themeAssets.keys))
         val one = { key: String -> key.endsWith("/background.png") || key.substringAfterLast('/').startsWith("1-") }
         assertEquals(1, AiRearModWallpaperTheme.fromVerifiedAssets(themeAssets.filterKeys(one)).buttons)
@@ -112,7 +115,7 @@ class AiRearThemeCoexistenceTest {
         val viewport = AiRearWallpaperArchive.Viewport(976, 596, 296, 0, 0, 0)
         val bindings = second.grid.apps.filterNotNull().associateWith { AiRearWallpaperArchive.Badge("Test") }
         output.outputStream().use { stream -> AiRearWallpaperArchive.write(carrier(5), stream, viewport, second.grid,
-            bindings, AiRearWallpaperArchive.Badge("All"), "Empty", null,
+            bindings, AiRearWallpaperArchive.Badge("All"), null,
             AiRearWallpaperArchive.Activation("com.test.remrss", "com.test.remrss.ActivationActivity", second.token), theme) }
         ZipFile(output).use { zip ->
             assertArrayEquals(byteArrayOf(5), zip.getInputStream(zip.getEntry("assets/ai/ai.mp4")).readBytes())

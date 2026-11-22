@@ -44,6 +44,10 @@
     <string name="ai_rear_legacy_changed">確認期間這張壁紙發生了變更。請重新檢查後再替換。</string>
     <string name="ai_rear_legacy_not_written">無法寫入這張壁紙，舊主題和原畫備份未變更。</string>
     <string name="ai_rear_grid_confirm">只替換所選作品並保留備份。之後請在妙享背屏重新套用。請選擇適合在主螢幕鎖定時使用的應用程式。</string>
+    <string name="ai_rear_add_shortcuts">加入快捷應用</string>
+    <string name="ai_rear_visible_buttons">已選 %1$d 格</string>
+    <string name="ai_rear_minimum_shortcut">至少加入一個快捷應用，或開啟「全部應用」。</string>
+    <string name="ai_rear_unavailable_shortcuts">有快捷應用已無法使用，請調整後再替換。</string>
     <string name="ai_rear_complete_grid">目前須填滿 6 格才能替換桌布，「所有應用程式」可佔 1 格。</string>
     <string name="ai_rear_search_apps">搜尋應用程式</string>
     <string name="ai_rear_list_empty">沒有可顯示的應用程式。</string>

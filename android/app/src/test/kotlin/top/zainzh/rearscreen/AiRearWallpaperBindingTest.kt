@@ -34,13 +34,29 @@ class AiRearWallpaperBindingTest {
 
     @Test fun everyVisibleAppMustSupportItsOwnTaskButHiddenSixthIsRetained() {
         val partial = grid.bind(5, null)
-        assertFalse(partial.isReady { true })
+        assertFalse(partial.isFull { true })
+        assertTrue(partial.isReady { true })
         assertTrue(partial.copy(allApps = true).isReady { true })
         assertFalse(partial.copy(allApps = true).isReady { it != apps[4] })
-        assertTrue(grid.copy(allApps = true).copy(allApps = false).isReady { true })
+        assertTrue(grid.copy(allApps = true).isReady { it != apps[5] })
+        assertFalse(grid.isReady { it != apps[5] })
         assertThrows(IllegalArgumentException::class.java) {
             AiRearWallpaperBinding("local_work", token, grid.bind(0, "not a component"))
         }
+    }
+
+    @Test fun sparseBindingKeepsSlotIdsAndNeverResolvesEmptySlots() {
+        val sparse = AiRearGrid().bind(1, apps[1]).bind(4, apps[4]).copy(allApps = true)
+        val applied = AiRearWallpaperBinding.decode(AiRearWallpaperBinding("work", token, sparse).encode())!!
+        assertEquals(listOf(1, 4, 5), applied.grid.occupiedSlots)
+        assertEquals(AiRearGrid.Tile.App(apps[1]), applied.tile(token, "/1", "work"))
+        assertEquals(AiRearGrid.Tile.App(apps[4]), applied.tile(token, "/4", "work"))
+        assertEquals(AiRearGrid.Tile.AllApps, applied.tile(token, "/5", "work"))
+        assertNull(applied.tile(token, "/0", "work"))
+        assertNull(applied.tile(token, "/2", "work"))
+        assertFalse(AiRearGrid().isReady { true })
+        assertTrue(AiRearGrid(allApps = true).isReady { false })
+        assertEquals(listOf(5), AiRearGrid(allApps = true).occupiedSlots)
     }
 
     @Test fun independentTaskModesDoNotAdoptAnExistingMainTask() {
