@@ -640,13 +640,8 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                         plan = new JSONObject(notice == null
                                 ? connected.getRearCastRenderPlan(task, component, layoutDpi, compatibility, requestedFull)
                                 : connected.getRearNotificationRenderPlan(notice.packageName, layoutDpi, compatibility, requestedFull));
-                    boolean parkedWallpaper = wallpaperStandby != null;
-                    // Parked wallpaper uses its existing lightweight, non-IME render path
-                    // unless the user explicitly configured density compatibility for this App.
-                    RearCastViewport render = parkedWallpaper && !compatibility
-                            ? (requestedFull ? safe.full() : safe)
-                            : RearCastGeometry.decode(plan.toString());
-                    int autoRotation = parkedWallpaper ? 0 : plan.optInt("autoRotation", 0);
+                    RearCastViewport render = RearCastGeometry.decode(plan.toString());
+                    int autoRotation = wallpaperStandby != null ? 0 : plan.optInt("autoRotation", 0);
                     int defaultRotation = presentation.rotation != null ? presentation.rotation : autoRotation;
                     android.util.Log.i("VirtualRearHost", "Received safe viewport=" + safe.key());
                     main.post(() -> {

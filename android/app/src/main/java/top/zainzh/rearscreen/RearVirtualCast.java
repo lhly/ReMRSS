@@ -331,31 +331,26 @@ final class RearVirtualCast {
     }
 
     String renderPlan(int task, String component, int density, boolean compatibility, boolean full) throws Exception {
-        return renderPlan(task, component, density, compatibility, full, false);
-    }
-
-    private String renderPlan(int task, String component, int density, boolean compatibility, boolean full,
-            boolean disposableWallpaperCast) throws Exception {
         if (component != null) VirtualCastRequest.component(component);
         if (task >= 0 ? !service.isTaskOnDisplay(task, 0) : component == null)
             throw new IllegalStateException("Source task unavailable");
         String pkg = component == null ? service.getPackageNameFromTaskId(task) : component.substring(0, component.indexOf('/'));
-        return renderPlanForPackage(pkg, density, compatibility, full, task, component, disposableWallpaperCast);
+        return renderPlanForPackage(pkg, density, compatibility, full, task, component);
     }
 
     String renderPlanForPackage(String pkg, int density, boolean compatibility, boolean full) throws Exception {
-        return renderPlanForPackage(pkg, density, compatibility, full, -1, null, false);
+        return renderPlanForPackage(pkg, density, compatibility, full, -1, null);
     }
 
     private String renderPlanForPackage(String pkg, int density, boolean compatibility, boolean full,
-            int task, String component, boolean disposableWallpaperCast) throws Exception {
+            int task, String component) throws Exception {
         if (!BuildConfig.VIRTUAL_CAST_ENABLED) throw new SecurityException("Virtual casting is unavailable");
         VirtualCastRequest.packageName(pkg);
         VirtualCastRequest.density(Integer.toString(density));
         int source = RearCastGeometry.displayDensity(0);
         RearCastViewport safe = RearCastGeometry.read();
-        int actual = compatibility || disposableWallpaperCast
-                ? RearCastCompatibility.density(compatibility, density, source)
+        int actual = compatibility
+                ? RearCastCompatibility.density(true, density, source)
                 : RearCastCompatibility.automaticRenderDensity(density, source, safe);
         RearCastViewport render = RearCastCompatibility.viewport(full ? safe.full() : safe, density, actual);
         return new JSONObject(RearCastGeometry.encode(render)).put("package", pkg).put("renderDensity", actual)
@@ -417,7 +412,7 @@ final class RearVirtualCast {
         RearCastViewport safe = RearCastGeometry.read();
         if (!(full ? safe.full() : safe).key().equals(RearCastGeometry.decode(viewport).key())) throw new IllegalStateException("Rear output area changed before start");
         JSONObject plan = new JSONObject(notificationTarget == null
-                ? renderPlan(task, component, density, compatibility, full, disposableWallpaperCast)
+                ? renderPlan(task, component, density, compatibility, full)
                 : renderPlanForPackage(notificationTarget.packageName, density, compatibility, full));
         if (!RearCastGeometry.decode(plan.toString()).renderKey().equals(RearCastGeometry.decode(viewport).renderKey()))
             throw new IllegalStateException("Rear render plan changed before start");
@@ -831,15 +826,6 @@ final class RearVirtualCast {
             }
             String displayName = RearVirtualIme.DISPLAY_NAME_PREFIX + id;
             createOutputDisplay(displayName);
-            if (!disposableWallpaperCast && !lockedNotification()) {
-                try {
-                    keyboard = RearVirtualIme.enable(display, physicalRearId);
-                    CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=local");
-                } catch (Exception e) {
-                    CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=unavailable reason=" + root(e));
-                    // Lack of IME support does not change this ROM's ordinary touch behavior.
-                }
-            }
             // Apply the resolved orientation before moving the task or enabling hardware input.
             ensureControlledStartCurrent("before_rotation");
             applyDisplayRotation();
@@ -970,9 +956,13 @@ final class RearVirtualCast {
             return notificationTarget != null && notificationTarget.locked;
         }
 
+        private boolean usesDisposableOutput() {
+            return disposableWallpaperCast || lockedNotification();
+        }
+
         private void createOutputDisplay(String displayName) throws Exception {
             int flags = CAST_DISPLAY_FLAGS;
-            if (disposableWallpaperCast || lockedNotification())
+            if (usesDisposableOutput())
                 flags |= RearTrustedVirtualDisplay.DESTROY_CONTENT_ON_REMOVAL;
             // A notification action must keep Android's lock-screen policy. The separate,
             // opted-in home route starts only a plain Launcher entry, like a wallpaper shortcut.
@@ -988,6 +978,17 @@ final class RearVirtualCast {
             display = outputDisplay.create(resizePolicy.config);
             if (RearDisplay.isRear(display)) throw new IOException("Invalid virtual display: " + display);
             ensureControlledStartCurrent("after_virtual_display_create");
+            try {
+                RearVirtualIme localIme = RearVirtualIme.enable(display, physicalRearId);
+                // Temporary lock-screen launches use Android's normal window focus. They do
+                // not take part in the regular cast's focus handoff or task return to main.
+                if (!usesDisposableOutput()) keyboard = localIme;
+                CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=local");
+            } catch (Exception e) {
+                CompatibilityDiagnostics.record("virtual_ime_policy",
+                        "display=" + display + " state=unavailable reason=" + root(e));
+                // The cast remains usable by touch on ROMs without local IME support.
+            }
         }
 
         private void applyDisplayRotation() throws Exception {
@@ -1671,7 +1672,7 @@ final class RearVirtualCast {
                 try {
                     if (nativeReturn == null && !virtualDisplayReleased && inputStopped && keyboard != null
                             && current == this && coordinatorOwnerGeneration == 0L
-                            && !disposableWallpaperCast && "stopped".equals(phase)) {
+                            && !usesDisposableOutput() && "stopped".equals(phase)) {
                         try {
                             nativeReturn = VirtualCastNativeReturn.prepare(display, task);
                         } catch (Exception unavailable) {
@@ -1680,10 +1681,10 @@ final class RearVirtualCast {
                                             + root(unavailable).getClass().getSimpleName());
                         }
                     }
-                    if (!disposableWallpaperCast && !lockedNotification() && !virtualDisplayReleased
-                            && nativeReturn == null) returnTasksToMain();
+                    if (!usesDisposableOutput() && !virtualDisplayReleased && nativeReturn == null)
+                        returnTasksToMain();
                     if (!virtualDisplayReleased) {
-                        if (disposableWallpaperCast || lockedNotification()) restoreUnexpectedReusedTasks();
+                        if (usesDisposableOutput()) restoreUnexpectedReusedTasks();
                         // A disposable display may destroy only the tasks created for it.
                         outputDisplay.close();
                         virtualDisplayReleased = true;
