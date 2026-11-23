@@ -1,6 +1,7 @@
 package top.zainzh.rearscreen.platform
 
 import android.os.SystemClock
+import kotlinx.coroutines.delay
 import java.security.SecureRandom
 import java.util.Base64
 import java.io.Closeable
@@ -259,7 +260,7 @@ internal class RearSceneCoordinator(
      * adopts another owner, changes the saved SAFE/FULL placement, or treats an unknown task
      * query as proof that the old lease can be discarded.
      */
-    override fun reopenOwnedModScene(
+    override suspend fun reopenOwnedModScene(
         owner: SessionOwner,
         component: android.content.ComponentName,
         grantedCapabilities: Set<String>,
@@ -346,7 +347,7 @@ internal class RearSceneCoordinator(
             }
         }
 
-        val result = runCatching {
+        fun presentOwnedTask(allowWake: Boolean) = runCatching {
             gateway.recoverOwnedDisplay(
                 owner = owner,
                 request = capture.request,
@@ -360,11 +361,21 @@ internal class RearSceneCoordinator(
                         !isCurrent() || !installedOwnerIsCurrent() -> SceneRecoveryWakeDecision.STALE
                         physicalRearOn == null -> SceneRecoveryWakeDecision.WAIT_FOR_DISPLAY
                         physicalRearOn -> SceneRecoveryWakeDecision.ALREADY_ON
-                        else -> SceneRecoveryWakeDecision.CLAIMED
+                        allowWake -> SceneRecoveryWakeDecision.CLAIMED
+                        else -> SceneRecoveryWakeDecision.WAIT_FOR_DISPLAY
                     }
                 },
             )
         }.getOrElse { SceneRecoveryResult(SceneError.BACKEND_UNAVAILABLE) }
+        var result = presentOwnedTask(allowWake = true)
+        if (result.awaitTaskVisibilityClassification && result.error == null && !result.deferredByOverlay) {
+            // Power can report ON before HyperOS identifies the single visible rear task.
+            // Just polling the window cannot bring the owned task forward in that state.
+            // Reclassify once via the same exact-task gate, without waking the panel again.
+            delay(RECOVERY_SETTLE_MS)
+            if (!isCurrent() || !installedOwnerIsCurrent()) return ModSceneReopenResult.Busy
+            result = presentOwnedTask(allowWake = false)
+        }
         if (!isCurrent() || !installedOwnerIsCurrent()) return ModSceneReopenResult.Busy
         if (result.deferredByOverlay) return ModSceneReopenResult.Busy
         if (result.error != null) return ModSceneReopenResult.Rejected(result.error)

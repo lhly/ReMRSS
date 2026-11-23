@@ -24,7 +24,7 @@ internal fun initialModSceneRequest(component: ComponentName, grants: Set<String
 
 /** Host-only route for reopening the exact live lease owned by an installed Mod. */
 internal interface ModSceneReopenCoordinator {
-    fun reopenOwnedModScene(
+    suspend fun reopenOwnedModScene(
         owner: SessionOwner,
         component: ComponentName,
         grantedCapabilities: Set<String>,
