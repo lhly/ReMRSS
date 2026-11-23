@@ -31,9 +31,9 @@ public class TaskService extends ITaskService.Stub {
     private static final String TAG = "TaskService";
     private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
             BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
-    // Rebind older Shizuku user services before using the wallpaper adoption RPCs.
-    static final int USER_SERVICE_CONTRACT_VERSION = 111;
-    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 115 : USER_SERVICE_CONTRACT_VERSION;
+    // Replace the resident backend so an in-place update uses the new locked-home IME routing.
+    static final int USER_SERVICE_CONTRACT_VERSION = 112;
+    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 116 : USER_SERVICE_CONTRACT_VERSION;
     private final Object mainTaskFocusLock = new Object();
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {

@@ -852,6 +852,9 @@ final class RearVirtualCast {
                 throw new IllegalStateException("controlled_target_changed_after_move");
             if (lockedNotification()) {
                 launchLockedNotificationTarget(displayName);
+                // The fresh authorized launcher task is now visible, before any reader accepts
+                // touches. Let Android bind its own IME; never focus a task behind keyguard.
+                if (notificationTarget.homeOnly) enableLocalIme();
             } else if (component != null || notificationTarget != null) {
                 ensureControlledStartCurrent("before_target_launch");
                 if (notificationTarget != null) {
@@ -978,6 +981,23 @@ final class RearVirtualCast {
             display = outputDisplay.create(resizePolicy.config);
             if (RearDisplay.isRear(display)) throw new IOException("Invalid virtual display: " + display);
             ensureControlledStartCurrent("after_virtual_display_create");
+            if (lockedNotification() && notificationTarget.homeOnly) {
+                // No editor owns this screen yet. Do not let a startup request fall back to
+                // display 0; enable LOCAL only after awaitLockedNotificationTarget succeeds.
+                try {
+                    RearVirtualIme.deferLockedHome(display, physicalRearId);
+                    CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=deferred");
+                    return;
+                } catch (Exception unavailable) {
+                    // Preserve the existing local-only setup on ROMs that cannot defer IME.
+                    CompatibilityDiagnostics.record("virtual_ime_defer_unavailable",
+                            "display=" + display + " reason=" + root(unavailable).getClass().getSimpleName());
+                }
+            }
+            enableLocalIme();
+        }
+
+        private void enableLocalIme() {
             try {
                 RearVirtualIme localIme = RearVirtualIme.enable(display, physicalRearId);
                 // Temporary lock-screen launches use Android's normal window focus. They do

@@ -10,6 +10,7 @@ import java.util.function.BooleanSupplier;
 final class RearVirtualIme {
     static final String DISPLAY_NAME_PREFIX = "ReMRSS-virtual-";
     private static final int LOCAL = 0; // WindowManager.DISPLAY_IME_POLICY_LOCAL
+    private static final int HIDE = 2; // WindowManager.DISPLAY_IME_POLICY_HIDE
 
     interface Platform {
         void setPolicy(int display, int policy) throws Exception;
@@ -32,13 +33,24 @@ final class RearVirtualIme {
     }
 
     static RearVirtualIme enable(int display, int physicalRear, Platform platform) throws Exception {
+        setOwnedPolicy(display, physicalRear, platform, LOCAL);
+        return new RearVirtualIme(display, platform);
+    }
+
+    static void deferLockedHome(int display, int physicalRear) throws Exception {
+        deferLockedHome(display, physicalRear, shell());
+    }
+
+    static void deferLockedHome(int display, int physicalRear, Platform platform) throws Exception {
+        setOwnedPolicy(display, physicalRear, platform, HIDE);
+    }
+
+    private static void setOwnedPolicy(int display, int physicalRear, Platform platform, int policy) throws Exception {
         if (display <= 0 || physicalRear <= 0 || display == physicalRear) {
             throw new IllegalArgumentException("IME policy requires the owned virtual display");
         }
-        platform.setPolicy(display, LOCAL);
-        if (platform.getPolicy(display) != LOCAL) throw new IllegalStateException("Virtual display IME policy was not applied");
-        // Android discards per-virtual-display settings when this display is released.
-        return new RearVirtualIme(display, platform);
+        platform.setPolicy(display, policy);
+        if (platform.getPolicy(display) != policy) throw new IllegalStateException("Virtual display IME policy was not applied");
     }
 
     /** Runs synchronously before an app-bound DOWN, never on a timer, MOVE, or overlay gesture. */

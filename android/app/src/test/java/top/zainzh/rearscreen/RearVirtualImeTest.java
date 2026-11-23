@@ -24,6 +24,18 @@ public final class RearVirtualImeTest {
         assertThrows(IllegalStateException.class, () -> RearVirtualIme.enable(42, 1, os));
     }
 
+    @Test public void lockedHomeCanDeferThenEnableImeWithoutFocusingOrTouchingAPhysicalDisplay() throws Exception {
+        Fake os = new Fake();
+        os.locked = true;
+        os.policy = 2;
+        assertThrows(IllegalArgumentException.class, () -> RearVirtualIme.deferLockedHome(0, 1, os));
+        assertThrows(IllegalArgumentException.class, () -> RearVirtualIme.deferLockedHome(1, 1, os));
+        RearVirtualIme.deferLockedHome(42, 1, os);
+        os.policy = 0;
+        RearVirtualIme.enable(42, 1, os);
+        assertEquals(List.of("set:42:2", "get:42", "set:42:0", "get:42"), os.calls);
+    }
+
     @Test public void appBoundTouchFocusesTheCurrentTaskOnThatDisplay() throws Exception {
         Fake os = new Fake();
         RearVirtualIme ime = RearVirtualIme.enable(42, 1, os);
