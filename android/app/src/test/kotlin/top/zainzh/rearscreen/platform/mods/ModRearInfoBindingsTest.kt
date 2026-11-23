@@ -4,6 +4,7 @@ import dev.remrss.scene.geometry.CutoutKnowledge
 import dev.remrss.scene.geometry.SceneRegion
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import top.zainzh.rearscreen.platform.CoordinateTransform
@@ -12,6 +13,7 @@ import top.zainzh.rearscreen.platform.PixelRect
 import top.zainzh.rearscreen.platform.PixelSize
 import top.zainzh.rearscreen.platform.RearDeviceInfo
 import top.zainzh.rearscreen.platform.RearViewportSnapshot
+import top.zainzh.rearscreen.platform.rearDeviceInfoForMetrics
 import top.zainzh.rearscreen.platform.ipc.RearDisplayDimensions
 
 class ModRearInfoBindingsTest {
@@ -69,5 +71,47 @@ class ModRearInfoBindingsTest {
         assertEquals("AVAILABLE", info.getString("status"))
         assertTrue(info.isNull("physicalModePx"))
         assertEquals(800, info.getJSONObject("logicalDisplayPx").getInt("width"))
+    }
+
+    @Test fun defaultDisplayResourcesAreRejectedEvenWhenDisplayObjectIdIsCorrect() {
+        // Mirrors the device regression: selected rear ID and Display object ID are both 1,
+        // but the Display object's metrics were sampled with D0 resources (1200x2608).
+        val defaultDisplayMetrics = RearDisplayDimensions(1200, 2608, 1200, 2608, 419, 0)
+        val info = rearDeviceInfoForMetrics(
+            selectedDisplayId = 1,
+            metricsDisplayObjectId = 1,
+            metricsResourceDisplayId = 0,
+            dimensions = defaultDisplayMetrics,
+            state = "OFF",
+        )
+
+        assertEquals(1, info.displayId)
+        assertNull(info.dimensions)
+        assertNull(info.state)
+        val encoded = ModRearInfoBindings.encode(ModRearInfoBindings.Read.Granted(info), false, null)
+            .getJSONObject("info")
+        assertEquals("INFO_UNAVAILABLE", encoded.getString("status"))
+        assertFalse(encoded.has("logicalDisplayPx"))
+        assertFalse(encoded.has("physicalModePx"))
+    }
+
+    @Test fun offRearDisplayKeepsItsOwnLogicalAndPhysicalDimensions() {
+        val rearMetrics = RearDisplayDimensions(976, 596, 976, 596, 400, 0)
+        val info = rearDeviceInfoForMetrics(
+            selectedDisplayId = 1,
+            metricsDisplayObjectId = 1,
+            metricsResourceDisplayId = 1,
+            dimensions = rearMetrics,
+            state = "OFF",
+        )
+        val encoded = ModRearInfoBindings.encode(ModRearInfoBindings.Read.Granted(info), false, null)
+            .getJSONObject("info")
+
+        assertEquals("AVAILABLE", encoded.getString("status"))
+        assertEquals("OFF", encoded.getString("state"))
+        assertEquals(976, encoded.getJSONObject("logicalDisplayPx").getInt("width"))
+        assertEquals(596, encoded.getJSONObject("logicalDisplayPx").getInt("height"))
+        assertEquals(976, encoded.getJSONObject("physicalModePx").getInt("width"))
+        assertEquals(596, encoded.getJSONObject("physicalModePx").getInt("height"))
     }
 }

@@ -40,7 +40,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out author-private
 | 绑定 | 什么时候可读 | 含义 |
 | --- | --- | --- |
 | `data.rear.info.status` | 可见的设置页或本 Mod 背屏场景 | `PENDING` 正在求值；`NOT_GRANTED` 未获此项授权；`DISPLAY_UNAVAILABLE` 未识别到背屏；`INFO_UNAVAILABLE` 已识别但当前读不到参数；`AVAILABLE` 可读。 |
-| `data.rear.info.*` | `AVAILABLE` | `physicalModePx.{width,height}` 为物理模式，ROM 不提供时为空；`logicalDisplayPx.{width,height}` 为逻辑显示尺寸；另有 `densityDpi`、`rotation` 和 `state`。 |
+| `data.rear.info.*` | `AVAILABLE` | `physicalModePx.{width,height}` 为物理模式，ROM 不提供时为空；`logicalDisplayPx.{width,height}` 为背屏逻辑显示尺寸；另有 `densityDpi`、`rotation` 和 `state`。背屏处于 `OFF` 时，系统仍提供可确认的尺寸就继续报告尺寸与 `OFF`；若无法确认读数来自背屏，则报告 `INFO_UNAVAILABLE`，不会回退为主屏尺寸。 |
 | `data.rear.viewport.status` | 可见的设置页或本 Mod 背屏场景 | `PENDING` 正在确认权限；`NOT_GRANTED` 未获授权；`NOT_APPLICABLE` 是设置页；`NOT_READY` 尚无 Core 已接受的实测；`READY` 有当前场景测量。 |
 | `data.rear.viewport.*` | `READY` | `revision` 为本场景测量修订号；`windowPx.{width,height}`、`windowDp.{width,height}` 为窗口尺寸；`contentBoundsPx.{left,top,right,bottom}` 为显示局部像素坐标的内容矩形，`width`/`height` 为该矩形的实际宽高；另有 `region`（`SAFE`/`FULL`）、`densityDpi`、`displayRotation`、`contentRotation`、`cutoutKnowledge`。 |
 
