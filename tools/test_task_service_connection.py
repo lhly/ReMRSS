@@ -102,6 +102,7 @@ f'{PACKAGE}/RearCastMode.java': '''package top.zainzh.rearscreen; public class R
  public static void ready(int index,IBinder b){binds.get(index).onServiceConnected(new ComponentName("test","TaskService"),b);}
 }''',
 f'{PACKAGE}/ITaskService.java': '''package top.zainzh.rearscreen; public interface ITaskService {
+ String getRearDisplayState() throws android.os.RemoteException;
  android.os.IBinder asBinder(); String getForegroundAppOnDisplay(int d); String getDisplayCastOccupancy(int d); String getCurrentForegroundApp(); default String getRearVirtualCastStatus(){return "{}";} default String getRearInputProxyStatus(){return "{}";} default void stopRearVirtualCast(String s){} default void stopRearInputProxy(String s){} boolean disableSubScreenLauncher(); boolean enableSubScreenLauncher(); boolean moveTaskToDisplay(int t,int d); boolean launchWakeActivity(int d); boolean collapseStatusBar();
  class Stub { public static ITaskService asInterface(android.os.IBinder b){return (ITaskService)b;} }
 }''',
@@ -110,6 +111,7 @@ f'{PACKAGE}/TaskService.java': '''package top.zainzh.rearscreen; import android.
  public boolean alive=true,failLink,moveSuccess=true; public volatile int moves,restores,disables; public int links,occupancyQueries; public String occupancy="test-fixture:focused-main-app"; public Runnable beforeTarget,beforeOccupancy; public final List<DeathRecipient> recipients=new ArrayList<>();
  public boolean isBinderAlive(){return alive;} public void linkToDeath(DeathRecipient r,int f) throws RemoteException {if(failLink)throw new RemoteException();recipients.add(r);links++;} public boolean unlinkToDeath(DeathRecipient r,int f){return recipients.remove(r);}
  public void die(){alive=false;for(DeathRecipient r:new ArrayList<>(recipients))r.binderDied();}
+ public String getRearDisplayState(){return "rear-inventory";}
  public IBinder asBinder(){return this;} public String getForegroundAppOnDisplay(int d){return null;} public String getCurrentForegroundApp(){if(beforeTarget!=null)beforeTarget.run();return "com.test:42";}
  public String getDisplayCastOccupancy(int d){occupancyQueries++;if(occupancyQueries>1&&beforeTarget!=null)beforeTarget.run();if(beforeOccupancy!=null)beforeOccupancy.run();return occupancy;}
  public boolean disableSubScreenLauncher(){disables++;return true;} public boolean enableSubScreenLauncher(){restores++;return true;} public boolean moveTaskToDisplay(int t,int d){moves++;return moveSuccess;} public boolean launchWakeActivity(int d){return true;} public boolean collapseStatusBar(){return true;}
@@ -229,6 +231,12 @@ public class ConnectionRegressionTest {
     check(RootBackend.requests==0,"live root session requested permission again");
     TaskServiceManager.release(a);check(RootBackend.unbinds==0&&b.ready==1,"released other root owner");
     TaskServiceManager.release(b);check(RootBackend.unbinds==1&&Shizuku.binds.isEmpty(),"wrong root unbind");break;
+   case "rear_inventory_peek":
+    check(TaskServiceManager.readConnectedRearDisplayState()==null&&Shizuku.binds.isEmpty(),"reading inventory started a connection");
+    acquire(a);Shizuku.ready(0,service);
+    check("rear-inventory".equals(TaskServiceManager.readConnectedRearDisplayState()),"ready backend inventory unavailable");
+    TaskServiceManager.release(a);
+    check(TaskServiceManager.readConnectedRearDisplayState()==null&&Shizuku.binds.size()==1,"reading released inventory rebound service");break;
    case "shared_release":
     acquire(a);acquire(b);check(Shizuku.binds.size()==1,"duplicate remote bind");Shizuku.ready(0,service);
     check(a.ready==1&&b.ready==1,"missing owner callback");acquire(a);Shizuku.ready(0,service);check(a.ready==1&&service.links==1,"duplicate ready");
@@ -373,7 +381,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('PASS ' + name, result.stdout)
 
-for scenario in ['switch_timeout_cancel', 'switch_old_callbacks', 'switch_active_command', 'switch_active_session', 'root_retry_limit', 'root_history_not_a_grant', 'root_denied_no_loop', 'root_authorization_wait', 'root_cancel_authorization', 'root_shared_release', 'shared_release', 'callback_release', 'release_pending', 'bind_timeout', 'server_restart',
+for scenario in ['rear_inventory_peek', 'switch_timeout_cancel', 'switch_old_callbacks', 'switch_active_command', 'switch_active_session', 'root_retry_limit', 'root_history_not_a_grant', 'root_denied_no_loop', 'root_authorization_wait', 'root_cancel_authorization', 'root_shared_release', 'shared_release', 'callback_release', 'release_pending', 'bind_timeout', 'server_restart',
                  'permission_granted', 'release_after_death', 'dead_on_connect',
                  'tile_delayed_ready', 'tile_duplicate_click', 'tile_close_pending',
                  'tile_timeout', 'tile_other_owner', 'tile_destroy_pending',
