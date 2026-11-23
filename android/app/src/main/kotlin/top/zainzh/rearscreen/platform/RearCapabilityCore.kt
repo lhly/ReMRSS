@@ -418,14 +418,19 @@ private class PrivilegedRearSceneGateway(private val context: Context) : RearSce
         } catch (_: Exception) { SceneError.BACKEND_UNAVAILABLE }
     }
 
-    override fun prepareDisplay(owner: SessionOwner, request: SceneRequest): SceneError? {
-        // Every explicitly confirmed new Scene must be visible at launch. keepVisible controls
-        // the Activity's subsequent screen-on policy and one-shot OFF recovery, not ON return.
-        val displayId = runCatching { RearDisplay.requireId() }.getOrNull() ?: return SceneError.DISPLAY_UNAVAILABLE
-        val remote = awaitService() ?: return SceneError.BACKEND_UNAVAILABLE
+    override fun prepareDisplay(owner: SessionOwner, request: SceneRequest): SceneError? =
+        prepareDisplayWithEvidence(owner, request).error
+
+    override fun prepareDisplayWithEvidence(owner: SessionOwner, request: SceneRequest): ScenePrepareResult {
+        // wakeRearDisplayForScene returns true only after the selected physical display is
+        // observed ON; shell-command success by itself is not accepted as power evidence.
+        val displayId = runCatching { RearDisplay.requireId() }.getOrNull()
+            ?: return ScenePrepareResult(error = SceneError.DISPLAY_UNAVAILABLE)
+        val remote = awaitService() ?: return ScenePrepareResult(error = SceneError.BACKEND_UNAVAILABLE)
         return try {
-            if (remote.wakeRearDisplayForScene(displayId)) null else SceneError.DISPLAY_UNAVAILABLE
-        } catch (_: Exception) { SceneError.DISPLAY_UNAVAILABLE }
+            if (remote.wakeRearDisplayForScene(displayId)) ScenePrepareResult(verifiedPhysicalRearOn = true)
+            else ScenePrepareResult(error = SceneError.DISPLAY_UNAVAILABLE)
+        } catch (_: Exception) { ScenePrepareResult(error = SceneError.DISPLAY_UNAVAILABLE) }
     }
 
     override fun targetDisplayId(): Int? = runCatching { RearDisplay.requireId() }.getOrNull()
@@ -546,6 +551,20 @@ private class PrivilegedRearSceneGateway(private val context: Context) : RearSce
             result.optString("status", "QUERY_UNAVAILABLE") == "VERIFIED"
         }.getOrDefault(false)
     }
+
+    override fun inspectLaunchedTask(owner: SessionOwner, expected: LaunchedScene): SceneTaskPresence = runCatching {
+        val raw = awaitService()?.inspectSceneActivityTask(expected.taskId, expected.component.flattenToString(), expected.displayId)
+            ?: return@runCatching SceneTaskPresence.UNKNOWN
+        val result = JSONObject(raw)
+        when {
+            result.optString("status") == "VERIFIED" &&
+                result.optInt("taskId", -1) == expected.taskId &&
+                result.optInt("displayId", -1) == expected.displayId &&
+                result.optString("baseComponent") == expected.component.flattenToString() -> SceneTaskPresence.OWNED
+            result.optString("status") == "TASK_NOT_FOUND" -> SceneTaskPresence.MISSING
+            else -> SceneTaskPresence.UNKNOWN
+        }
+    }.getOrDefault(SceneTaskPresence.UNKNOWN)
 
     override fun finishOwnedTask(owner: SessionOwner, task: LaunchedScene) {
         runCatching { awaitService()?.finishSceneActivityTask(task.taskId, task.component.flattenToString(), task.displayId) }

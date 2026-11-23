@@ -41,6 +41,8 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
@@ -753,11 +755,16 @@ internal class ModSettingsPage(
 
     private fun openRear(id: String) {
         val mod = ModPackageStore.installed(this, id) ?: return
-        if ("rear.scene" !in mod.grantedCapabilities) {
+        if (!mod.enabled || "rear.scene" !in mod.grantedCapabilities) {
             reportFeedback("作者未声明或用户未授权 rear.scene", failed = true, modId = id)
             return
         }
-        ModPackageStore.find(this, id) ?: return
+        val verified = ModPackageStore.find(this, id) ?: return
+        if (verified.authorFingerprint != mod.authorFingerprint ||
+            !ModPackageStore.isAuthorTrusted(this, mod.authorFingerprint)) {
+            reportFeedback("无法验证此 Mod 的作者信任状态", failed = true, modId = id)
+            return
+        }
         val request = top.zainzh.rearscreen.platform.SceneRequest(
             component = ComponentName(this, ModRearSceneActivity::class.java),
             region = top.zainzh.rearscreen.platform.RearRegion.CAMERA_SAFE,
@@ -768,38 +775,127 @@ internal class ModSettingsPage(
             }
         )
         val owner = sessionOwner(mod)
-        // The token is minted only in this positive action, after the visible Miuix confirmation.
-        reportFeedback("正在连接背屏…", modId = id)
-        val token = runCatching {
-            top.zainzh.rearscreen.platform.RearCapabilityCore.get(this).issueSceneActivationAfterUserConfirmation(owner, request)
-        }.getOrElse { exception ->
-            reportFeedback("无法打开背屏：${exception.message ?: "授权暂不可用"}；Mod 设置仍可在本机使用。",
-                failed = true, modId = id)
-            return
+        val core = top.zainzh.rearscreen.platform.RearCapabilityCore.get(this)
+        val installedOwnerIsCurrent = {
+            val current = ModPackageStore.installed(this, id)
+            current != null && current.enabled && current.id == mod.id &&
+                current.version == mod.version && current.versionCode == mod.versionCode &&
+                current.authorFingerprint == mod.authorFingerprint &&
+                current.logicalSessionId == mod.logicalSessionId &&
+                current.grantedCapabilities == mod.grantedCapabilities &&
+                ModPackageStore.isAuthorTrusted(this, mod.authorFingerprint) &&
+                ModPackageStore.find(this, id)?.let { it.authorFingerprint == mod.authorFingerprint &&
+                    it.version == mod.version && it.versionCode == mod.versionCode } == true
         }
+        reportFeedback("正在连接背屏…", modId = id)
         scope.launch(Dispatchers.IO) {
-            val result = runCatching { top.zainzh.rearscreen.platform.RearCapabilityCore.get(activity).displaySessions.openScene(owner, request, token, object : top.zainzh.rearscreen.platform.SceneObserver {
-                override fun onSceneEvent(sessionId: String, generation: Long, event: top.zainzh.rearscreen.platform.SceneEvent) {
-                    when (event) {
-                        top.zainzh.rearscreen.platform.SceneEvent.BackendLost -> scope.launch(Dispatchers.Main) {
-                            reportFeedback("背屏服务已断开；Mod 设置仍可在本机使用。", failed = true, modId = id)
-                        }
-                        is top.zainzh.rearscreen.platform.SceneEvent.Closed -> scope.launch(Dispatchers.Main) {
-                            reportFeedback("背屏场景已关闭：${event.reason}", failed = true, modId = id)
-                        }
-                        else -> Unit
-                    }
+            val reopenCoordinator = core.displaySessions as? ModSceneReopenCoordinator
+            if (reopenCoordinator == null) {
+                android.util.Log.w("ModSceneOpen", "stage=reopen_route_unavailable")
+                withContext(Dispatchers.Main) {
+                    reportFeedback("背屏服务暂不可用；Mod 设置仍可在本机使用。", failed = true, modId = id)
                 }
-            }) }
+                return@launch
+            }
+            val reopen = reopenCoordinator.reopenOwnedModScene(
+                owner = owner,
+                component = request.component,
+                grantedCapabilities = mod.grantedCapabilities,
+                isInstalledOwnerCurrent = installedOwnerIsCurrent,
+            )
+            when (reopen) {
+                is ModSceneReopenResult.Resumed -> {
+                    android.util.Log.i("ModSceneOpen", "stage=existing_session_resumed session=${reopen.sessionId} generation=${reopen.generation} region=${reopen.region.name}")
+                    withContext(Dispatchers.Main) { reportFeedback("已恢复原有背屏场景。", modId = id) }
+                    return@launch
+                }
+                ModSceneReopenResult.Busy -> {
+                    android.util.Log.i("ModSceneOpen", "stage=reopen_busy region=${request.region.name} keepVisible=${request.keepVisible}")
+                    withContext(Dispatchers.Main) { reportFeedback("背屏正在使用中；请稍后再试。", failed = true, modId = id) }
+                    return@launch
+                }
+                is ModSceneReopenResult.Rejected -> {
+                    android.util.Log.i("ModSceneOpen", "stage=reopen_rejected error=${reopen.error.name}")
+                    withContext(Dispatchers.Main) {
+                        reportFeedback(sceneErrorMessage(reopen.error), failed = true, modId = id)
+                    }
+                    return@launch
+                }
+                is ModSceneReopenResult.Pending -> {
+                    android.util.Log.i("ModSceneOpen", "stage=reopen_pending session=${reopen.sessionId} generation=${reopen.generation} reason=${reopen.reason.name}")
+                    val confirmed = withTimeoutOrNull(5_000L) {
+                        while (true) {
+                            val snapshot = runCatching {
+                                core.displaySessions.queryScenePresentation(owner, reopen.sessionId, reopen.generation)
+                            }.getOrNull()
+                            if (snapshot?.sessionId == reopen.sessionId && snapshot.generation == reopen.generation && snapshot.visible) {
+                                return@withTimeoutOrNull true
+                            }
+                            delay(250L)
+                        }
+                        false
+                    } ?: false
+                    withContext(Dispatchers.Main) {
+                        if (confirmed) reportFeedback("已恢复原有背屏场景。", modId = id)
+                        else reportFeedback("原有背屏场景尚未确认显示，请检查背屏后重试。", failed = true, modId = id)
+                    }
+                    return@launch
+                }
+                ModSceneReopenResult.NoExistingSession -> {
+                    android.util.Log.i("ModSceneOpen", "stage=no_owned_session region=${request.region.name} keepVisible=${request.keepVisible}")
+                }
+            }
+
+            if (!installedOwnerIsCurrent()) {
+                withContext(Dispatchers.Main) {
+                    reportFeedback("此 Mod 的安装或背屏授权已变化，请重新打开。", failed = true, modId = id)
+                }
+                return@launch
+            }
+            val token = runCatching {
+                core.issueSceneActivationAfterUserConfirmation(owner, request)
+            }.getOrElse { exception ->
+                withContext(Dispatchers.Main) {
+                    reportFeedback("无法打开背屏：${exception.message ?: "授权暂不可用"}；Mod 设置仍可在本机使用。",
+                        failed = true, modId = id)
+                }
+                return@launch
+            }
+            if (!installedOwnerIsCurrent()) {
+                withContext(Dispatchers.Main) {
+                    reportFeedback("此 Mod 的安装或背屏授权已变化，请重新打开。", failed = true, modId = id)
+                }
+                return@launch
+            }
+            val result = runCatching {
+                core.displaySessions.openScene(owner, request, token, object : top.zainzh.rearscreen.platform.SceneObserver {
+                    override fun onSceneEvent(sessionId: String, generation: Long, event: top.zainzh.rearscreen.platform.SceneEvent) {
+                        when (event) {
+                            top.zainzh.rearscreen.platform.SceneEvent.BackendLost -> scope.launch(Dispatchers.Main) {
+                                reportFeedback("背屏服务已断开；Mod 设置仍可在本机使用。", failed = true, modId = id)
+                            }
+                            is top.zainzh.rearscreen.platform.SceneEvent.Closed -> scope.launch(Dispatchers.Main) {
+                                reportFeedback("背屏场景已关闭：${event.reason}", failed = true, modId = id)
+                            }
+                            else -> Unit
+                        }
+                    }
+                })
+            }
             withContext(Dispatchers.Main) {
                 result.onSuccess { opened ->
                     when (opened) {
-                        is top.zainzh.rearscreen.platform.SceneOpenResult.Rejected ->
+                        is top.zainzh.rearscreen.platform.SceneOpenResult.Rejected -> {
+                            android.util.Log.i("ModSceneOpen", "stage=busy_or_rejected error=${opened.code.name} retryable=${opened.retryable} region=${request.region.name} keepVisible=${request.keepVisible}")
                             reportFeedback(sceneErrorMessage(opened.code), failed = true, modId = id)
-                        is top.zainzh.rearscreen.platform.SceneOpenResult.Accepted ->
+                        }
+                        is top.zainzh.rearscreen.platform.SceneOpenResult.Accepted -> {
+                            android.util.Log.i("ModSceneOpen", "stage=new_session_accepted session=${opened.handle.sessionId} generation=${opened.handle.generation} region=${request.region.name} rotation=${request.contentRotation} keepVisible=${request.keepVisible}")
                             reportFeedback("已请求显示到背屏。", modId = id)
+                        }
                     }
                 }.onFailure { exception ->
+                    android.util.Log.i("ModSceneOpen", "stage=open_failed type=${exception.javaClass.simpleName}")
                     reportFeedback("无法打开背屏：${exception.message ?: "服务暂不可用"}；Mod 设置仍可在本机使用。",
                         failed = true, modId = id)
                 }

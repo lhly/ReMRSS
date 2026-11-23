@@ -11,6 +11,9 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
+import top.zainzh.rearscreen.platform.mods.ModSceneReopenCoordinator
+import top.zainzh.rearscreen.platform.mods.ModSceneReopenResult
+import top.zainzh.rearscreen.platform.mods.ModSceneReopenPendingReason
 
 /** Privilege/backend boundary. Implementations must create a fresh task, never move or stop a caller task. */
 internal interface RearSceneGateway {
@@ -18,6 +21,9 @@ internal interface RearSceneGateway {
     fun authorize(owner: SessionOwner, request: SceneRequest): SceneError?
     /** Prepare only the target display for a confirmed Scene lease; defaults to no platform wake. */
     fun prepareDisplay(owner: SessionOwner, request: SceneRequest): SceneError? = null
+    /** New-session preparation can report trusted physical state separately from command success. */
+    fun prepareDisplayWithEvidence(owner: SessionOwner, request: SceneRequest): ScenePrepareResult =
+        ScenePrepareResult(error = prepareDisplay(owner, request))
     /** Target display for lease-scoped lock/cover event observation; null disables the monitor. */
     fun targetDisplayId(): Int? = null
     /** One-shot recovery for an already-owned task, after an authenticated lock/cover cause. */
@@ -32,8 +38,16 @@ internal interface RearSceneGateway {
         }
     fun launchNewTask(owner: SessionOwner, request: SceneRequest, launchTicket: String, expiresAtElapsedRealtimeMs: Long): LaunchedScene?
     fun verifyLaunchedTask(owner: SessionOwner, expected: LaunchedScene, report: SceneWindowReport): Boolean
+    /** Only an authoritative absent-task result permits a host to retire a stale exact lease. */
+    fun inspectLaunchedTask(owner: SessionOwner, expected: LaunchedScene): SceneTaskPresence = SceneTaskPresence.UNKNOWN
     fun finishOwnedTask(owner: SessionOwner, task: LaunchedScene)
 }
+
+internal enum class SceneTaskPresence { OWNED, MISSING, UNKNOWN }
+internal data class ScenePrepareResult(
+    val error: SceneError? = null,
+    val verifiedPhysicalRearOn: Boolean = false,
+)
 
 data class LaunchedScene(val component: android.content.ComponentName, val taskId: Int, val displayId: Int)
 
@@ -118,7 +132,7 @@ internal class RearSceneCoordinator(
     private val lifecycleMonitor: SceneDisplayLifecycleMonitor? = null,
     private val legacyServiceLease: SceneLegacyLeasePort? = null,
     private val onSceneCommitted: () -> Unit = {}
-) : DisplaySessionCoordinator, SceneViewportTransitionPort {
+) : DisplaySessionCoordinator, SceneViewportTransitionPort, ModSceneReopenCoordinator {
     private data class Ticket(
         val owner: SessionOwner,
         val sessionId: String,
@@ -241,6 +255,151 @@ internal class RearSceneCoordinator(
     }
 
     /**
+     * A Mod's positive "show on rear" action may resume only its own ready task. It never
+     * adopts another owner, changes the saved SAFE/FULL placement, or treats an unknown task
+     * query as proof that the old lease can be discarded.
+     */
+    override fun reopenOwnedModScene(
+        owner: SessionOwner,
+        component: android.content.ComponentName,
+        grantedCapabilities: Set<String>,
+        isInstalledOwnerCurrent: () -> Boolean,
+    ): ModSceneReopenResult {
+        if (owner.principal !is SessionPrincipal.SignedMod || component.packageName != owner.transportPackageName)
+            return ModSceneReopenResult.Rejected(SceneError.CAPABILITY_DENIED)
+
+        data class Capture(
+            val sessionId: String,
+            val record: Record,
+            val request: SceneRequest,
+            val launch: LaunchedScene,
+            val generation: Long,
+            val ownershipEpoch: Long,
+            val rearPowerSignalSequence: Long,
+            val activityVisibilitySequence: Long,
+            val recoveryToken: Long,
+        )
+
+        val capture = synchronized(lock) {
+            if (sessions.isEmpty() && tickets.isEmpty()) return@synchronized null
+            if (sessions.size != 1 || tickets.values.any { it.owner != owner })
+                return ModSceneReopenResult.Busy
+            val (sessionId, record) = sessions.entries.single()
+            if (tickets.values.any { it.sessionId != sessionId || it.generation != record.generation || !it.consumed })
+                return ModSceneReopenResult.Busy
+            if (record.owner != owner || record.request.component != component || record.closed)
+                return ModSceneReopenResult.Busy
+            val launch = record.launch ?: return ModSceneReopenResult.Busy
+            if (record.viewport == null) return ModSceneReopenResult.Busy
+            val required = record.request.requiredCapabilities + record.request.derivedCapabilities()
+            if (!required.all { it.name in grantedCapabilities })
+                return ModSceneReopenResult.Rejected(SceneError.CAPABILITY_DENIED)
+            val ownershipEpoch = displayOwnershipEpoch()
+            if (record.displayOwnershipEpoch != ownershipEpoch || temporaryOverlayActive || record.covered ||
+                hasPendingSceneRecovery(record) || record.taskVisibilityRecheckPending ||
+                record.pendingViewportTransition != null)
+                return ModSceneReopenResult.Busy
+            Capture(sessionId, record, record.request, launch, record.generation, ownershipEpoch,
+                record.rearPowerSignalSequence, record.activityVisibilitySequence, record.recoveryToken)
+        } ?: return ModSceneReopenResult.NoExistingSession
+
+        fun installedOwnerIsCurrent(): Boolean = runCatching(isInstalledOwnerCurrent).getOrDefault(false)
+        if (!installedOwnerIsCurrent()) return ModSceneReopenResult.Rejected(SceneError.CAPABILITY_DENIED)
+        val authorizationError = runCatching { gateway.authorize(owner, capture.request) }
+            .getOrElse { SceneError.BACKEND_UNAVAILABLE }
+        if (authorizationError != null) return ModSceneReopenResult.Rejected(authorizationError)
+
+        fun isCurrent(): Boolean = synchronized(lock) {
+            sessions.size == 1 && sessions[capture.sessionId] === capture.record &&
+                !capture.record.closed && capture.record.owner == owner &&
+                capture.record.generation == capture.generation &&
+                tickets.values.all { it.sessionId == capture.sessionId && it.generation == capture.generation && it.consumed } &&
+                capture.record.request == capture.request && capture.record.launch == capture.launch &&
+                capture.record.viewport != null &&
+                capture.record.activityVisibilitySequence == capture.activityVisibilitySequence &&
+                displayOwnershipEpoch() == capture.ownershipEpoch &&
+                !temporaryOverlayActive && !capture.record.covered &&
+                capture.record.pendingRecoveryFromScreenOff == null &&
+                !hasPendingSceneRecovery(capture.record) && !capture.record.taskVisibilityRecheckPending &&
+                capture.record.pendingViewportTransition == null && capture.record.recoveryToken == capture.recoveryToken
+        }
+
+        if (!isCurrent() || !installedOwnerIsCurrent()) return ModSceneReopenResult.Busy
+        val taskPresence = runCatching { gateway.inspectLaunchedTask(owner, capture.launch) }
+            .getOrDefault(SceneTaskPresence.UNKNOWN)
+        when (taskPresence) {
+            SceneTaskPresence.OWNED -> Unit
+            SceneTaskPresence.UNKNOWN -> return ModSceneReopenResult.Rejected(SceneError.BACKEND_UNAVAILABLE)
+            SceneTaskPresence.MISSING -> {
+                if (!isCurrent() || !installedOwnerIsCurrent()) return ModSceneReopenResult.Busy
+                val closed = synchronized(lock) {
+                    val current = sessions[capture.sessionId]
+                    if (current !== capture.record || current.owner != owner || current.launch != capture.launch ||
+                        current.generation != capture.generation || current.request != capture.request ||
+                        !isCurrent() || current.activityVisible || current.visible)
+                        return@synchronized null
+                    closeLocked(capture.sessionId, current)
+                } ?: return ModSceneReopenResult.Busy
+                finishLeaseResources(capture.sessionId, closed, SceneCloseReason.COMPONENT_FINISHED)
+                runCatching { android.util.Log.i("ModSceneReopen", "stage=stale_task_closed session=${capture.sessionId} generation=${capture.generation} task=${capture.launch.taskId} display=${capture.launch.displayId}") }
+                return ModSceneReopenResult.NoExistingSession
+            }
+        }
+
+        val result = runCatching {
+            gateway.recoverOwnedDisplay(
+                owner = owner,
+                request = capture.request,
+                task = capture.launch,
+                cachedRearOn = capture.record.targetDisplayOn,
+                isCurrent = { installedOwnerIsCurrent() && isCurrent() },
+                // This path is reached only from a fresh positive Mod UI action. It may wake
+                // the exact existing task just as a newly confirmed Scene open does.
+                onWakeAttempt = { physicalRearOn ->
+                    when {
+                        !isCurrent() || !installedOwnerIsCurrent() -> SceneRecoveryWakeDecision.STALE
+                        physicalRearOn == null -> SceneRecoveryWakeDecision.WAIT_FOR_DISPLAY
+                        physicalRearOn -> SceneRecoveryWakeDecision.ALREADY_ON
+                        else -> SceneRecoveryWakeDecision.CLAIMED
+                    }
+                },
+            )
+        }.getOrElse { SceneRecoveryResult(SceneError.BACKEND_UNAVAILABLE) }
+        if (!isCurrent() || !installedOwnerIsCurrent()) return ModSceneReopenResult.Busy
+        if (result.deferredByOverlay) return ModSceneReopenResult.Busy
+        if (result.error != null) return ModSceneReopenResult.Rejected(result.error)
+        if (result.verifiedPhysicalPresentation) {
+            val acceptedPowerEvidence = synchronized(lock) {
+                val current = sessions[capture.sessionId]
+                if (current !== capture.record || current.closed || current.owner != owner ||
+                    current.generation != capture.generation || current.request != capture.request ||
+                    current.launch != capture.launch || displayOwnershipEpoch() != capture.ownershipEpoch ||
+                    temporaryOverlayActive || current.covered) false
+                else acceptBackendVerifiedRearOnLocked(
+                    capture.sessionId, current, capture.rearPowerSignalSequence,
+                )
+            }
+            if (!acceptedPowerEvidence) {
+                return ModSceneReopenResult.Pending(capture.sessionId, capture.generation,
+                    ModSceneReopenPendingReason.SCENE_WINDOW_NOT_VISIBLE)
+            }
+        }
+        val pendingReason = when {
+            result.awaitTaskVisibilityClassification -> ModSceneReopenPendingReason.TASK_VISIBILITY_AMBIGUOUS
+            result.awaitSceneVisible -> ModSceneReopenPendingReason.SCENE_WINDOW_NOT_VISIBLE
+            !result.verifiedPhysicalPresentation -> ModSceneReopenPendingReason.PRESENTATION_UNVERIFIED
+            else -> null
+        }
+        if (pendingReason != null) {
+            runCatching { android.util.Log.i("ModSceneReopen", "stage=existing_task_pending session=${capture.sessionId} generation=${capture.generation} task=${capture.launch.taskId} display=${capture.launch.displayId} reason=${pendingReason.name}") }
+            return ModSceneReopenResult.Pending(capture.sessionId, capture.generation, pendingReason)
+        }
+        runCatching { android.util.Log.i("ModSceneReopen", "stage=existing_task_resumed session=${capture.sessionId} generation=${capture.generation} task=${capture.launch.taskId} display=${capture.launch.displayId} region=${capture.request.region.name} rotation=${capture.request.contentRotation} verifiedPhysicalPresentation=true") }
+        return ModSceneReopenResult.Resumed(capture.sessionId, capture.generation, capture.request.region)
+    }
+
+
+    /**
      * True only for a live, ready lease whose exact verified task is the foreground task returned
      * by the privileged rear-display query. Package name alone never grants cast preemption.
      */
@@ -361,11 +520,34 @@ internal class RearSceneCoordinator(
             discardPendingLaunch(sessionId, ticket, SceneCloseReason.PREEMPTED)
             return SceneOpenResult.Rejected(SceneError.DISPLAY_BUSY, true)
         }
-        val prepareError = try { gateway.prepareDisplay(owner, request) }
-            catch (_: Exception) { SceneError.DISPLAY_UNAVAILABLE }
-        if (prepareError != null) {
+        val prepareCapture = synchronized(lock) {
+            sessions[sessionId]?.takeIf { !it.closed && it.owner == owner && it.generation == generation }
+                ?.let { it to (it.rearPowerSignalSequence to it.targetDisplayOn) }
+        } ?: run {
+            discardPendingLaunch(sessionId, ticket, SceneCloseReason.PREEMPTED)
+            return SceneOpenResult.Rejected(SceneError.STALE_SESSION, true)
+        }
+        val prepareResult = try { gateway.prepareDisplayWithEvidence(owner, request) }
+            catch (_: Exception) { ScenePrepareResult(error = SceneError.DISPLAY_UNAVAILABLE) }
+        if (prepareResult.error != null) {
+            val after = synchronized(lock) { sessions[sessionId]?.let { it.rearPowerSignalSequence to it.targetDisplayOn } }
+            runCatching { android.util.Log.i("RearScenePrepare", "stage=display_prepare_failed ownerKind=${sceneOwnerKind(owner)} region=${request.region.name} cachedBefore=${prepareCapture.second.second} signalBefore=${prepareCapture.second.first} cachedAfter=${after?.second} signalAfter=${after?.first} error=${prepareResult.error.name} backendVerified=${prepareResult.verifiedPhysicalRearOn}") }
             discardPendingLaunch(sessionId, ticket, SceneCloseReason.BACKEND_LOST)
-            return SceneOpenResult.Rejected(prepareError, prepareError == SceneError.BACKEND_UNAVAILABLE)
+            return SceneOpenResult.Rejected(prepareResult.error, prepareResult.error == SceneError.BACKEND_UNAVAILABLE)
+        }
+        val powerAccepted = if (prepareResult.verifiedPhysicalRearOn) synchronized(lock) {
+            val current = sessions[sessionId]
+            if (current !== prepareCapture.first || current.closed || current.owner != owner ||
+                current.generation != generation || current.request != request ||
+                current.displayOwnershipEpoch != ownershipEpoch || displayOwnershipEpoch() != ownershipEpoch ||
+                temporaryOverlayActive || current.covered) false
+            else acceptBackendVerifiedRearOnLocked(sessionId, current, prepareCapture.second.first)
+        } else false
+        val afterPrepare = synchronized(lock) { sessions[sessionId]?.let { it.rearPowerSignalSequence to it.targetDisplayOn } }
+        runCatching { android.util.Log.i("RearScenePrepare", "stage=display_prepare_confirmed ownerKind=${sceneOwnerKind(owner)} region=${request.region.name} cachedBefore=${prepareCapture.second.second} signalBefore=${prepareCapture.second.first} cachedAfter=${afterPrepare?.second} signalAfter=${afterPrepare?.first} backendVerified=${prepareResult.verifiedPhysicalRearOn} powerAccepted=$powerAccepted") }
+        if (prepareResult.verifiedPhysicalRearOn && !powerAccepted) {
+            discardPendingLaunch(sessionId, ticket, SceneCloseReason.PREEMPTED)
+            return SceneOpenResult.Rejected(SceneError.DISPLAY_BUSY, true)
         }
         if (displayOwnershipEpoch() != ownershipEpoch || !ownsActiveSession(owner, sessionId) || isTransientOverlayActive()) {
             discardPendingLaunch(sessionId, ticket, SceneCloseReason.PREEMPTED)
@@ -1276,11 +1458,26 @@ internal class RearSceneCoordinator(
     private fun acceptVerifiedPhysicalPresentation(capture: RecoveryCapture): Boolean = synchronized(lock) {
         val record = sessions[capture.sessionId] ?: return@synchronized false
         if (!isRecoveryCurrent(capture)) return@synchronized false
-        if (record.rearPowerSignalSequence != capture.rearPowerSignalSequence && record.targetDisplayOn != true)
-            return@synchronized false
+        acceptBackendVerifiedRearOnLocked(capture.sessionId, record, capture.rearPowerSignalSequence)
+    }
+
+    /** Physical ON evidence may bridge a missing power callback, but never a newer real OFF. */
+    private fun acceptBackendVerifiedRearOnLocked(
+        sessionId: String,
+        record: Record,
+        capturedSignalSequence: Long,
+    ): Boolean {
+        if (record.rearPowerSignalSequence != capturedSignalSequence && record.targetDisplayOn != true)
+            return false
         record.backendVerifiedRearOn = true
-        updateEffectiveVisibilityLocked(capture.sessionId, record)
-        true
+        updateEffectiveVisibilityLocked(sessionId, record)
+        return true
+    }
+
+    private fun sceneOwnerKind(owner: SessionOwner): String = when (owner.principal) {
+        is SessionPrincipal.SignedMod -> "signed_mod"
+        is SessionPrincipal.AndroidClient -> "sdk"
+        is SessionPrincipal.HostFeature -> "host"
     }
 
     /** An inspection cancelled before wake must not consume the cause or leave it permanently scheduled. */

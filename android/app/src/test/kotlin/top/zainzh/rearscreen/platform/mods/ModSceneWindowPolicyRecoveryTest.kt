@@ -19,6 +19,36 @@ class ModSceneWindowPolicyRecoveryTest {
         assertFalse(trace.shouldLog("hidden|epoch=3|rev=5|expected=false", false, false))
     }
 
+
+    @Test fun discardedPresentationSnapshotExplainsEpochBindingAndRevisionFailures() {
+        val gate = ModSceneWindowLifecycleGate("scene-bound", 17L) {}
+        gate.onActivityStarted(true)
+        gate.onWindowStateChanged(attached = true, viewShown = true, windowVisible = true)
+        val epoch = gate.currentWindowRequestEpoch()
+        val valid = ScenePresentationSnapshot("scene-bound", 17L, revision = 8L, visible = true, hiddenReason = null)
+        assertEquals(null, gate.rejectionReason(valid, epoch))
+        assertTrue(gate.applyPresentationSnapshot(valid, epoch))
+        assertEquals("BINDING_MISMATCH", gate.rejectionReason(valid.copy(sessionId = "other"), epoch))
+        assertEquals("REVISION_OLDER", gate.rejectionReason(valid.copy(revision = 7L), epoch))
+        assertEquals("REVISION_CONFLICT", gate.rejectionReason(valid.copy(visible = false), epoch))
+        gate.onActivityStarted(false)
+        assertEquals("WINDOW_EPOCH_STALE", gate.rejectionReason(valid, epoch))
+    }
+
+    @Test fun onlyTheCurrentNonConfigurationDestroyClosesItsModLease() {
+        assertTrue(shouldCloseModSceneOnDestroy(isCurrentInstance = true, isFinishing = true,
+            isChangingConfigurations = false))
+        assertTrue("unexpected destruction releases a vanished Activity's exact lease",
+            shouldCloseModSceneOnDestroy(isCurrentInstance = true, isFinishing = false,
+                isChangingConfigurations = false))
+        assertFalse("configuration recreation preserves the same Core lease",
+            shouldCloseModSceneOnDestroy(isCurrentInstance = true, isFinishing = false,
+                isChangingConfigurations = true))
+        assertFalse("a late old Activity cannot close the newer binding",
+            shouldCloseModSceneOnDestroy(isCurrentInstance = false, isFinishing = true,
+                isChangingConfigurations = false))
+    }
+
     @Test fun acceptedSameCoreSnapshotReappliesCurrentKeepFlagEffect() {
         var windowHasKeepFlag = false
         var effectReconciliations = 0

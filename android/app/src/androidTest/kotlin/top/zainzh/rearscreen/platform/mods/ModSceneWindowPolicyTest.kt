@@ -252,6 +252,9 @@ class ModSceneWindowPolicyTest {
         }
         compose.waitForIdle()
         assertTrue("content is composed only after the host opens the visibility gate", hiddenContentComposed)
+        val visiblePixels = compose.onRoot().captureToImage().toPixelMap()
+        assertEquals("the opened presentation paints its content instead of remaining black",
+            Color.Red.toArgb(), visiblePixels[visiblePixels.width / 2, visiblePixels.height / 2].toArgb())
         compose.runOnUiThread { (container[0]?.parent as? android.view.ViewGroup)?.removeView(container[0]) }
     }
 }

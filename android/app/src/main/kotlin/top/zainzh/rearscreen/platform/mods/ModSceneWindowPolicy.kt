@@ -107,6 +107,13 @@ internal class ModSceneWindowPolicyTraceGate {
     }
 }
 
+/** A configuration recreation keeps the lease; destroying the current Activity does not. */
+internal fun shouldCloseModSceneOnDestroy(
+    isCurrentInstance: Boolean,
+    isFinishing: Boolean,
+    isChangingConfigurations: Boolean,
+): Boolean = isCurrentInstance && (isFinishing || !isChangingConfigurations)
+
 /** Shared by the real rear Activity and its instrumentation check: hidden scenes are fully black. */
 @Composable
 internal fun ModSceneVisibilitySurface(visible: Boolean, content: @Composable () -> Unit) {
@@ -164,6 +171,17 @@ internal class ModSceneWindowLifecycleGate(
 
     fun currentWindowRequestEpoch(): Long = windowRequestEpoch
 
+    /** Explain why a current authoritative snapshot was discarded, for bounded diagnostics. */
+    fun rejectionReason(snapshot: ScenePresentationSnapshot?, requestEpoch: Long): String? = when {
+        requestEpoch != windowRequestEpoch -> "WINDOW_EPOCH_STALE"
+        snapshot == null -> "PRESENTATION_MISSING"
+        snapshot.sessionId != sessionId || snapshot.generation != generation -> "BINDING_MISMATCH"
+        presentationRevision != null && snapshot.revision < presentationRevision!! -> "REVISION_OLDER"
+        presentationRevision == snapshot.revision && presentationValid && snapshot.visible != presentationVisible ->
+            "REVISION_CONFLICT"
+        else -> null
+    }
+
     /** Geometry changed locally; invalidate old Core visibility snapshots without querying the lease. */
     fun invalidateForGeometryChange() {
         invalidatePresentationForWindowEpoch()
@@ -172,7 +190,7 @@ internal class ModSceneWindowLifecycleGate(
 
     /** Apply only a fresh Core read for this exact Activity window epoch. Events never carry authority. */
     fun applyPresentationSnapshot(snapshot: ScenePresentationSnapshot?, requestEpoch: Long): Boolean {
-        if (requestEpoch != windowRequestEpoch) return false
+        if (rejectionReason(snapshot, requestEpoch) == "WINDOW_EPOCH_STALE") return false
         if (snapshot == null) {
             // A missing/unauthorized lease is fail-closed and invalidates any
             // concurrent query that was captured against this local window state.
@@ -182,11 +200,7 @@ internal class ModSceneWindowLifecycleGate(
             update()
             return true
         }
-        if (snapshot.sessionId != sessionId || snapshot.generation != generation) {
-            return false
-        }
-        if (presentationRevision != null && snapshot.revision < presentationRevision!!) return false
-        if (presentationRevision == snapshot.revision && presentationValid && snapshot.visible != presentationVisible) return false
+        if (rejectionReason(snapshot, requestEpoch) != null) return false
         presentationValid = true
         presentationVisible = snapshot.visible
         presentationRevision = snapshot.revision

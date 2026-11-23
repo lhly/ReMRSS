@@ -107,7 +107,7 @@ internal class ModSceneReadyController(
 
         ioExecutor.execute {
             val outcome = runCatching { perform(request) }
-                .getOrElse { AttemptOutcome(SceneOperationResult(false, SceneError.BACKEND_UNAVAILABLE, retryable = true), null) }
+                .getOrElse { AttemptOutcome(SceneOperationResult(false, SceneError.BACKEND_UNAVAILABLE, retryable = true), request.serial) }
             mainHandler.post { finishAttempt(outcome) }
         }
     }
@@ -124,7 +124,7 @@ internal class ModSceneReadyController(
                 // queryable presentation is the only evidence that permits viewport refresh.
                 synchronized(lock) { readyCommitted = true }
             } else {
-                return AttemptOutcome(ready, null)
+                return AttemptOutcome(ready, startingRequest.serial)
             }
         }
 
@@ -157,6 +157,21 @@ internal class ModSceneReadyController(
                 // The report changed while Binder was in flight. Publish the latest measured
                 // viewport before declaring this Activity ready.
                 next = latest
+                retryAttempt = false
+                completion = null
+            } else if (!result.success && outcome.reportedSerial != null &&
+                current?.serial != outcome.reportedSerial && latest != null) {
+                // A failure belongs to the request that actually crossed Binder, not whichever
+                // Activity happens to own the process-scoped controller when it returns.
+                // Reissue the current binding; never let an old INVALID_STATE poison it.
+                next = latest
+                retryAttempt = false
+                completion = null
+            } else if (!result.success && outcome.reportedSerial != null &&
+                current?.serial != outcome.reportedSerial && latest == null) {
+                // The old Activity stopped while its report was in flight. Keep the ticket
+                // nonterminal until the replacement Activity submits its own measured window.
+                next = null
                 retryAttempt = false
                 completion = null
             } else if (!result.success && result.retryable && attempts < MAX_ATTEMPTS && latest != null) {

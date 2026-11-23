@@ -14,6 +14,7 @@ import android.graphics.Point
 import android.util.Log
 import android.view.Display
 import android.view.View
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
@@ -135,6 +136,11 @@ class ModRearSceneActivity : ComponentActivity() {
         override fun onViewAttachedToWindow(view: View) { reportActualWindowVisibility() }
         override fun onViewDetachedFromWindow(view: View) { reportActualWindowVisibility() }
     }
+    private val windowVisibilityListener = ViewTreeObserver.OnWindowVisibilityChangeListener {
+        // Re-read DecorView state after the window transition; the callback value alone
+        // does not establish attachment, visibility, or this Activity's current binding.
+        window.decorView.post { reportActualWindowVisibility() }
+    }
     private val core by lazy { RearCapabilityCore.get(this) }
     private val broker by lazy { ModBrokerProvider.get(this) }
     private val observer = object : SceneObserver {
@@ -145,19 +151,25 @@ class ModRearSceneActivity : ComponentActivity() {
                     is SceneEvent.Ready -> {
                         // READY proves the measured window, not that Core has made
                         // the rear display visible. Visibility arrives separately.
+                        logSceneLifecycle("core_ready_event", "eventGeneration=$generation")
                         refreshRearViewportBinding()
                         sceneReady = windowReported
                         message = ""
                         reconcileScenePresentation()
                     }
-                    is SceneEvent.ViewportChanged -> refreshRearViewportBinding()
+                    is SceneEvent.ViewportChanged -> {
+                        logSceneLifecycle("core_viewport_event", "revision=${event.revision}")
+                        refreshRearViewportBinding()
+                    }
                     is SceneEvent.VisibilityChanged,
                     is SceneEvent.Suspended,
                     SceneEvent.Restored -> reconcileScenePresentation()
                     SceneEvent.BackendLost -> {
+                        logSceneLifecycle("core_backend_lost")
                         reconcileScenePresentation()
                     }
                     is SceneEvent.Closed -> {
+                        logSceneLifecycle("core_closed_event", "reason=${event.reason.name}")
                         ModSceneReadyController.markClosed(launchTicket)
                         coreClosed = true
                         sceneReady = false
@@ -190,6 +202,7 @@ class ModRearSceneActivity : ComponentActivity() {
         val ticket = intent.getStringExtra("remrss_scene_ticket")
         val route = ticket?.let { core.resolveSceneLaunchForHostActivity(it, componentName) }
         if (route == null) {
+            Log.i("ModRearSceneLifecycle", "stage=route_rejected task=$taskId display=${window.decorView.display?.displayId ?: -1} ticketPresent=${!ticket.isNullOrBlank()}")
             // A ticket which no longer resolves cannot own a live READY controller.
             // Drop only this opaque ticket entry; do not infer or close another owner.
             ModSceneReadyController.markClosed(ticket)
@@ -198,6 +211,7 @@ class ModRearSceneActivity : ComponentActivity() {
         }
         launch = route
         launchTicket = ticket
+        logSceneLifecycle("route_resolved", "region=${route.request.region.name} rotation=${route.request.contentRotation} keepVisible=${route.request.keepVisible}")
         val restoredSession = savedInstanceState?.getString("scene_session")
         val restoredGeneration = savedInstanceState?.getLong("scene_generation")
         // The verified launch ticket is authoritative. Saved state may carry viewport data,
@@ -216,7 +230,10 @@ class ModRearSceneActivity : ComponentActivity() {
         val installed = ModPackageStore.installed(this, principal.modId)
         val verified = ModPackageStore.find(this, principal.modId)
         if (installed == null || !installed.enabled || !ModPackageStore.isAuthorTrusted(this, principal.authorFingerprint) ||
-            verified == null || verified.authorFingerprint != principal.authorFingerprint || installed.logicalSessionId != principal.logicalSessionId) {
+            verified == null || verified.authorFingerprint != principal.authorFingerprint ||
+            verified.version != installed.version || verified.versionCode != installed.versionCode ||
+            installed.logicalSessionId != principal.logicalSessionId ||
+            !route.request.requiredCapabilities.all { it.name in installed.grantedCapabilities }) {
             runCatching { top.zainzh.rearscreen.platform.revokeModControlledCastOwner(this, owner) }
             core.displaySessions.closeOwnerSessions(owner, SceneCloseReason.OWNER_REVOKED)
             ModSceneReadyController.markClosed(ticket)
@@ -226,8 +243,13 @@ class ModRearSceneActivity : ComponentActivity() {
         // Do not publish a process-scoped READY controller until this exact signed
         // Mod route has passed the current installation, enabled, and trust checks.
         readyController = ModSceneReadyController.forLaunch(route, requireNotNull(ticket), core.displaySessions)
-        if (readyController == null) { finishAndRemoveTask(); return }
+        if (readyController == null) {
+            logSceneLifecycle("ready_controller_unavailable")
+            finishAndRemoveTask()
+            return
+        }
         registerSceneInstance()
+        logSceneLifecycle("binding_registered")
         pkg = verified
         model = ModPackageStore.model(this, principal.modId)
         if (restoredSession == route.sessionId && restoredGeneration == route.generation) {
@@ -323,6 +345,9 @@ class ModRearSceneActivity : ComponentActivity() {
             if (view === sceneContainer) markSceneContainerLayoutReady(ticket)
         }.also { container.addOnLayoutChangeListener(it) }
         window.decorView.addOnAttachStateChangeListener(decorAttachListener)
+        if (Build.VERSION.SDK_INT >= 34) {
+            window.decorView.viewTreeObserver.addOnWindowVisibilityChangeListener(windowVisibilityListener)
+        }
         reportActualWindowVisibility()
         window.decorView.post {
             if ((sceneViewportTransition != null || !windowReported) && window.decorView.width > 0 && window.decorView.height > 0)
@@ -340,7 +365,12 @@ class ModRearSceneActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         val route = launch ?: return
-        runCatching { core.displaySessions.attachSceneObserver(route.owner, route.sessionId, generation, observer) }
+        if (!isCurrentSceneInstance()) {
+            logSceneLifecycle("activity_resumed_stale_instance")
+            return
+        }
+        val attached = runCatching { core.displaySessions.attachSceneObserver(route.owner, route.sessionId, generation, observer) }
+        logSceneLifecycle("activity_resumed", "attachSuccess=${attached.getOrNull()?.success == true}")
         reportActualWindowVisibility()
     }
 
@@ -348,6 +378,7 @@ class ModRearSceneActivity : ComponentActivity() {
         super.onStart()
         if (!::windowLifecycleGate.isInitialized) return
         windowLifecycleGate.onActivityStarted(true)
+        logSceneLifecycle("activity_started")
         if (window.decorView.width > 0 && window.decorView.height > 0) {
             applyMeasuredCameraInsets()
             configureSceneViewport()
@@ -365,6 +396,7 @@ class ModRearSceneActivity : ComponentActivity() {
         // open and is re-authorized only after fresh Core visibility on return.
         windowReportRequests.invalidate()
         readyController?.setActive(instanceToken, false)
+        logSceneLifecycle("activity_stopped")
         if (::windowLifecycleGate.isInitialized) {
             windowLifecycleGate.onActivityStarted(false)
             reportActualWindowVisibility()
@@ -384,6 +416,7 @@ class ModRearSceneActivity : ComponentActivity() {
     override fun onDestroy() {
         val id = (launch?.owner?.principal as? SessionPrincipal.SignedMod)?.modId
         val isCurrentInstance = isCurrentSceneInstance()
+        logSceneLifecycle("activity_destroyed", "isCurrentInstance=$isCurrentInstance finishing=$isFinishing changingConfigurations=$isChangingConfigurations")
         sceneViewportTransition?.let { transition ->
             core.sceneViewportTransitions?.abortSceneViewportTransition(
                 transition.oldRoute.owner, transition.oldRoute.sessionId, transition.oldRoute.generation, transition.id)
@@ -400,6 +433,10 @@ class ModRearSceneActivity : ComponentActivity() {
         layoutListener?.let(window.decorView::removeOnLayoutChangeListener)
         sceneContainerLayoutListener?.let { sceneContainer?.removeOnLayoutChangeListener(it) }
         window.decorView.removeOnAttachStateChangeListener(decorAttachListener)
+        if (Build.VERSION.SDK_INT >= 34) {
+            val observer = window.decorView.viewTreeObserver
+            if (observer.isAlive) observer.removeOnWindowVisibilityChangeListener(windowVisibilityListener)
+        }
         stopHostData()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (id != null) effectConsumer?.let { ModHostEffectRouter.consumers.remove(id, it) }
@@ -413,9 +450,10 @@ class ModRearSceneActivity : ComponentActivity() {
         effectInFlightCompletion?.invoke(false, "E_SCENE_ACTIVITY_CLOSED")
         effectRequestCompletion = null
         effectInFlightCompletion = null
-        if (isCurrentInstance && isFinishing && launch != null && !coreClosed) {
+        if (shouldCloseModSceneOnDestroy(isCurrentInstance, isFinishing, isChangingConfigurations) && launch != null && !coreClosed) {
             val route = launch!!
-            core.displaySessions.closeScene(route.owner, route.sessionId)
+            val closed = runCatching { core.displaySessions.closeScene(route.owner, route.sessionId) }.getOrNull()
+            Log.i("ModRearSceneLifecycle", "stage=destroy_close session=${route.sessionId} generation=${route.generation} task=$taskId result=${closed?.success == true} error=${closed?.error?.name ?: "none"}")
             ModSceneReadyController.markClosed(launchTicket)
         }
         sessionId?.let { activeSceneInstances.remove(it, instanceToken) }
@@ -876,6 +914,7 @@ class ModRearSceneActivity : ComponentActivity() {
                 return@submit
             }
             if (!completion.result.success) {
+                logSceneLifecycle("ready_rejected", "error=${completion.result.error?.name ?: "none"} retryable=${completion.result.retryable} epoch=${completion.windowEpoch}")
                 error = "背屏窗口验证失败：${completion.result.error}"
                 finishAndRemoveTask()
                 return@submit
@@ -895,6 +934,7 @@ class ModRearSceneActivity : ComponentActivity() {
     }
 
     private fun completeWindowReady(route: SceneLaunchContext) {
+        logSceneLifecycle("window_ready", "region=${route.request.region.name} rotation=${route.request.contentRotation}")
         windowReported = true
         refreshRearViewportBinding()
         sceneReady = true
@@ -920,6 +960,7 @@ class ModRearSceneActivity : ComponentActivity() {
         val visible = windowLifecycleGate.currentState().windowVisible
         val reported = runCatching { core.displaySessions.reportSceneVisibility(route.owner, route.sessionId, generation, visible) }
             .getOrNull()
+        Log.i("ModRearSceneVisibility", "stage=window_report session=${route.sessionId} generation=$generation visible=$visible attached=${decor.isAttachedToWindow} shown=${decor.isShown} windowVisible=${decor.windowVisibility == View.VISIBLE} decorPx=${decor.width}x${decor.height} rootPx=${sceneRoot?.width ?: 0}x${sceneRoot?.height ?: 0} containerPx=${sceneContainer?.width ?: 0}x${sceneContainer?.height ?: 0} containerLayout=${sceneContainer?.hasAppliedContentLayout == true} success=${reported?.success == true} error=${reported?.error?.name ?: "none"} epoch=${windowLifecycleGate.currentWindowRequestEpoch()}")
         if (reported?.success == true) reconcileScenePresentation()
         else if (reported != null) {
             windowLifecycleGate.applyPresentationSnapshot(null, windowLifecycleGate.currentWindowRequestEpoch())
@@ -939,11 +980,18 @@ class ModRearSceneActivity : ComponentActivity() {
         }
         if (snapshotResult.isFailure) {
             windowLifecycleGate.applyPresentationSnapshot(null, requestEpoch)
+            Log.w("ModRearSceneVisibility", "stage=snapshot_query_failed session=${route.sessionId} generation=$generation epoch=$requestEpoch type=${snapshotResult.exceptionOrNull()?.javaClass?.simpleName}")
             error = "无法读取背屏显示状态"
             return
         }
         val snapshot = snapshotResult.getOrNull()
+        val rejected = windowLifecycleGate.rejectionReason(snapshot, requestEpoch)
         val applied = windowLifecycleGate.applyPresentationSnapshot(snapshot, requestEpoch)
+        when {
+            snapshot == null && applied -> Log.i("ModRearSceneVisibility", "stage=snapshot_missing session=${route.sessionId} generation=$generation epoch=$requestEpoch result=fail_closed")
+            rejected != null -> Log.i("ModRearSceneVisibility", "stage=snapshot_discarded reason=$rejected session=${route.sessionId} generation=$generation epoch=$requestEpoch revision=${snapshot?.revision ?: -1L}")
+            else -> Log.i("ModRearSceneVisibility", "stage=snapshot_applied session=${route.sessionId} generation=$generation epoch=$requestEpoch revision=${snapshot?.revision ?: -1L} visible=${snapshot?.visible ?: false} accepted=$applied")
+        }
         if (applied && viewportPresentationRefreshPending && snapshot?.visible == true &&
             windowLifecycleGate.currentState().windowVisible && isCurrentSceneInstance() && !isFinishing && !isDestroyed) {
             viewportPresentationRefreshPending = false
@@ -1049,14 +1097,27 @@ class ModRearSceneActivity : ComponentActivity() {
         val after = (window.attributes.flags and keepFlag) != 0
         val gate = if (::windowLifecycleGate.isInitialized) windowLifecycleGate.currentState() else null
         val displayId = window.decorView.display?.displayId ?: -1
-        val stateKey = "task=$taskId display=$displayId sceneReady=$sceneReady " +
-            "windowVisible=${isWindowActuallyVisible()} coreVisible=$coordinatorVisible requested=$requested expected=$expected " +
-            "expected=$expected epoch=${gate?.windowRequestEpoch ?: -1L} revision=${gate?.presentationRevision ?: -1L}"
+        val decor = window.decorView
+        val stateKey = "task=$taskId display=$displayId session=${sessionId ?: "none"} generation=$generation " +
+            "sceneReady=$sceneReady windowReported=$windowReported contentLayoutReady=$contentLayoutReady " +
+            "attached=${decor.isAttachedToWindow} shown=${decor.isShown} windowVisible=${isWindowActuallyVisible()} " +
+            "decorPx=${decor.width}x${decor.height} rootPx=${sceneRoot?.width ?: 0}x${sceneRoot?.height ?: 0} " +
+            "containerPx=${sceneContainer?.width ?: 0}x${sceneContainer?.height ?: 0} containerLayout=${sceneContainer?.hasAppliedContentLayout == true} " +
+            "coreVisible=$coordinatorVisible contentVisible=${policy.showSceneContent} requested=$requested expected=$expected " +
+            "transition=${sceneViewportTransition?.phase ?: "none"} refreshPending=$viewportPresentationRefreshPending " +
+            "epoch=${gate?.windowRequestEpoch ?: -1L} revision=${gate?.presentationRevision ?: -1L}"
         // Log only policy-state changes, observed Window flag transitions, or an actual
         // before/after application. Repeated frame/layout callbacks with stable state stay quiet.
         if (windowPolicyTraceGate.shouldLog(stateKey, before, after)) {
             Log.i("ModSceneKeepPolicy", "apply $stateKey windowAttrKeepBefore=$before windowAttrKeepAfter=$after")
         }
+    }
+
+
+    private fun logSceneLifecycle(stage: String, details: String = "") {
+        val gate = if (::windowLifecycleGate.isInitialized) windowLifecycleGate.currentState() else null
+        val displayId = window.decorView.display?.displayId ?: -1
+        Log.i("ModRearSceneLifecycle", "stage=$stage session=${sessionId ?: "none"} generation=$generation instance=$instanceToken task=$taskId display=$displayId activityStarted=${gate?.activityStarted ?: false} windowVisible=${gate?.windowVisible ?: false} coreVisible=${gate?.coordinatorVisible ?: false} epoch=${gate?.windowRequestEpoch ?: -1L} finishing=$isFinishing changingConfigurations=$isChangingConfigurations $details")
     }
 
     private fun windowPolicy() = ModSceneWindowPolicy(
@@ -1074,7 +1135,16 @@ class ModRearSceneActivity : ComponentActivity() {
     private fun isCurrentSceneInstance(): Boolean = sessionId?.let { activeSceneInstances[it] == instanceToken && instanceToken != 0L } == true
 
     private fun acceptSceneEvent(eventSessionId: String, eventGeneration: Long): Boolean {
-        if (!isCurrentSceneInstance() || sessionId != eventSessionId || eventGeneration < generation) return false
+        val reason = when {
+            !isCurrentSceneInstance() -> "STALE_ACTIVITY_INSTANCE"
+            sessionId != eventSessionId -> "SESSION_MISMATCH"
+            eventGeneration < generation -> "GENERATION_OLDER"
+            else -> null
+        }
+        if (reason != null) {
+            Log.i("ModRearSceneLifecycle", "stage=event_discarded reason=$reason session=${sessionId ?: "none"} generation=$generation eventSession=$eventSessionId eventGeneration=$eventGeneration instance=$instanceToken")
+            return false
+        }
         generation = eventGeneration
         return true
     }

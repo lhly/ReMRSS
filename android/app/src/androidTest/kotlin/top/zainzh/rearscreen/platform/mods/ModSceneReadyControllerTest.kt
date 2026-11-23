@@ -51,6 +51,34 @@ class ModSceneReadyControllerTest {
         assertEquals(0, oldCallback.get())
     }
 
+    @Test fun oldNonretryableReadyFailureCannotPoisonNewActivityBinding() {
+        val port = BarrierPort().apply {
+            readyResults += SceneOperationResult(false, SceneError.INVALID_STATE, retryable = false)
+        }
+        val fixture = fixture(port)
+        val oldCallback = AtomicInteger()
+        val newReady = CountDownLatch(1)
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            fixture.controller.submit(15L, report(151), 1L, active = true) { oldCallback.incrementAndGet() }
+        }
+        assertTrue("old Activity reached READY report", port.readyEntered.await(3, TimeUnit.SECONDS))
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            fixture.controller.detach(15L)
+            fixture.controller.submit(16L, report(161), 2L, active = true) {
+                assertEquals(16L, it.instance)
+                assertEquals(2L, it.windowEpoch)
+                assertTrue(it.result.success)
+                newReady.countDown()
+            }
+        }
+        port.releaseReady.countDown()
+        assertTrue("the current Activity retries with its own valid measured window", newReady.await(5, TimeUnit.SECONDS))
+        assertEquals(2, port.readyCalls.get())
+        assertEquals(listOf(151L, 161L), port.readyRevisions.toList())
+        assertEquals(0, oldCallback.get())
+    }
+
     @Test fun recreationBeforeFirstReadyStartsUsesNewInstanceReportAndNoLostTicket() {
         val port = BarrierPort().apply { blockReady = false }
         val controller = fixture(port).controller
