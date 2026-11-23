@@ -277,7 +277,6 @@ internal class RearSceneCoordinator(
             val generation: Long,
             val ownershipEpoch: Long,
             val rearPowerSignalSequence: Long,
-            val activityVisibilitySequence: Long,
             val recoveryToken: Long,
         )
 
@@ -301,7 +300,7 @@ internal class RearSceneCoordinator(
                 record.pendingViewportTransition != null)
                 return ModSceneReopenResult.Busy
             Capture(sessionId, record, record.request, launch, record.generation, ownershipEpoch,
-                record.rearPowerSignalSequence, record.activityVisibilitySequence, record.recoveryToken)
+                record.rearPowerSignalSequence, record.recoveryToken)
         } ?: return ModSceneReopenResult.NoExistingSession
 
         fun installedOwnerIsCurrent(): Boolean = runCatching(isInstalledOwnerCurrent).getOrDefault(false)
@@ -310,6 +309,8 @@ internal class RearSceneCoordinator(
             .getOrElse { SceneError.BACKEND_UNAVAILABLE }
         if (authorizationError != null) return ModSceneReopenResult.Rejected(authorizationError)
 
+        // Presenting the exact owned task can itself make that Activity visible while the
+        // Binder call is in flight. That window report is not an ownership change.
         fun isCurrent(): Boolean = synchronized(lock) {
             sessions.size == 1 && sessions[capture.sessionId] === capture.record &&
                 !capture.record.closed && capture.record.owner == owner &&
@@ -317,7 +318,6 @@ internal class RearSceneCoordinator(
                 tickets.values.all { it.sessionId == capture.sessionId && it.generation == capture.generation && it.consumed } &&
                 capture.record.request == capture.request && capture.record.launch == capture.launch &&
                 capture.record.viewport != null &&
-                capture.record.activityVisibilitySequence == capture.activityVisibilitySequence &&
                 displayOwnershipEpoch() == capture.ownershipEpoch &&
                 !temporaryOverlayActive && !capture.record.covered &&
                 capture.record.pendingRecoveryFromScreenOff == null &&
