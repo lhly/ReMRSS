@@ -66,7 +66,10 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
     private Handler handler;
     private volatile boolean taskServiceReleased;
     private volatile ITaskService taskService = null;
+    static final String EXTRA_LOCKED_NOTIFICATION = "locked_notification_session";
     private volatile String virtualSessionId;
+    // Runtime policy of the current Keeper owner; never written to the user's sensor preference.
+    private volatile boolean lockedNotificationSession;
     private volatile int latestServiceStartId;
     private volatile long physicalCastOwnerGeneration;
     private volatile PhysicalStopRequest physicalStopRequest;
@@ -414,6 +417,10 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
                 return START_NOT_STICKY;
             }
             if (requestedSession != null) {
+                if (!requestedSession.equals(virtualSessionId)) {
+                    lockedNotificationSession = intent.getBooleanExtra(EXTRA_LOCKED_NOTIFICATION, false);
+                    isProximityCovered = false;
+                }
                 virtualSessionId = requestedSession;
                 monitoredTaskInfo = intent.getStringExtra("lastMovedTask");
                 synchronized (VIRTUAL_SESSION_LOCK) { VIRTUAL_SESSION_LOCK.notifyAll(); }
@@ -422,7 +429,11 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
             stopRearScreenWakeup();
             startForeground(NOTIFICATION_ID, buildNotification());
             bindTaskService();
-            if (sensorManager == null) initProximitySensor();
+            if (lockedNotificationSession) {
+                if (proximityListenerRegistered) unregisterProximitySensor();
+            } else if (proximitySensorEnabled && !proximityListenerRegistered) {
+                initProximitySensor();
+            }
             handler.removeCallbacks(checkTaskRunnable);
             startTaskMonitoring();
             return START_NOT_STICKY;
@@ -1185,10 +1196,11 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
                             service.wakeLock.acquire();
                         } catch (Exception ignored) { }
                     }
-                    if (service.proximitySensorEnabled && service.sensorManager != null && service.proximitySensor != null) {
+                    if (service.proximityReturnEnabled() && service.sensorManager != null && service.proximitySensor != null) {
                         service.proximityListenerRegistered = service.sensorManager.registerListener(
                                 service, service.proximitySensor, SensorManager.SENSOR_DELAY_NORMAL);
-                        if (service.proximityListenerRegistered && (SceneLegacyServiceLease.hasActiveLease() || service.taskServiceReleased)) {
+                        if (service.proximityListenerRegistered && (!service.proximityReturnEnabled()
+                                || SceneLegacyServiceLease.hasActiveLease() || service.taskServiceReleased)) {
                             service.unregisterProximitySensor();
                         }
                     }
@@ -1281,7 +1293,7 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
 
                 if (proximitySensor != null) {
                     // V2.2: 只有在传感器开关启用时才注册监听器
-                    if (proximitySensorEnabled && !taskServiceReleased && !hasExclusiveDisplayLease()) {
+                    if (proximityReturnEnabled() && !taskServiceReleased && !hasExclusiveDisplayLease()) {
                         boolean registered = sensorManager.registerListener(
                                 this,
                                 proximitySensor,
@@ -1291,7 +1303,7 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
                         // Sensor discovery can run off the main thread while a Scene lease
                         // starts. Recheck after registration so that race cannot leave a
                         // legacy back sensor client active behind the Scene.
-                        if (registered && (taskServiceReleased || hasExclusiveDisplayLease())) {
+                        if (registered && (!proximityReturnEnabled() || taskServiceReleased || hasExclusiveDisplayLease())) {
                             unregisterProximitySensor();
                         }
 
@@ -1330,6 +1342,16 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
         }
     }
 
+    private boolean proximityReturnEnabled() {
+        return proximitySensorEnabled && !lockedNotificationSession;
+    }
+
+    /** A delayed gesture belongs to the cast in which the sensor first reported NEAR. */
+    static boolean mayFinishOnProximity(boolean enabled, boolean lockedNotice, String triggerSession,
+            String currentSession) {
+        return enabled && !lockedNotice && java.util.Objects.equals(triggerSession, currentSession);
+    }
+
     /**
      * 传感器数据变化回调
      */
@@ -1337,9 +1359,7 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
     public void onSensorChanged(SensorEvent event) {
         if (virtualSessionId == null && hasExclusiveDisplayLease()) return;
         // V2.2: 如果传感器已关闭，不处理事件
-        if (!proximitySensorEnabled) {
-            return;
-        }
+        if (!proximityReturnEnabled()) return;
 
         // 检查是否是我们的背屏接近传感器
         if (event.sensor == proximitySensor) {
@@ -1358,6 +1378,7 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
                 isProximityCovered = true;
                 lastProximityTime = currentTime;
                 final int triggerStartId = latestServiceStartId;
+                final String triggerSession = virtualSessionId;
                 final boolean triggerHadControlledOwner =
                         LegacyDisplayOccupancy.hasControlledPhysicalProjectionRecord(this);
                 final LegacyDisplayOccupancy.ControlledPhysicalProjectionIdentity triggerOwner =
@@ -1372,6 +1393,8 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
                 handler.postDelayed(new Runnable() {
                     @Override
                     public void run() {
+                        if (!mayFinishOnProximity(proximitySensorEnabled, lockedNotificationSession,
+                                triggerSession, virtualSessionId)) return;
                         if (isProximityCovered &&
                                 (System.currentTimeMillis() - lastProximityTime >= PROXIMITY_DEBOUNCE_MS)) {
                             boolean currentHasControlledOwner =
@@ -1387,7 +1410,7 @@ public class RearScreenKeeperService extends Service implements SensorEventListe
                                 Log.i(TAG, "proximity_return_ignored stale_trigger_owner");
                                 return;
                             }
-                            // 确认覆盖超过500ms，触发拉回主屏
+                            // 仅原会话的持续遮挡可以触发返回。
                             Log.w(TAG, "👋 Debounce timer expired - triggering return to main display!");
                             handleProximityCovered(triggerOwner, triggerHadControlledOwner);
                         } else {

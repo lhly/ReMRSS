@@ -1648,6 +1648,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                     if (ending || (probe != null && wallpaperStartCancelled)) return;
                     Intent keeper = new Intent(this, RearScreenKeeperService.class)
                             .putExtra(VirtualCastUriFlow.EXTRA_SESSION, session)
+                            .putExtra(RearScreenKeeperService.EXTRA_LOCKED_NOTIFICATION, notice != null && notice.locked)
                             .putExtra("lastMovedTask", monitored)
                             .putExtra("keepScreenOnEnabled", getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
                                     .getBoolean("flutter.keep_screen_on_enabled", true));

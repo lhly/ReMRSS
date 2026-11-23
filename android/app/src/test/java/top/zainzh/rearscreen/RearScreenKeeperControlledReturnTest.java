@@ -13,6 +13,14 @@ public class RearScreenKeeperControlledReturnTest {
         assertFalse(RearScreenKeeperService.matchesControlledReturnRequest(true, true, 91, 13L, 91, 12L));
     }
 
+    @Test public void coveredSensorCannotEndALockedNotificationOrFollowAnOldCast() {
+        assertFalse(RearScreenKeeperService.mayFinishOnProximity(true, true, "locked", "locked"));
+        assertFalse(RearScreenKeeperService.mayFinishOnProximity(true, false, "previous", "new"));
+        assertFalse(RearScreenKeeperService.mayFinishOnProximity(false, false, "cast", "cast"));
+        assertTrue(RearScreenKeeperService.mayFinishOnProximity(true, false, "cast", "cast"));
+        assertTrue(RearScreenKeeperService.mayFinishOnProximity(true, false, null, null));
+    }
+
     @Test public void delayedProximityReturnCannotAdoptANewStartOrOwnerGeneration() {
         assertTrue(RearScreenKeeperService.delayedProximityOwnerStillCurrent(
                 7, 7, true, 91, 12L, true, 91, 12L));
