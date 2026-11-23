@@ -67,7 +67,7 @@ data class SceneRequest(
     val requiredCapabilities: Set<CapabilityRequirement> = emptySet(),
     /** Explicit content orientation; independent of physical display rotation. */
     val contentRotation: Int = 0,
-    /** False only for old wire requests which predate explicit content orientation. */
+    /** False when the caller uses the default orientation (including older wire requests). */
     val hasExplicitContentRotation: Boolean = true
 ) {
     init {

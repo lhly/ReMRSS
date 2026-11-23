@@ -765,15 +765,7 @@ internal class ModSettingsPage(
             reportFeedback("无法验证此 Mod 的作者信任状态", failed = true, modId = id)
             return
         }
-        val request = top.zainzh.rearscreen.platform.SceneRequest(
-            component = ComponentName(this, ModRearSceneActivity::class.java),
-            region = top.zainzh.rearscreen.platform.RearRegion.CAMERA_SAFE,
-            keepVisible = "rear.scene.keep_visible" in mod.grantedCapabilities,
-            requiredCapabilities = buildSet {
-                add(top.zainzh.rearscreen.platform.CapabilityRequirement("rear.scene", 1))
-                if (mod.grantedCapabilities.contains("rear.scene.keep_visible")) add(top.zainzh.rearscreen.platform.CapabilityRequirement("rear.scene.keep_visible", 1))
-            }
-        )
+        val request = initialModSceneRequest(ComponentName(this, ModRearSceneActivity::class.java), mod.grantedCapabilities)
         val owner = sessionOwner(mod)
         val core = top.zainzh.rearscreen.platform.RearCapabilityCore.get(this)
         val installedOwnerIsCurrent = {
