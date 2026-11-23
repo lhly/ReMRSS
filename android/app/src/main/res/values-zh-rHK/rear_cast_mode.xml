@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rear_density_title">應用程式版面適配</string>
+    <string name="rear_density_summary">畫面兩側留白、文字顯示不全時，可為該應用程式開啟。</string>
+</resources>

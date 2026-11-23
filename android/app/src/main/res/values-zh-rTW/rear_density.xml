@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="rear_density_help">放寬應用程式的視窗大小限制，並可個別設定版面配置 DPI。預設關閉，下次投放生效。使用背螢幕鍵盤不必開啟。</string>
+    <string name="rear_density_help">畫面正常時可保留標準版面。開啟適配後，可單獨調整該應用程式的版面大小。</string>
     <string name="rear_density_bulk_summary">作用於全部 %1$d 個應用程式，不受搜尋影響</string>
     <string name="rear_density_bulk_running">正在更新 %1$d 個應用程式…</string>
     <string name="rear_density_bulk_enable">全部開啟</string>
@@ -12,7 +12,7 @@
     <string name="rear_density_failed">無法讀取應用清單</string>
     <string name="rear_density_empty">沒有符合的應用</string>
     <string name="rear_density_retry">重試</string>
-    <string name="rear_density_layout_title">版面配置 DPI</string>
+    <string name="rear_density_layout_title">版面大小</string>
     <string name="rear_density_layout_default">預設（%1$d DPI）</string>
     <string name="rear_density_layout_value">%1$d DPI</string>
     <string name="rear_density_layout_help">數值越小，內容越小、可顯示的資訊越多。範圍 72–640，下次虛擬投放生效；URI 中指定的 DPI 優先。</string>
@@ -20,7 +20,9 @@
     <string name="rear_density_layout_save">儲存</string>
     <string name="rear_density_layout_reset">使用預設值</string>
     <string name="rear_density_layout_cancel">取消</string>
-    <string name="rear_density_partial_support">此系統未完整支援版面適配，已使用原有密度相容方式</string>
-    <string name="rear_density_group_enabled">已開啟（%1$d）</string>
-    <string name="rear_density_group_disabled">未開啟（%1$d）</string>
+    <string name="rear_density_partial_support">此系統不支援完整的版面適配，仍會套用所選版面大小。</string>
+    <string name="rear_density_group_enabled">已開啟適配（%1$d）</string>
+    <string name="rear_density_group_disabled">標準版面（%1$d）</string>
+    <string name="rear_density_enabled_next_cast">下次投放生效：「%1$s」已開啟適配</string>
+    <string name="rear_density_disabled_next_cast">下次投放生效：「%1$s」已切回標準版面</string>
 </resources>

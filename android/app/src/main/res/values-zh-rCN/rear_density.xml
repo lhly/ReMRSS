@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="rear_density_help">为应用放宽窗口尺寸限制，并可单独设置布局 DPI。默认关闭，下次投放生效。使用背屏键盘不用开启。</string>
+    <string name="rear_density_help">画面正常时可保留标准布局。开启适配后，可单独调节这个应用的布局大小。</string>
     <string name="rear_density_bulk_summary">作用于全部 %1$d 个应用，不受搜索影响</string>
     <string name="rear_density_bulk_running">正在更新 %1$d 个应用…</string>
     <string name="rear_density_bulk_enable">全部开启</string>
@@ -12,7 +12,7 @@
     <string name="rear_density_failed">无法读取应用列表</string>
     <string name="rear_density_empty">没有匹配的应用</string>
     <string name="rear_density_retry">重试</string>
-    <string name="rear_density_layout_title">布局 DPI</string>
+    <string name="rear_density_layout_title">布局大小</string>
     <string name="rear_density_layout_default">默认（%1$d DPI）</string>
     <string name="rear_density_layout_value">%1$d DPI</string>
     <string name="rear_density_layout_help">数值越小，内容越小、可显示的信息越多。范围 72–640，下次虚拟投放生效；URI 中指定的 DPI 优先。</string>
@@ -20,7 +20,9 @@
     <string name="rear_density_layout_save">保存</string>
     <string name="rear_density_layout_reset">使用默认值</string>
     <string name="rear_density_layout_cancel">取消</string>
-    <string name="rear_density_partial_support">此系统未完整支持布局适配，已使用原有密度兼容方式</string>
-    <string name="rear_density_group_enabled">已开启（%1$d）</string>
-    <string name="rear_density_group_disabled">未开启（%1$d）</string>
+    <string name="rear_density_partial_support">此系统不支持完整的布局适配，仍会应用所选布局大小。</string>
+    <string name="rear_density_group_enabled">已开启适配（%1$d）</string>
+    <string name="rear_density_group_disabled">标准布局（%1$d）</string>
+    <string name="rear_density_enabled_next_cast">下次投放生效：「%1$s」已开启适配</string>
+    <string name="rear_density_disabled_next_cast">下次投放生效：「%1$s」已切回标准布局</string>
 </resources>

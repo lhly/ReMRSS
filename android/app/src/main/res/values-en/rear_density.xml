@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="rear_density_help">Relaxes window size limits and lets you set a layout DPI for each app. Off by default. Changes apply to the next cast. Not required for the rear keyboard.</string>
+    <string name="rear_density_help">Keep the standard layout if the app looks right. Turn on adaptation to adjust the layout size for that app.</string>
     <string name="rear_density_bulk_summary">Applies to all %1$d apps, regardless of search</string>
     <string name="rear_density_bulk_running">Updating %1$d apps…</string>
     <string name="rear_density_bulk_enable">Enable all</string>
@@ -12,7 +12,7 @@
     <string name="rear_density_failed">Could not load apps</string>
     <string name="rear_density_empty">No matching apps</string>
     <string name="rear_density_retry">Retry</string>
-    <string name="rear_density_layout_title">Layout DPI</string>
+    <string name="rear_density_layout_title">Layout size</string>
     <string name="rear_density_layout_default">Default (%1$d DPI)</string>
     <string name="rear_density_layout_value">%1$d DPI</string>
     <string name="rear_density_layout_help">Lower values make content smaller and fit more information. Range: 72–640. Applies to the next virtual cast; an explicit DPI in the URI takes priority.</string>
@@ -20,7 +20,9 @@
     <string name="rear_density_layout_save">Save</string>
     <string name="rear_density_layout_reset">Use default</string>
     <string name="rear_density_layout_cancel">Cancel</string>
-    <string name="rear_density_partial_support">Full layout adaptation is unavailable on this system. Using density compatibility.</string>
-    <string name="rear_density_group_enabled">Enabled (%1$d)</string>
-    <string name="rear_density_group_disabled">Not enabled (%1$d)</string>
+    <string name="rear_density_partial_support">This system does not support full layout adaptation. Your selected layout size still applies.</string>
+    <string name="rear_density_group_enabled">Adaptation on (%1$d)</string>
+    <string name="rear_density_group_disabled">Standard layout (%1$d)</string>
+    <string name="rear_density_enabled_next_cast">Next cast: adaptation on for %1$s.</string>
+    <string name="rear_density_disabled_next_cast">Next cast: standard layout for %1$s.</string>
 </resources>

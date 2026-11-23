@@ -7,7 +7,7 @@
 | 初次设置、磁贴、权限、后台和自动化 | [使用指南](usage.md) |
 | 选择、授权和切换 Root | [Root 权限来源](root-backend.md) |
 | 投放操作、侧滑、旋转和显示范围 | [虚拟背屏投放](virtual-rear-casting.md) |
-| 按 App 设置布局大小与缩放兼容 | [密度兼容](density-compatibility.md) |
+| 按 App 设置布局大小与缩放兼容 | [应用布局适配](density-compatibility.md) |
 | AI 壁纸快捷布局、锁屏启动及恢复原画 | [背屏启动器](rear-wallpaper-shortcuts.md) |
 | 原图、手机外壳和图片保存 | [背屏截图](rear-screenshot.md) |
 | 镜头间电量、时间、日期和天气 | [镜头区域信息](camera-gap-battery.md) |

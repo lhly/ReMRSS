@@ -4,7 +4,7 @@
     <string name="rear_cast_mode_on">Handles rear touch and disables system double-tap to sleep.\nAutomation and tiles use virtual casting too.</string>
     <string name="rear_cast_mode_off">Off: use direct casting. The system handles touch and Back gestures; double-tap sleep may still occur.</string>
     <string name="rear_cast_mode_next">The current cast keeps its mode. Stop and cast again to apply.</string>
-    <string name="rear_density_title">Density compatibility</string>
-    <string name="rear_density_summary">Adjust app layout and display size</string>
+    <string name="rear_density_title">App layout adaptation</string>
+    <string name="rear_density_summary">Try for apps with blank sides or cut-off text.</string>
     <string name="rear_cast_unavailable">Virtual casting is unavailable on this system. Direct casting remains available.</string>
 </resources>

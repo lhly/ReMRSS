@@ -25,6 +25,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
@@ -110,10 +111,20 @@ internal class TutorialGuide(private val host: ComponentActivity, saved: Bundle?
                 sections.forEachIndexed { index, section ->
                     item(section) {
                         Chapter(section, getString(titles[index])) {
-                            getString(steps[index]).replace("{scheme}", BuildConfig.URI_SCHEME).split('\n').forEachIndexed { number, step ->
-                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("${number + 1}.", fontSize = 14.sp, color = AppPalette.accent())
-                                    Text(step, fontSize = 14.sp, color = AppPalette.secondary(), modifier = Modifier.weight(1f))
+                            if (section == "casting") {
+                                castingFaq.forEach { (question, answer) ->
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(getString(question), Modifier.semantics { heading() }, fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium, color = AppPalette.text())
+                                        Text(getString(answer), fontSize = 14.sp, color = AppPalette.secondary())
+                                    }
+                                }
+                            } else {
+                                getString(steps.getValue(section)).replace("{scheme}", BuildConfig.URI_SCHEME).split('\n').forEachIndexed { number, step ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        Text("${number + 1}.", fontSize = 14.sp, color = AppPalette.accent())
+                                        Text(step, fontSize = 14.sp, color = AppPalette.secondary(), modifier = Modifier.weight(1f))
+                                    }
                                 }
                             }
                             if (index == 0) Text(getString(R.string.privilege_tutorial_root), fontSize = 14.sp, color = AppPalette.secondary())
@@ -232,7 +243,22 @@ internal class TutorialGuide(private val host: ComponentActivity, saved: Bundle?
         val sections = listOf("setup", "permissions", "tiles", "casting", "capture", "display", "notifications", "background", "troubleshooting")
         private val titles = listOf(R.string.tutorial_setup_title, R.string.tutorial_permissions_title, R.string.tutorial_tiles_title, R.string.tutorial_casting_title,
             R.string.tutorial_capture_title, R.string.tutorial_display_title, R.string.tutorial_notifications_title, R.string.tutorial_background_title, R.string.tutorial_troubleshooting_title)
-        private val steps = listOf(R.string.tutorial_setup_steps, R.string.tutorial_permissions_steps, R.string.tutorial_tiles_steps, R.string.tutorial_casting_steps,
-            R.string.tutorial_capture_steps, R.string.tutorial_display_steps, R.string.tutorial_notifications_steps, R.string.tutorial_background_steps, R.string.tutorial_troubleshooting_steps)
+        private val steps = mapOf(
+            "setup" to R.string.tutorial_setup_steps,
+            "permissions" to R.string.tutorial_permissions_steps,
+            "tiles" to R.string.tutorial_tiles_steps,
+            "capture" to R.string.tutorial_capture_steps,
+            "display" to R.string.tutorial_display_steps,
+            "notifications" to R.string.tutorial_notifications_steps,
+            "background" to R.string.tutorial_background_steps,
+            "troubleshooting" to R.string.tutorial_troubleshooting_steps,
+        )
+        private val castingFaq = listOf(
+            R.string.tutorial_cast_layout_question to R.string.tutorial_cast_layout_answer,
+            R.string.tutorial_cast_size_question to R.string.tutorial_cast_size_answer,
+            R.string.tutorial_cast_menu_question to R.string.tutorial_cast_menu_answer,
+            R.string.tutorial_cast_mode_question to R.string.tutorial_cast_mode_answer,
+            R.string.tutorial_cast_lock_question to R.string.tutorial_cast_lock_answer,
+        )
     }
 }

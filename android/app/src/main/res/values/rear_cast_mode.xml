@@ -4,7 +4,7 @@
     <string name="rear_cast_mode_on">接管背屏触摸，停用系统双击休眠。\n磁铁和磁贴也使用虚拟投放。</string>
     <string name="rear_cast_mode_off">关闭：使用原有直接投放，触摸和返回手势由系统处理，仍可能双击休眠。</string>
     <string name="rear_cast_mode_next">当前投放不变，停止并重新投放后生效。</string>
-    <string name="rear_density_title">密度兼容</string>
-    <string name="rear_density_summary">按应用设置布局和显示大小</string>
+    <string name="rear_density_title">应用布局适配</string>
+    <string name="rear_density_summary">两侧留空、文字不全？可按应用开启。</string>
     <string name="rear_cast_unavailable">当前系统不支持虚拟投放，可使用直接投放。</string>
 </resources>

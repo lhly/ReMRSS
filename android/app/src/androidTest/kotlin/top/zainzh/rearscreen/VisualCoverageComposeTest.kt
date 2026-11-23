@@ -381,6 +381,87 @@ class VisualCoverageComposeTest {
         }
     }
 
+    @Test fun captureLayoutAdaptationGuidance() {
+        val prefix = "remrss-validation-20261123-layout-guidance-r03"
+        val packageName = "com.android.settings"
+        for (landscape in listOf(false, true)) {
+            configuration(prefix, stress = landscape, rotate = landscape) {
+                val shape = if (landscape) "dark-large-landscape" else "light-portrait"
+                open(MainActivity::class.java, {
+                    val prefs = RearDensityPreferences.preferences(host)
+                    val enabledKey = RearDensityPreferences.key(packageName)
+                    val dpiKey = "dpi:$packageName"
+                    val original = prefs.all
+                    try {
+                        prefs.edit().remove(enabledKey).putInt(dpiKey, 240).commit()
+                        check(RearCastMode.useVirtual(host))
+                        check(!RearDensityPreferences.enabled(host, packageName))
+
+                        inList("home_list", text("nav_cast"))
+                        await(hasTestTag("rear_settings_10_list"))
+                        toTag("rear_settings_10_list", "density_compatibility_entry")
+                        label(res(R.string.rear_density_summary)).assertIsDisplayed()
+                        capture("$prefix-$shape-entry")
+                        tag("density_compatibility_entry").performClick()
+                        tag("density_app_search").assertIsDisplayed()
+
+                        val row = "density_app_$packageName"
+                        await(hasTestTag("density_disabled_group"))
+                        toTag("density_app_list", row)
+                        val toggle = compose.onNode(hasAnyAncestor(hasTestTag(row)) and isToggleable())
+                        toggle.assertIsOff()
+                        val appLabel = host.packageManager
+                            .getApplicationInfo(packageName, android.content.pm.PackageManager.ApplicationInfoFlags.of(0))
+                            .loadLabel(host.packageManager)
+                        fun toggleAndCheck(expected: Boolean) {
+                            val template = if (expected) R.string.rear_density_enabled_next_cast
+                                else R.string.rear_density_disabled_next_cast
+                            val feedback = host.getString(template, appLabel)
+                            val event = instrument.uiAutomation.executeAndWaitForEvent(
+                                { toggle.performClick() },
+                                { it.eventType == android.view.accessibility.AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED &&
+                                    it.text.any { text -> text.toString() == feedback } },
+                                5_000L,
+                            )
+                            event.recycle()
+                            check(RearDensityPreferences.enabled(host, packageName) == expected)
+                            check(RearDensityPreferences.layoutDensity(host, packageName) == 240)
+                        }
+                        toggleAndCheck(true)
+                        capture("$prefix-$shape-feedback")
+                        toTag("density_app_list", row)
+                        toggle.assertIsOn()
+                        toggleAndCheck(false)
+
+                        tag("density_back").performClick()
+                        tag("cast_settings_back").assertIsDisplayed()
+                        tag("density_compatibility_entry").assertIsDisplayed()
+                        tag("cast_settings_back").performClick()
+                        tab("nav_settings")
+                        inList("settings_list", text("tutorial"))
+                        toTag("tutorial_scroll", "tutorial_header_casting")
+                        tag("tutorial_header_casting").performClick()
+                        findIn("tutorial_scroll", res(R.string.tutorial_cast_layout_question))
+                        capture("$prefix-$shape-faq")
+                        findIn("tutorial_scroll", res(R.string.tutorial_cast_size_question))
+                        label(res(R.string.tutorial_cast_size_answer)).assertExists()
+                        compose.runOnIdle { host.recreate() }
+                        await(hasTestTag("tutorial_body_casting"))
+                        tag("tutorial_back").performClick()
+                        tag("settings_list").assertIsDisplayed()
+                        compose.onNodeWithContentDescription(text("nav_settings")).assertIsSelected()
+                    } finally {
+                        val restore = prefs.edit()
+                        (original[enabledKey] as? Boolean)?.let { restore.putBoolean(enabledKey, it) }
+                            ?: restore.remove(enabledKey)
+                        (original[dpiKey] as? Int)?.let { restore.putInt(dpiKey, it) } ?: restore.remove(dpiKey)
+                        restore.commit()
+                    }
+                })
+            }
+        }
+    }
+
     @Test fun captureTutorialScrollFade() {
         for (rotate in listOf(false, true)) for (dark in listOf(false, true)) {
             configuration("audit-tutorial-fade", stress = rotate, rotate = rotate, dark = dark) {

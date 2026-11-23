@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -69,6 +70,7 @@ internal class DensityCompatibilityPage(private val host: ComponentActivity, sav
     private data class App(val packageName: String, val label: String)
     private var bulkError by mutableStateOf(false)
     private var bulkResult by mutableStateOf<String?>(null)
+    private var toggleFeedback: Toast? = null
     private var apps by mutableStateOf(emptyList<App>())
     private val search = TextFieldState(saved?.getString("density_search").orEmpty())
     private var loading by mutableStateOf(true)
@@ -113,6 +115,8 @@ internal class DensityCompatibilityPage(private val host: ComponentActivity, sav
                     preferences.unregisterOnSharedPreferenceChangeListener(listener)
                     mainHandler.removeCallbacks(refreshPreferences)
                     preferenceRefreshQueued.set(false)
+                    toggleFeedback?.cancel()
+                    toggleFeedback = null
                 }
             }
             LaunchedEffect(list) {
@@ -167,7 +171,14 @@ internal class DensityCompatibilityPage(private val host: ComponentActivity, sav
                         items(groupApps, key = { it.packageName }) { app ->
                             AppCard(Modifier.testTag("density_app_" + app.packageName)) {
                                 AppToggle(app.label, app.packageName, selected[app.packageName] == true,
-                                    onChange = { RearDensityPreferences.setEnabled(host, app.packageName, it) })
+                                    onChange = { enabled ->
+                                        RearDensityPreferences.setEnabled(host, app.packageName, enabled)
+                                        toggleFeedback?.cancel()
+                                        val feedback = if (enabled) R.string.rear_density_enabled_next_cast
+                                            else R.string.rear_density_disabled_next_cast
+                                        toggleFeedback = Toast.makeText(host, getString(feedback, app.label), Toast.LENGTH_SHORT)
+                                            .also { it.show() }
+                                    })
                                 if (selected[app.packageName] == true) {
                                     AppDivider()
                                     val dpi = dpiValues[app.packageName] ?: 0
