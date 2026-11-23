@@ -86,6 +86,22 @@ public final class TaskServiceManager {
 
     /** The stock tap may only use the binding held by the already prepared rear host. */
     static ITaskService peekConnectedServiceForWallpaper() {
+        return peekConnectedService();
+    }
+
+    /** Read the existing privileged display inventory without acquiring a service or a lease. */
+    public static String readConnectedRearDisplayState() {
+        ITaskService service = peekConnectedService();
+        if (service == null) return null;
+        try {
+            String state = service.getRearDisplayState();
+            return isConnectedServiceCurrent(service) ? state : null;
+        } catch (android.os.RemoteException unavailable) {
+            return null;
+        }
+    }
+
+    private static ITaskService peekConnectedService() {
         IBinder connected = INSTANCE.binder;
         if (connected == null) return null;
         ITaskService remote = ITaskService.Stub.asInterface(connected);
