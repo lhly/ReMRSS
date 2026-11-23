@@ -35,7 +35,26 @@ STUBS = {
 'org/json/JSONObject.java': '''package org.json; public class JSONObject { private String text; public JSONObject(String s){text=s;} public String optString(String k,String fallback){return text.contains("running")?"running":fallback;} }''',
 f'{PACKAGE}/MainActivity.java': 'package top.zainzh.rearscreen; class MainActivity {static final String EXTRA_NAVIGATION_TARGET="native_navigation_target";}',
 'android/provider/Settings.java': 'package android.provider; public class Settings {public static final String ACTION_MANAGE_OVERLAY_PERMISSION="android.settings.action.MANAGE_OVERLAY_PERMISSION"; public static boolean overlay;public static int checks;public static boolean canDrawOverlays(android.content.Context c){checks++;return overlay;} }',
-f'{PACKAGE}/ScreenRecordService.java': '''package top.zainzh.rearscreen; class ScreenRecordService {static boolean running; static boolean isRunning(){return running;}}''',
+f'{PACKAGE}/ScreenRecordService.java': '''package top.zainzh.rearscreen;
+class ScreenRecordService {
+    static RecordingPhase phase;
+    static int stopRequests;
+
+    static boolean isRunning() { return phase != null; }
+
+    static RecordingPhase currentPhase() { return phase; }
+
+    static int phaseLabel(RecordingPhase phase) { return phase.ordinal(); }
+
+    static boolean closeFromTile() {
+        if (phase == null) return false;
+        if (phase.canStop()) {
+            stopRequests++;
+            phase = RecordingPhase.SAVING;
+        }
+        return true;
+    }
+}''',
 f'{PACKAGE}/RootBackend.java': '''package top.zainzh.rearscreen; import android.content.*; public class RootBackend implements PrivilegeBackend {
  static int requests,unbinds; static boolean allowed=true,cached=false,delay=false; static Prepared pending;
  static final java.util.List<ServiceConnection> binds=new java.util.ArrayList<>(); RootBackend(Context c){}
@@ -234,10 +253,15 @@ public class ConnectionRegressionTest {
    case "dead_on_connect":
     acquire(a);service.failLink=true;Shizuku.ready(0,service);check(a.ready==0,"dead binder delivered");Handler.advance(1000);Shizuku.ready(1,new TaskService());check(a.ready==1,"link failure not recovered");TaskServiceManager.release(a);break;
    case "record_tile_stop_first":
-    Shizuku.permission=-1;ScreenRecordService.running=true;
+    ScreenRecordService.phase = RecordingPhase.RECORDING;
+    Shizuku.permission = -1;
     new RearScreenRecordTileService().onClick();
-    check(Context.stopped.size()==1&&Context.stopped.get(0).target==ScreenRecordService.class,"revoked permission blocked stopping the recorder");
-    check(Context.started.isEmpty()&&android.provider.Settings.checks==0,"stop tried to enter a permission flow");break;
+    check(ScreenRecordService.stopRequests == 1 && ScreenRecordService.currentPhase() == RecordingPhase.SAVING,
+      "revoked permission blocked stopping and saving the recording");
+    check(Context.stopped.isEmpty(), "tile stopped the service directly instead of letting it save");
+    check(Context.started.isEmpty() && android.provider.Settings.checks == 0,
+      "stop tried to enter a permission flow");
+    break;
    case "record_tile_overlay_then_start":
     RearScreenRecordTileService record=new RearScreenRecordTileService();
     record.onStartListening();check(Context.started.isEmpty()&&android.provider.Settings.checks==0,"opening Quick Settings checked the overlay");
@@ -332,7 +356,10 @@ class ConnectionTests(unittest.TestCase):
         path.write_text(HARNESS)
         sources = list(folder.rglob('*.java'))
         sources += [ROOT / 'android/app/src/main/java' / PACKAGE / name for name in
-                    ['TaskServiceManager.java', 'SwitchToRearTileService.java', 'RearScreenshotTileService.java', 'RearScreenRecordTileService.java', 'TilePermissionPrompt.java', 'CurrentMainTaskSelector.java', 'PrivilegeMode.java', 'PrivilegeBackend.java', 'ShizukuBackend.java', 'PrivilegeOperations.java']]
+                    ['TaskServiceManager.java', 'SwitchToRearTileService.java', 'RearScreenshotTileService.java',
+                     'RearScreenRecordTileService.java', 'RecordingPhase.java', 'TilePermissionPrompt.java',
+                     'CurrentMainTaskSelector.java', 'PrivilegeMode.java', 'PrivilegeBackend.java',
+                     'ShizukuBackend.java', 'PrivilegeOperations.java']]
         subprocess.run([cls.javac, '--release', '11', '-d', str(cls.classes), *map(str, sources)], check=True)
 
     @classmethod
