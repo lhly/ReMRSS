@@ -3,4 +3,12 @@
     <string name="ui_recording_start">Start recording</string>
     <string name="ui_recording_stop">Stop recording</string>
     <string name="ui_recording_close">Close recording controls</string>
+    <string name="ui_recording_idle">Ready to record</string>
+    <string name="ui_recording_preparing">Starting recording…</string>
+    <string name="ui_recording_running">Recording</string>
+    <string name="ui_recording_saving">Saving recording…</string>
+    <string name="ui_recording_saved">Saved to Movies</string>
+    <string name="ui_recording_start_failed">Could not start. Tap to retry.</string>
+    <string name="ui_recording_stop_failed">Could not confirm stop. Tap to retry.</string>
+    <string name="ui_recording_save_failed">Could not verify saved video</string>
 </resources>

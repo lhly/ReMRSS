@@ -179,4 +179,11 @@
     <string name="ui_settings_usage" formatted="false">Use</string>
     <string name="ui_settings_support" formatted="false">Version and support</string>
     <string name="ui_wake_behavior">Wake mode</string>
+    <string name="ui_rotation_unavailable">Current orientation is unavailable</string>
+    <string name="ui_charging_standby">Waiting for animation</string>
+    <string name="ui_charging_requires_animation">Turn on the charging animation to keep it visible.</string>
+    <string name="ui_notification_duration_scope">Display time for forwarded notifications. SDK and Mod notifications use their own expiry.</string>
+    <string name="ui_cancel_download">Cancel download</string>
+    <string name="ui_number_range_error">Enter a number from %1$d to %2$d.</string>
+    <string name="ui_notification_duration_current">Current: %1$s</string>
 </resources>
