@@ -20,6 +20,11 @@
     <string name="ui_notification_locked_home_summary">Choose which apps may open on the rear screen without unlocking the phone.</string>
     <string name="ui_notification_locked_home_warning">A tap opens the app, not the notification details. Anyone holding the locked phone may see its contents, such as a chat list.</string>
     <string name="ui_notification_locked_home_empty">Choose a compatible source in Notification apps first.</string>
+    <string name="ui_locked_home_exit_title">When to exit lock screen apps</string>
+    <string name="ui_locked_home_exit_help">Applies only to apps opened from a lock screen notification. You can always exit on the rear screen.</string>
+    <string name="ui_locked_home_exit_manual">Exit on the rear screen</string>
+    <string name="ui_locked_home_exit_unlock">When the main screen unlocks</string>
+    <string name="ui_locked_home_exit_wake">When the main screen lights up</string>
     <string name="ui_notification_click_dismiss" formatted="false">Dismiss rear reminder only</string>
     <string name="ui_minutes_value" formatted="false">{0} minutes</string>
     <string name="ui_unit_seconds" formatted="false">Seconds</string>

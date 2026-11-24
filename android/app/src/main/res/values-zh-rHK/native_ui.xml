@@ -20,6 +20,11 @@
     <string name="ui_notification_locked_home_summary">選擇哪些應用程式可在不解鎖手機時從背螢幕開啟。</string>
     <string name="ui_notification_locked_home_warning">點按通知只會開啟應用程式，不會跳至通知詳情。手機鎖定時，拿到手機的人也可能看到聊天清單等內容。</string>
     <string name="ui_notification_locked_home_empty">請先在「通知應用程式」選擇支援獨立啟動的應用程式。</string>
+    <string name="ui_locked_home_exit_title">鎖屏應用程式退出時機</string>
+    <string name="ui_locked_home_exit_help">只適用於從鎖屏通知開啟的應用程式，也可以隨時在背螢幕退出。</string>
+    <string name="ui_locked_home_exit_manual">在背螢幕手動退出</string>
+    <string name="ui_locked_home_exit_unlock">主螢幕解鎖時</string>
+    <string name="ui_locked_home_exit_wake">主螢幕亮起時</string>
     <string name="ui_notification_click_dismiss" formatted="false">僅關閉背螢提醒</string>
     <string name="ui_minutes_value" formatted="false">{0} 分鐘</string>
     <string name="ui_unit_seconds" formatted="false">秒</string>

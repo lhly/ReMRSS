@@ -75,6 +75,7 @@ class MiuixSettingsUi(
         fun tutorial()
         fun apps()
         fun lockedHomeApps()
+        fun lockedHomeExitMode()
         fun duration()
         fun clickAction()
         fun saveDuration(seconds: Int, neverAutoClose: Boolean)
@@ -95,7 +96,7 @@ class MiuixSettingsUi(
     private data class SettingsState(val selected: Int = 0, val listener: Boolean = false, val posting: Boolean = true,
         val duration: Int = 8, val updates: String = "", val checking: Boolean = false, val proxy: Boolean = false,
         val neverAutoClose: Boolean = false, val dismissOnly: Boolean = false, val openOnRear: Boolean = false,
-        val showInRecents: Boolean = false)
+        val showInRecents: Boolean = false, val lockedHomeExitLabel: String = "")
     private var settings by mutableStateOf(SettingsState())
     private var durationSheetVisible by mutableStateOf(false)
     private var durationValue by mutableIntStateOf(savedState?.getInt("notification_duration_draft_value", 10) ?: 10)
@@ -191,9 +192,9 @@ class MiuixSettingsUi(
     }
     fun updateSettings(selected: Int, listener: Boolean, posting: Boolean, duration: Int, updates: String, checking: Boolean, proxy: Boolean,
                        neverAutoClose: Boolean = false, dismissOnly: Boolean = false, openOnRear: Boolean = false,
-                       showInRecents: Boolean = false) {
+                       showInRecents: Boolean = false, lockedHomeExitLabel: String = "") {
         settings = SettingsState(selected, listener, posting, duration, updates, checking, proxy, neverAutoClose,
-            dismissOnly, openOnRear, showInRecents)
+            dismissOnly, openOnRear, showInRecents, lockedHomeExitLabel)
     }
     fun updateUriConflict(conflict: Boolean) { uriConflict = conflict }
     fun showPage(target: Int) {
@@ -620,6 +621,10 @@ class MiuixSettingsUi(
                         AppRow(s("notification_locked_home"), s("notification_locked_home_summary"),
                             modifier = Modifier.testTag("notification_locked_home_entry"), enabled = lockedHomeAvailable,
                             action = actions::lockedHomeApps)
+                        AppDivider()
+                        AppRow(activity.getString(R.string.ui_locked_home_exit_title), settings.lockedHomeExitLabel,
+                            modifier = Modifier.testTag("notification_locked_home_exit_mode"), enabled = lockedHomeAvailable,
+                            action = actions::lockedHomeExitMode)
                     }
                     AppDivider()
                     AppRow(s("notification_access"), s("notification_access_help"), action = { actions.action("openNotificationListenerSettings") },

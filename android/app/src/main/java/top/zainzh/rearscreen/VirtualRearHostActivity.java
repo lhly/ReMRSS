@@ -102,8 +102,8 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
             if (notificationCast != null && notificationCast.locked) {
                 if (displayId == android.view.Display.DEFAULT_DISPLAY) {
                     int primaryState = observeLockedNotificationPrimary();
-                    if (!RearNotificationCastRequest.lockedWithPrimaryInactive(
-                            VirtualRearHostActivity.this, primaryState)) finish();
+                    if (!notificationCast.mayKeepLockedOutput(VirtualRearHostActivity.this,
+                            primaryState, approvedLockedHomeRunning, false)) finish();
                 }
                 if (displayId == notificationCast.rearDisplay && (getDisplay() == null
                         || getDisplay().getState() != android.view.Display.STATE_ON)) finish();
@@ -523,8 +523,9 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private final BroadcastReceiver screenReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (notificationCast != null && notificationCast.locked) {
-                if (Intent.ACTION_USER_PRESENT.equals(intent.getAction())
-                        || !notificationCast.powerAndLockUnchanged(VirtualRearHostActivity.this)) finish();
+                boolean userPresent = Intent.ACTION_USER_PRESENT.equals(intent.getAction());
+                if (!notificationCast.mayKeepLockedOutput(VirtualRearHostActivity.this,
+                        observeLockedNotificationPrimary(), approvedLockedHomeRunning, userPresent)) finish();
                 return;
             }
             if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
@@ -588,7 +589,12 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     private final Runnable startAfterLayout = this::startSession;
     private final Runnable heartbeat = new Runnable() {
         public void run() {
-            if (ending) return;
+            if (ending || isFinishing()) return;
+            if (approvedLockedHomeRunning && !notificationCast.mayKeepLockedOutput(
+                    VirtualRearHostActivity.this, observeLockedNotificationPrimary(), true, false)) {
+                finish();
+                return;
+            }
             worker.execute(() -> {
                 try {
                     ITaskService remote = service; String id = session;
@@ -612,6 +618,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
     };
     private volatile RearNotificationCastRequest notificationCast;
     private boolean waitingForNotificationStage;
+    private boolean approvedLockedHomeRunning; // Set on the main thread after the launch is verified.
 
     private final ServiceConnection connection = new ServiceConnection() {
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -1300,6 +1307,7 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
 
     private void initializePresentation() {
         ending = false;
+        approvedLockedHomeRunning = false;
         instance = this;
         setShowWhenLocked(notificationCast == null || notificationCast.locked);
         if (notificationCast != null && notificationCast.locked) observeLockedNotificationPrimary();
@@ -1635,7 +1643,11 @@ public final class VirtualRearHostActivity extends androidx.activity.ComponentAc
                     if (isFinishing() || isDestroyed() || ending || !notice.powerAndLockUnchanged(this)
                             || !RearAnimationManager.notificationProjectionStarted(this, notice.session)) {
                         finish();
+                        return;
                     }
+                    approvedLockedHomeRunning = notice.homeOnly && state.optString("id").equals(session)
+                            && "running".equals(state.optString("state"))
+                            && "approved_source_home".equals(state.optString("notificationRoute"));
                 });
                 main.post(this::updateCameraGapBattery);
                 if (densityCompatibility && !"unrestricted".equals(state.optString("sizePolicy")))

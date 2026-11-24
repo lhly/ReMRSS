@@ -52,6 +52,36 @@ public class LockedRearNotificationTargetTest {
         }
     }
 
+    @Test public void anApprovedHomeCanUseAnyOfTheThreeExitModes() {
+        RearNotificationExitMode manual = RearNotificationExitMode.MANUAL;
+        RearNotificationExitMode unlock = RearNotificationExitMode.MAIN_UNLOCK;
+        RearNotificationExitMode wake = RearNotificationExitMode.MAIN_WAKE;
+        for (int state : new int[]{Display.STATE_OFF, Display.STATE_DOZE, Display.STATE_DOZE_SUSPEND}) {
+            assertTrue(manual.keepsOutput(state, true, true, false));
+            assertTrue(unlock.keepsOutput(state, true, true, false));
+            assertTrue(wake.keepsOutput(state, true, true, false));
+        }
+        assertTrue(manual.keepsOutput(Display.STATE_ON, true, true, false));
+        assertTrue(unlock.keepsOutput(Display.STATE_ON, true, true, false));
+        assertFalse(wake.keepsOutput(Display.STATE_ON, true, true, false));
+        for (RearNotificationExitMode automatic : new RearNotificationExitMode[]{unlock, wake}) {
+            assertFalse(automatic.keepsOutput(Display.STATE_ON, false, true, false));
+            assertFalse(automatic.keepsOutput(Display.STATE_ON, true, false, false));
+            assertFalse(automatic.keepsOutput(Display.STATE_OFF, true, true, true));
+        }
+        assertTrue(manual.keepsOutput(Display.STATE_ON, false, false, true));
+        assertTrue(manual.keepsOutput(Display.STATE_OFF, true, true, false)); // A subsequent lock.
+        assertFalse(wake.keepsOutput(Display.STATE_UNKNOWN, true, true, false));
+    }
+
+    @Test public void persistedExitValuesAreStableAndTheDefaultIsManual() {
+        assertEquals(RearNotificationExitMode.MANUAL, RearNotificationExitMode.fromValue(null));
+        assertEquals(RearNotificationExitMode.MANUAL, RearNotificationExitMode.fromValue("manual"));
+        assertEquals(RearNotificationExitMode.MANUAL, RearNotificationExitMode.fromValue("unrecognized"));
+        assertEquals(RearNotificationExitMode.MAIN_UNLOCK, RearNotificationExitMode.fromValue("main_unlock"));
+        assertEquals(RearNotificationExitMode.MAIN_WAKE, RearNotificationExitMode.fromValue("main_wake"));
+    }
+
     private static int accepted(int display, int state, RearDisplayCastOccupancy.Task task) {
         return RearVirtualCast.visibleLockedNotificationTask(new RearDisplayCastOccupancy.Snapshot(
                 display, state, List.of(task), "activity_task", null), VIRTUAL, SOURCE);

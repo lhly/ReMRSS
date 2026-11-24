@@ -82,6 +82,22 @@ final class RearNotificationCastRequest {
                 || primaryState == Display.STATE_DOZE || primaryState == Display.STATE_DOZE_SUSPEND);
     }
 
+    boolean mayKeepLockedOutput(Context context, int primaryState, boolean verifiedHomeRunning,
+            boolean userPresent) {
+        if (!homeOnly || !verifiedHomeRunning)
+            return !userPresent && lockedWithPrimaryInactive(context, primaryState);
+
+        var settings = context.getSharedPreferences("mrss_settings", Context.MODE_PRIVATE);
+        if (!settings.getBoolean(PREF, false) || settings.getBoolean("notification_dismiss_only", false)
+                || !lockedHomeAuthorized(context, packageName)) return false;
+
+        RearNotificationExitMode mode = RearNotificationExitMode.read(settings);
+        if (mode == RearNotificationExitMode.MANUAL) return true;
+        KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
+        return keyguard != null && mode.keepsOutput(primaryState, keyguard.isKeyguardLocked(),
+                keyguard.isDeviceLocked(), userPresent);
+    }
+
     boolean powerAndLockUnchanged(Context context) {
         return locked ? lockedWithPrimaryInactive(context) : unlocked(context);
     }

@@ -134,6 +134,7 @@ final class SettingsController {
                 homePicker = true;
                 navigate(100);
             }
+            @Override public void lockedHomeExitMode() { showLockedHomeExitMode(); }
             @Override public void duration() { composeUi.showDurationSheet(preferences.getDuration(), preferences.isNotificationNeverAutoClose()); }
             @Override public void clickAction() { showNotificationClickAction(); }
             @Override public void saveDuration(int seconds, boolean neverAutoClose) { saveNotificationDuration(seconds, neverAutoClose); }
@@ -351,7 +352,8 @@ final class SettingsController {
         composeUi.updateSettings(selected, listenerGranted(), Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
                 preferences.getDuration(), updateSummaryText(), checkingUpdates, UpdateNetwork.proxyEnabled(activity),
                 preferences.isNotificationNeverAutoClose(), preferences.isNotificationDismissOnly(),
-                preferences.getBoolean(RearNotificationCastRequest.PREF), preferences.showInRecents());
+                preferences.getBoolean(RearNotificationCastRequest.PREF), preferences.showInRecents(),
+                activity.getString(RearNotificationExitMode.read(activity).label));
     }
 
     private void updateRecentsVisibility(boolean shown) {
@@ -634,6 +636,21 @@ final class SettingsController {
             }
             if (!destroyed) updateHome();
         });
+    }
+
+    private void showLockedHomeExitMode() {
+        RearNotificationExitMode[] modes = RearNotificationExitMode.values();
+        String[] labels = new String[modes.length + 1];
+        Runnable[] choices = new Runnable[labels.length];
+        for (int i = 0; i < modes.length; i++) {
+            RearNotificationExitMode mode = modes[i];
+            labels[i] = activity.getString(mode.label);
+            choices[i] = () -> { mode.save(activity); updateHome(); };
+        }
+        labels[modes.length] = s("cancel");
+        modal.showChoice(activity.getString(R.string.ui_locked_home_exit_title),
+                activity.getString(R.string.ui_locked_home_exit_help),
+                labels, choices, RearNotificationExitMode.read(activity).ordinal());
     }
 
     private void showNotificationClickAction() {
