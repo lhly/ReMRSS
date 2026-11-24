@@ -852,9 +852,6 @@ final class RearVirtualCast {
                 throw new IllegalStateException("controlled_target_changed_after_move");
             if (lockedNotification()) {
                 launchLockedNotificationTarget(displayName);
-                // The fresh authorized launcher task is now visible, before any reader accepts
-                // touches. Let Android bind its own IME; never focus a task behind keyguard.
-                if (notificationTarget.homeOnly) enableLocalIme();
             } else if (component != null || notificationTarget != null) {
                 ensureControlledStartCurrent("before_target_launch");
                 if (notificationTarget != null) {
@@ -982,8 +979,8 @@ final class RearVirtualCast {
             if (RearDisplay.isRear(display)) throw new IOException("Invalid virtual display: " + display);
             ensureControlledStartCurrent("after_virtual_display_create");
             if (lockedNotification() && notificationTarget.homeOnly) {
-                // No editor owns this screen yet. Do not let a startup request fall back to
-                // display 0; enable LOCAL only after awaitLockedNotificationTarget succeeds.
+                // Until the approved launcher is about to run, refuse any IME fallback to
+                // display 0 while the output and its rotation are being configured.
                 try {
                     RearVirtualIme.deferLockedHome(display, physicalRearId);
                     CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=deferred");
@@ -1071,6 +1068,12 @@ final class RearVirtualCast {
                 android.util.Log.i("RearVirtualCast", "rear_notification_detail_skipped_existing_task");
             }
             requireCurrentLockedNotification();
+            if (notificationTarget.homeOnly) {
+                // The first natural focus must see LOCAL, not HIDE. This touches only the
+                // disposable display and never requests focus or changes keyguard.
+                enableLocalIme();
+                requireCurrentLockedNotification();
+            }
             if (!notificationTarget.action.launchSource(display))
                 throw new IOException("rear_notification_source_launch_rejected");
             if (!awaitLockedNotificationTarget())
