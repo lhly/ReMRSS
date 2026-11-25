@@ -4,6 +4,7 @@ import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.os.SystemClock;
+import android.view.Display;
 
 import java.lang.reflect.Method;
 import java.util.List;
@@ -50,17 +51,7 @@ final class RearImeStartupFocus {
 
         CompatibilityDiagnostics.record("virtual_ime_focus_ready",
                 "display=" + display + " wait_ms=" + (SystemClock.uptimeMillis() - start));
-        String helper = new ComponentName(BuildConfig.APPLICATION_ID,
-                RearImeFocusActivity.class.getName()).flattenToString();
-        int flags = Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK
-                | Intent.FLAG_ACTIVITY_NO_ANIMATION;
-        if (!isCurrent.getAsBoolean()) return false;
-        DisplayRotationController.Result result = DisplayRotationController.runCommand(1_200,
-                "am", "start", "-W", "--display", Integer.toString(display), "--user", "current",
-                "-f", "0x" + Integer.toHexString(flags), "-n", helper,
-                "--ei", RearImeFocusActivity.EXTRA_DISPLAY_ID, Integer.toString(display),
-                "--es", RearImeFocusActivity.EXTRA_DISPLAY_NAME, displayName);
-        if (!RearSystemBridge.commandSucceeded(result) || !result.output.contains("Status: ok")) return false;
+        if (!isCurrent.getAsBoolean() || !startHelper(display, displayName, false)) return false;
         long deadline = SystemClock.uptimeMillis() + 650;
         do {
             if (!isCurrent.getAsBoolean() || (boolean) isLocked.invoke(wm)) return false;
@@ -70,6 +61,31 @@ final class RearImeStartupFocus {
             Thread.sleep(25);
         } while (SystemClock.uptimeMillis() < deadline);
         return false;
+    }
+
+    static boolean seedLockedHome(int display, String displayName) throws Exception {
+        return startHelper(display, displayName, true);
+    }
+
+    private static boolean startHelper(int display, String displayName, boolean lockedHomeSeed) throws Exception {
+        String helper = new ComponentName(BuildConfig.APPLICATION_ID,
+                RearImeFocusActivity.class.getName()).flattenToString();
+        int flags = Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK
+                | Intent.FLAG_ACTIVITY_NO_ANIMATION;
+        DisplayRotationController.Result result = DisplayRotationController.runCommand(1_200,
+                "am", "start", "-W", "--display", Integer.toString(display), "--user", "current",
+                "-f", "0x" + Integer.toHexString(flags), "-n", helper,
+                "--ei", RearImeFocusActivity.EXTRA_DISPLAY_ID, Integer.toString(display),
+                "--es", RearImeFocusActivity.EXTRA_DISPLAY_NAME, displayName,
+                "--ez", RearImeFocusActivity.EXTRA_LOCKED_HOME_SEED, Boolean.toString(lockedHomeSeed));
+        return RearSystemBridge.commandSucceeded(result) && result.output.contains("Status: ok");
+    }
+
+    static boolean canHostHelper(int requested, String name, int actual, String actualName,
+                                 boolean keyguardLocked, boolean lockedHomeSeed) {
+        return requested > Display.DEFAULT_DISPLAY && requested == actual
+                && name != null && name.startsWith(RearVirtualIme.DISPLAY_NAME_PREFIX) && name.equals(actualName)
+                && keyguardLocked == lockedHomeSeed;
     }
 
     private static ComponentName topActivity(Method getTasks, Object atm, int display, int task)

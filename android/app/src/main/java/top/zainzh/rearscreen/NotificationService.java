@@ -308,10 +308,31 @@ public class NotificationService extends NotificationListenerService {
         String key = service.activeOrdinaryNotificationKey;
         long postTime = service.activeOrdinaryNotificationPostTime;
         String packageName = service.activeOrdinaryNotificationPackage;
-        if (key == null || packageName == null) return null;
+        StatusBarNotification item = service.resolveTapNotice(packageName, key, postTime);
+        return service.isOrdinaryTapCurrent(sessionId) ? item : null;
+    }
+
+    static StatusBarNotification currentCapsuleNotice(RearCastNotification.SourceNotice source) {
+        NotificationService service = instance;
+        return service == null || source == null ? null
+                : service.resolveTapNotice(source.packageName, source.key, source.postTime);
+    }
+
+    static boolean isCapsuleSourceEligibleForWake(RearCastNotification.SourceNotice source) {
+        NotificationService service = instance;
+        return service != null && source != null
+                && (!service.prefs.getBoolean("notification_only_when_locked", false) || service.isMainScreenCovered)
+                && (!service.prefs.getBoolean("notification_follow_dnd_mode", true) || !service.isDndActive())
+                && service.resolveTapNotice(source.packageName, source.key, source.postTime) != null;
+    }
+
+    private StatusBarNotification resolveTapNotice(String packageName, String key, long postTime) {
+        if (key == null || packageName == null || taskServiceReleased || !serviceEnabled
+                || !prefs.getStringSet("notification_selected_apps", java.util.Collections.emptySet()).contains(packageName))
+            return null;
         try {
-            StatusBarNotification[] notifications = service.getActiveNotifications(new String[]{key});
-            if (notifications == null || !service.isOrdinaryTapCurrent(sessionId)) return null;
+            StatusBarNotification[] notifications = getActiveNotifications(new String[]{key});
+            if (notifications == null || taskServiceReleased || !serviceEnabled) return null;
             for (StatusBarNotification item : notifications) {
                 if (key.equals(item.getKey()) && postTime == item.getPostTime()
                         && packageName.equals(item.getPackageName())
@@ -959,7 +980,7 @@ public class NotificationService extends NotificationListenerService {
         // The existing host can present a passive capsule without changing display or input ownership.
         if (!RearAnimationManager.isAnimationPlaying() && RearCastNotification.offer(packageName, title, text,
                 android.os.SystemClock.elapsedRealtime(), prefs.getInt("notification_duration", 10),
-                prefs.getBoolean("notification_dark_mode", false))) return;
+                prefs.getBoolean("notification_dark_mode", false), notificationKey, postTime)) return;
         RearAnimationManager.Session session = RearAnimationManager.beginAnimation(RearAnimationManager.AnimationType.NOTIFICATION);
         registerOrdinaryNotificationSession(session);
         activeOrdinaryNotificationKey = notificationKey;
@@ -991,6 +1012,8 @@ public class NotificationService extends NotificationListenerService {
 
     @Override public void onNotificationRemoved(StatusBarNotification sbn) {
         super.onNotificationRemoved(sbn);
+        if (sbn != null && android.os.Process.myUserHandle().equals(sbn.getUser()))
+            RearCastNotification.sourceRemoved(sbn.getPackageName(), sbn.getKey(), sbn.getPostTime());
         if (sbn == null || !NotificationDisplayOptions.matchesRemoval(activeOrdinaryNotificationKey,
                 activeOrdinaryNotificationPostTime, sbn.getKey(), sbn.getPostTime(),
                 activeOrdinaryNotificationPersistent, activeOrdinaryNotificationSession)) return;

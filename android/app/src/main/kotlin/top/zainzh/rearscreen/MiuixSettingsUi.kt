@@ -95,8 +95,9 @@ class MiuixSettingsUi(
     private var state by mutableStateOf(HomeState())
     private data class SettingsState(val selected: Int = 0, val listener: Boolean = false, val posting: Boolean = true,
         val duration: Int = 8, val updates: String = "", val checking: Boolean = false, val proxy: Boolean = false,
-        val neverAutoClose: Boolean = false, val dismissOnly: Boolean = false, val openOnRear: Boolean = false,
-        val showInRecents: Boolean = false, val lockedHomeExitLabel: String = "")
+        val neverAutoClose: Boolean = false, val openOnRear: Boolean = false,
+        val showInRecents: Boolean = false, val lockedHomeExitLabel: String = "",
+        val notificationClickLabel: String = "", val notificationClickStatus: String = "")
     private var settings by mutableStateOf(SettingsState())
     private var durationSheetVisible by mutableStateOf(false)
     private var durationValue by mutableIntStateOf(savedState?.getInt("notification_duration_draft_value", 10) ?: 10)
@@ -191,10 +192,11 @@ class MiuixSettingsUi(
         if (page in 0..3 && target in 0..3) page = target
     }
     fun updateSettings(selected: Int, listener: Boolean, posting: Boolean, duration: Int, updates: String, checking: Boolean, proxy: Boolean,
-                       neverAutoClose: Boolean = false, dismissOnly: Boolean = false, openOnRear: Boolean = false,
-                       showInRecents: Boolean = false, lockedHomeExitLabel: String = "") {
+                       neverAutoClose: Boolean = false, openOnRear: Boolean = false,
+                       showInRecents: Boolean = false, lockedHomeExitLabel: String = "",
+                       notificationClickLabel: String = "", notificationClickStatus: String = "") {
         settings = SettingsState(selected, listener, posting, duration, updates, checking, proxy, neverAutoClose,
-            dismissOnly, openOnRear, showInRecents, lockedHomeExitLabel)
+            openOnRear, showInRecents, lockedHomeExitLabel, notificationClickLabel, notificationClickStatus)
     }
     fun updateUriConflict(conflict: Boolean) { uriConflict = conflict }
     fun showPage(target: Int) {
@@ -537,17 +539,17 @@ class MiuixSettingsUi(
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             AppCard {
                                 RearCastModeToggle(virtual)
-                                AppSettingsReveal(virtual) {
+                                if (BuildConfig.VIRTUAL_CAST_ENABLED && android.os.Build.VERSION.SDK_INT >= 33) {
                                     AppDivider()
                                     AppRow(activity.getString(R.string.rear_density_title), activity.getString(R.string.rear_density_summary),
                                         modifier = Modifier.testTag("density_compatibility_entry"), action = {
                                             actions.navigate(DENSITY_SETTINGS_ROUTE)
                                         })
-                                    AppDivider()
-                                    RearCameraGapBatteryToggle(virtual)
-                                    AppDivider()
-                                    RearCameraStatusToggle(virtual)
                                 }
+                                AppDivider()
+                                RearCameraGapBatteryToggle()
+                                AppDivider()
+                                RearCameraStatusToggle()
                             }
                             Box(Modifier.fillMaxWidth().testTag("physical_settings_reveal")) {
                                 AppSettingsReveal(!virtual) {
@@ -589,9 +591,13 @@ class MiuixSettingsUi(
                             SettingsToggle("charging_animation", "charging_help", "charging_animation_enabled", "toggleChargingService")
                             AppDivider()
                             val animationOn = state.values["charging_animation_enabled"] == true
-                            AppToggle(s("charging_always_on"), if (animationOn) s("charging_always_help")
-                                else activity.getString(R.string.ui_charging_requires_animation),
-                                state.values["charging_always_on_enabled"] == true, enabled = animationOn,
+                            val alwaysOn = state.values["charging_always_on_enabled"] == true
+                            val detail = when {
+                                animationOn -> s("charging_always_help")
+                                alwaysOn -> activity.getString(R.string.ui_charging_always_paused)
+                                else -> activity.getString(R.string.ui_charging_requires_animation)
+                            }
+                            AppToggle(s("charging_always_on"), detail, alwaysOn,
                                 modifier = Modifier.testTag("charging_always_on_enabled"),
                                 onChange = { actions.toggle("charging_always_on_enabled", "setChargingAlwaysOnEnabled", it) })
                         }
@@ -615,15 +621,21 @@ class MiuixSettingsUi(
                     AppDivider()
                     AppRow(s("notification_apps"), s("selected_count").replace("{0}", settings.selected.toString()),
                         modifier = Modifier.testTag("notification_apps_entry"), action = actions::apps)
-                    val lockedHomeAvailable = settings.openOnRear && AiRearWallpaperSupport.supported()
-                    AppSettingsReveal(lockedHomeAvailable) {
+                    if (AiRearWallpaperSupport.supported()) {
+                        val lockedHomeAvailable = settings.openOnRear && settings.notificationClickStatus.isEmpty()
+                        val lockedHomePaused = settings.notificationClickStatus.ifEmpty {
+                            activity.getString(R.string.ui_notification_locked_home_paused_action)
+                        }
                         AppDivider()
-                        AppRow(s("notification_locked_home"), s("notification_locked_home_summary"),
-                            modifier = Modifier.testTag("notification_locked_home_entry"), enabled = lockedHomeAvailable,
+                        AppRow(s("notification_locked_home"),
+                            if (lockedHomeAvailable) s("notification_locked_home_summary") else lockedHomePaused,
+                            modifier = Modifier.testTag("notification_locked_home_entry"),
                             action = actions::lockedHomeApps)
                         AppDivider()
-                        AppRow(activity.getString(R.string.ui_locked_home_exit_title), settings.lockedHomeExitLabel,
-                            modifier = Modifier.testTag("notification_locked_home_exit_mode"), enabled = lockedHomeAvailable,
+                        AppRow(activity.getString(R.string.ui_locked_home_exit_title),
+                            if (lockedHomeAvailable) settings.lockedHomeExitLabel
+                            else "${settings.lockedHomeExitLabel}\n$lockedHomePaused",
+                            modifier = Modifier.testTag("notification_locked_home_exit_mode"),
                             action = actions::lockedHomeExitMode)
                     }
                     AppDivider()
@@ -664,12 +676,8 @@ class MiuixSettingsUi(
                             AppRow(s("notification_duration_title"), activity.getString(R.string.ui_notification_duration_scope), action = actions::duration,
                                 value = durationSummary(settings.duration))
                             AppDivider()
-                            AppRow(s("notification_click_action"), null, action = actions::clickAction,
-                                value = s(when {
-                                    settings.dismissOnly -> "notification_click_dismiss"
-                                    settings.openOnRear -> "notification_click_open_rear"
-                                    else -> "notification_click_open"
-                                }))
+                            AppRow(s("notification_click_action"), settings.notificationClickStatus.ifEmpty { null }, action = actions::clickAction,
+                                value = settings.notificationClickLabel)
                         }
                     }
                 }
@@ -710,7 +718,7 @@ class MiuixSettingsUi(
                         DurationWheelRow(shortWindow, Modifier.fillMaxWidth())
                         DurationPersistentToggle()
                     }
-                    if (!durationChanged && !durationNeverAutoClose &&
+                    if (!durationChanged &&
                         settings.duration != NotificationDisplayOptions.durationSeconds(durationValue, durationUnitMinutes)) {
                         Text(activity.getString(R.string.ui_notification_duration_current,
                             s("seconds_value").replace("{0}", settings.duration.toString())),
@@ -740,12 +748,12 @@ class MiuixSettingsUi(
             top.yukonga.miuix.kmp.basic.NumberPicker(
                 value = durationValue, onValueChange = { durationValue = it; durationChanged = true },
                 modifier = Modifier.weight(1f).testTag("notification_duration_value"),
-                enabled = !durationNeverAutoClose, range = 1..60, visibleItemCount = rows)
+                range = 1..60, visibleItemCount = rows)
             top.yukonga.miuix.kmp.basic.NumberPicker(
                 value = if (durationUnitMinutes) 1 else 0,
                 onValueChange = { durationUnitMinutes = it == 1; durationChanged = true },
                 modifier = Modifier.weight(1.25f).testTag("notification_duration_unit"),
-                enabled = !durationNeverAutoClose, range = 0..1, visibleItemCount = rows,
+                range = 0..1, visibleItemCount = rows,
                 label = { if (it == 0) s("unit_seconds") else s("unit_minutes") })
         }
     }

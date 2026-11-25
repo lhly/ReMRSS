@@ -6,7 +6,18 @@ import android.widget.FrameLayout;
 
 /** Keep a conservative composition lane for the transformed indicator above the SurfaceView. */
 final class RearCastFrameLayout extends FrameLayout {
-    RearCastFrameLayout(Context context) { super(context); }
+    private final Runnable visibilityChanged;
+
+    RearCastFrameLayout(Context context, Runnable visibilityChanged) {
+        super(context);
+        this.visibilityChanged = visibilityChanged;
+    }
+
+    @Override public void onVisibilityAggregated(boolean isVisible) {
+        super.onVisibilityAggregated(isVisible);
+        visibilityChanged.run();
+    }
+
     @Override public boolean gatherTransparentRegion(Region region) {
         super.gatherTransparentRegion(region);
         if (region != null) {

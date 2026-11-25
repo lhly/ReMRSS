@@ -73,6 +73,18 @@ final class NativePreferences {
     boolean isNotificationNeverAutoClose() { return getBoolean("notification_never_auto_close"); }
     boolean isNotificationDismissOnly() { return getBoolean("notification_dismiss_only"); }
 
+    NotificationTapAction notificationClickAction() {
+        return NotificationTapAction.read(settings);
+    }
+
+    void setNotificationClickAction(NotificationTapAction action) {
+        settings.edit().putString(NotificationTapAction.PREF, action.value)
+                .putBoolean("notification_dismiss_only", action == NotificationTapAction.DISMISS)
+                .putBoolean(RearNotificationCastRequest.PREF, action.usesRear()).apply();
+        legacy.edit().putBoolean("flutter.notification_dismiss_only", action == NotificationTapAction.DISMISS)
+                .putBoolean("flutter." + RearNotificationCastRequest.PREF, action.usesRear()).apply();
+    }
+
     void putDuration(int seconds) {
         settings.edit().putInt("notification_duration", seconds).apply();
         legacy.edit().putLong("flutter.notification_duration", seconds).apply();

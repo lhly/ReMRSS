@@ -19,7 +19,7 @@ final class RearCameraGapBatteryController implements AutoCloseable {
     private final SharedPreferences preferences;
     private final RearCameraGapGeometry.Profile profile;
     private RearCastViewport safe;
-    private boolean running, full, hostVisible, registered, closed, containsGap;
+    private boolean visibleCast, full, registered, closed, containsGap;
 
     private final BroadcastReceiver battery = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -50,8 +50,8 @@ final class RearCameraGapBatteryController implements AutoCloseable {
         if (displays != null) displays.registerDisplayListener(displayListener, main);
     }
 
-    void session(RearCastViewport safe, boolean running, boolean full, int originX, int originY) {
-        this.safe = safe; this.running = running; this.full = full;
+    void session(RearCastViewport safe, boolean visibleCast, boolean full, int originX, int originY) {
+        this.safe = safe; this.visibleCast = visibleCast; this.full = full;
         View parent = view.getParent() instanceof View ? (View) view.getParent() : null;
         containsGap = profile != null && parent != null && originX <= profile.left()
                 && originY <= profile.upperY && originX + parent.getWidth() >= profile.right()
@@ -59,13 +59,12 @@ final class RearCameraGapBatteryController implements AutoCloseable {
         view.configure(profile, originX, originY);
         update();
     }
-    void visible(boolean visible) { hostVisible = visible; update(); }
     void themeChanged() { view.applyTheme(); update(); }
 
     private void update() {
         if (closed) return;
         Display display = context.getDisplay();
-        boolean show = profile != null && profile.matches(safe) && containsGap && running && !full && hostVisible
+        boolean show = profile != null && profile.matches(safe) && containsGap && visibleCast && !full
                 && preferences.getBoolean(RearCameraGapPreferences.ENABLED, false)
                 && display != null && display.getState() == Display.STATE_ON;
         view.setVisibility(show ? View.VISIBLE : View.GONE);

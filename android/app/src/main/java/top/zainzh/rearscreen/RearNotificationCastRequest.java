@@ -39,12 +39,27 @@ final class RearNotificationCastRequest {
     private final String ticket = UUID.randomUUID().toString();
     private final PendingIntent action;
     private final long expires;
+    private final RearCastNotification.SourceNotice capsuleSource;
+    private final java.util.function.BooleanSupplier capsuleOwner;
     private final AtomicBoolean sent = new AtomicBoolean();
     private final AtomicBoolean sourceStarted = new AtomicBoolean();
     private int dispatchedDisplay = -1; // Set and checked only on the visible host's main thread.
 
     RearNotificationCastRequest(Context context, long session, int rearDisplay, long clickedAt,
             boolean locked, StatusBarNotification notice, PendingIntent action) {
+        this(context, session, rearDisplay, clickedAt, locked, notice, action, null, null);
+    }
+
+    static RearNotificationCastRequest fromCapsule(Context context, int rearDisplay, boolean locked,
+            StatusBarNotification notice, RearCastNotification.SourceNotice source,
+            java.util.function.BooleanSupplier owner) {
+        return new RearNotificationCastRequest(context, Long.MIN_VALUE, rearDisplay, SystemClock.uptimeMillis(),
+                locked, notice, NotificationService.originalActivityAction(notice), source, owner);
+    }
+
+    private RearNotificationCastRequest(Context context, long session, int rearDisplay, long clickedAt,
+            boolean locked, StatusBarNotification notice, PendingIntent action,
+            RearCastNotification.SourceNotice capsuleSource, java.util.function.BooleanSupplier capsuleOwner) {
         this.expires = clickedAt + (locked ? 12_000L : 8_000L);
         this.session = session;
         this.rearDisplay = rearDisplay;
@@ -54,6 +69,8 @@ final class RearNotificationCastRequest {
         this.homeOnly = locked && lockedHomeAuthorized(context, packageName);
         this.notificationKey = notice.getKey();
         this.postTime = notice.getPostTime();
+        this.capsuleSource = capsuleSource;
+        this.capsuleOwner = capsuleOwner;
     }
 
     static boolean unlocked(Context context) {
@@ -82,13 +99,17 @@ final class RearNotificationCastRequest {
                 || primaryState == Display.STATE_DOZE || primaryState == Display.STATE_DOZE_SUSPEND);
     }
 
+    static boolean ownsRecoverableRear(boolean verifiedHomeRunning, int expectedRear, int hostDisplay) {
+        return verifiedHomeRunning && expectedRear > Display.DEFAULT_DISPLAY && expectedRear == hostDisplay;
+    }
+
     boolean mayKeepLockedOutput(Context context, int primaryState, boolean verifiedHomeRunning,
             boolean userPresent) {
         if (!homeOnly || !verifiedHomeRunning)
             return !userPresent && lockedWithPrimaryInactive(context, primaryState);
 
         var settings = context.getSharedPreferences("mrss_settings", Context.MODE_PRIVATE);
-        if (!settings.getBoolean(PREF, false) || settings.getBoolean("notification_dismiss_only", false)
+        if (!NotificationTapAction.read(settings).usesRear()
                 || !lockedHomeAuthorized(context, packageName)) return false;
 
         RearNotificationExitMode mode = RearNotificationExitMode.read(settings);
@@ -111,14 +132,17 @@ final class RearNotificationCastRequest {
 
     boolean usable(Context context) {
         var settings = context.getSharedPreferences("mrss_settings", Context.MODE_PRIVATE);
+        NotificationTapAction mode = NotificationTapAction.read(settings);
         return SystemClock.uptimeMillis() < expires && powerAndLockUnchanged(context)
-                && RearAnimationManager.isCurrent(RearAnimationManager.AnimationType.NOTIFICATION, session)
-                && settings.getBoolean(PREF, false) && !settings.getBoolean("notification_dismiss_only", false)
+                && (capsuleSource == null
+                    ? mode.usesRear() && RearAnimationManager.isCurrent(RearAnimationManager.AnimationType.NOTIFICATION, session)
+                    : mode == NotificationTapAction.REAR && capsuleOwner.getAsBoolean())
                 && (!homeOnly || lockedHomeAuthorized(context, packageName));
     }
 
     private StatusBarNotification liveNotification() {
-        StatusBarNotification notice = NotificationService.currentRearOpenNotification(session);
+        StatusBarNotification notice = capsuleSource == null ? NotificationService.currentRearOpenNotification(session)
+                : NotificationService.currentCapsuleNotice(capsuleSource);
         if (notice == null || !notificationKey.equals(notice.getKey()) || postTime != notice.getPostTime()
                 || !packageName.equals(notice.getPackageName())
                 || !Objects.equals(action, NotificationService.originalActivityAction(notice))
@@ -181,7 +205,8 @@ final class RearNotificationCastRequest {
     }
 
     boolean mayVerifyLaunch(Activity host, View root, int displayId) {
-        return locked && dispatchedDisplay > 0 && dispatchedDisplay == displayId && hostStillOwnsRear(host, root);
+        return (locked || capsuleSource != null) && dispatchedDisplay > 0 && dispatchedDisplay == displayId
+                && hostStillOwnsRear(host, root);
     }
 
     private boolean canLaunch(Activity host, View root, int display) {

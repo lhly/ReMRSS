@@ -23,6 +23,17 @@ public final class RearImeStartupFocusTest {
         assertFalse(RearImeStartupFocus.hasDrawnWindow(TARGET_WINDOW.replace("mHasSurface=true", "mHasSurface=false"), 42, TARGET));
     }
 
+    @Test public void lockScreenSeedCannotUsePrimaryOrAnotherDisplayAndDoesNotChangeOrdinaryHandoff() {
+        String displayName = "ReMRSS-virtual-test";
+        assertTrue(RearImeStartupFocus.canHostHelper(42, displayName, 42, displayName, true, true));
+        assertFalse(RearImeStartupFocus.canHostHelper(0, displayName, 0, displayName, true, true));
+        assertFalse(RearImeStartupFocus.canHostHelper(42, displayName, 43, displayName, true, true));
+        assertFalse(RearImeStartupFocus.canHostHelper(42, displayName, 42, "Other display", true, true));
+        assertFalse(RearImeStartupFocus.canHostHelper(42, displayName, 42, displayName, false, true));
+        assertFalse(RearImeStartupFocus.canHostHelper(42, displayName, 42, displayName, true, false));
+        assertTrue(RearImeStartupFocus.canHostHelper(42, displayName, 42, displayName, false, false));
+    }
+
     @Test public void cannotBorrowDrawnStateFromAnotherWindow() {
         String other = TARGET_WINDOW.replace("SearchActivity", "LoginActivity");
         String waiting = TARGET_WINDOW.replace("HAS_DRAWN", "DRAW_PENDING");

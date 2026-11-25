@@ -10,14 +10,27 @@
     <string name="ui_author_anti" formatted="false">原始作者：AntiOblivionis</string>
     <string name="ui_auto_destroy_time" formatted="false">自動銷毀時間</string>
     <string name="ui_notification_duration_title" formatted="false">通知顯示時間</string>
-    <string name="ui_notification_never_close" formatted="false">不自動關閉</string>
-    <string name="ui_notification_never_close_help" formatted="false">更耗電；通知撤回或關閉背屏通知時結束。</string>
+    <string name="ui_notification_never_close" formatted="false">全螢幕通知不自動關閉</string>
+    <string name="ui_notification_never_close_help" formatted="false">較耗電。全螢幕通知在撤回或關閉背屏通知時收起；頂部膠囊仍依設定時長收起，最長 2 分鐘。</string>
     <string name="ui_notification_click_action" formatted="false">點擊通知</string>
-    <string name="ui_notification_click_action_help" formatted="false">主螢幕鎖定且熄屏或處於常亮顯示時，優先開啟通知詳情；不支援時嘗試開啟來源應用程式。投放期間，點按通知膠囊只會關閉提示。</string>
+    <string name="ui_notification_click_action_help" formatted="false">虛擬投放期間，新通知以頂部膠囊顯示，不會自動切換應用程式。點按通知時依照選擇執行；選擇僅在背屏閒置時開啟，背屏已在使用時只會收起提醒。</string>
     <string name="ui_notification_click_open" formatted="false">在主螢幕開啟應用程式</string>
     <string name="ui_notification_click_open_rear">在背螢幕開啟</string>
+    <string name="ui_notification_click_open_rear_idle">僅背屏閒置時在背屏開啟</string>
+    <string name="ui_notification_click_main_unavailable">無法在主屏開啟這則通知。</string>
+    <string name="ui_notification_click_expired">這則通知已失效。</string>
+    <string name="ui_notification_click_target_in_use">來源應用程式已有開啟的工作，未切換目前投放。</string>
+    <string name="ui_notification_click_rear_unsupported">目前裝置不支援在背屏開啟通知。</string>
+    <string name="ui_notification_click_enable_service_confirm">要使用此點按行為，是否同時開啟背屏通知？</string>
+    <string name="ui_notification_click_paused_access">暫不生效：需要通知讀取權限。</string>
+    <string name="ui_notification_click_paused_service">暫不生效：背屏通知已關閉。</string>
+    <string name="ui_notification_click_paused_connection">暫不生效：請連線至目前的權限服務。</string>
+    <string name="ui_notification_locked_home_paused_action">暫不生效：請選擇在背屏開啟通知的點按行為。</string>
     <string name="ui_notification_locked_home">鎖屏開啟應用程式</string>
     <string name="ui_notification_locked_home_summary">選擇哪些應用程式可在不解鎖手機時從背螢幕開啟。</string>
+    <string name="ui_notification_locked_home_shizuku_required">請先連線並授權 Shizuku，再允許此應用程式在鎖屏時開啟。</string>
+    <string name="ui_notification_disable_source_revokes_home">關閉這些應用程式的背屏通知，也會撤回它們已有的鎖屏開啟授權。</string>
+    <string name="ui_notification_disable_source_confirm">關閉並撤銷授權</string>
     <string name="ui_notification_locked_home_warning">點按通知只會開啟應用程式，不會跳至通知詳情。手機鎖定時，拿到手機的人也可能看到聊天清單等內容。</string>
     <string name="ui_notification_locked_home_empty">請先在「通知應用程式」選擇支援獨立啟動的應用程式。</string>
     <string name="ui_locked_home_exit_title">鎖屏應用程式退出時機</string>
@@ -87,7 +100,7 @@
     <string name="ui_operation_failed" formatted="false">操作失敗，請檢查連接後重試</string>
     <string name="ui_permission_required" formatted="false">需要權限</string>
     <string name="ui_privacy_section" formatted="false">隱私與顯示</string>
-    <string name="ui_proximity_help" formatted="false">背屏被遮蓋時，將投放應用移回主屏</string>
+    <string name="ui_proximity_help" formatted="false">遮擋主螢幕距離感測器可退出投放；從鎖屏通知開啟的應用程式不受此項影響。</string>
     <string name="ui_proximity_sensor" formatted="false">接近傳感器</string>
     <string name="ui_quick_tiles" formatted="false">控制中心快捷磁貼</string>
     <string name="ui_refresh" formatted="false">重新整理</string>
@@ -186,6 +199,9 @@
     <string name="ui_rotation_unavailable">未讀取到目前方向</string>
     <string name="ui_charging_standby">待生效</string>
     <string name="ui_charging_requires_animation">開啟充電動畫後，常亮偏好才會生效。</string>
+    <string name="ui_charging_enable_animation_confirm">是否同時開啟充電動畫，並在充電期間保持顯示？</string>
+    <string name="ui_charging_pause_always_confirm">關閉充電動畫後，充電常亮會暫停，原設定會保留。</string>
+    <string name="ui_charging_always_paused">已儲存，充電動畫關閉期間暫停。</string>
     <string name="ui_notification_duration_scope">適用於轉發通知。SDK 和 Mod 通知按各自的期限關閉。</string>
     <string name="ui_cancel_download">取消下載</string>
     <string name="ui_number_range_error">請輸入 %1$d 至 %2$d 之間的數字。</string>

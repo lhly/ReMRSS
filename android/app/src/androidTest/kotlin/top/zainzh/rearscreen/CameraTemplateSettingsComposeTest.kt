@@ -44,9 +44,9 @@ class CameraTemplateSettingsComposeTest {
                     setContent { AppTheme {
                         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
                             AppCard {
-                                RearCameraGapBatteryToggle(true, device.value)
+                                RearCameraGapBatteryToggle(device.value)
                                 AppDivider()
-                                RearCameraStatusToggle(true, device.value)
+                                RearCameraStatusToggle(device.value)
                             }
                         }
                     } }

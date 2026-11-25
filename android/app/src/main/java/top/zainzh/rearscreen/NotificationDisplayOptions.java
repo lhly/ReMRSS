@@ -22,10 +22,6 @@ final class NotificationDisplayOptions {
         return ownedNotification || !keepUntilRemoved;
     }
 
-    static boolean shouldLaunchSourceApp(boolean ownedNotification, boolean dismissOnly) {
-        return ownedNotification || !dismissOnly;
-    }
-
     static boolean shouldKeepUntilRemoved(boolean preferenceEnabled, String notificationKey, long postTime) {
         return preferenceEnabled && notificationKey != null && !notificationKey.isEmpty() && postTime > 0;
     }

@@ -46,10 +46,53 @@ final class RearCastNotification {
 
     static synchronized boolean hasTarget() { return target != null; }
 
+    static boolean canPresentCapsule(boolean lockedNotification, boolean lockedCastRunning, boolean rearHostVisible) {
+        // A cast app can own focus on its virtual display while the physical host remains visible.
+        return rearHostVisible && (!lockedNotification || lockedCastRunning);
+    }
+
     static boolean offer(String pkg, String title, String text, long now, int seconds, boolean oled) {
-        Message message = new Message(pkg, title, text,
-                now + Math.max(1, Math.min(120, seconds)) * 1000L, oled);
-        return offerSource(message);
+        return offer(pkg, title, text, now, seconds, oled, null, 0);
+    }
+
+    static boolean offer(String pkg, String title, String text, long now, int seconds, boolean oled,
+                         String key, long postTime) {
+        SourceNotice source = key != null && !key.isEmpty() && postTime > 0
+                ? new SourceNotice(pkg, key, postTime) : null;
+        return offerSource(new Message(pkg, title, text, now + Math.max(1, Math.min(120, seconds)) * 1000L,
+                oled, false, null, source));
+    }
+
+    static synchronized Message current(Target expectedTarget, long token) {
+        return target == expectedTarget && activeNotificationToken == token ? activeMessage : null;
+    }
+
+    static synchronized boolean isCurrentSourceForWake(Target expectedTarget, Message message) {
+        return message != null && message.source != null && current(expectedTarget, message.token) == message
+                && !message.isEnded() && message.remaining(clock.getAsLong()) > 0;
+    }
+
+    static void sourceRemoved(String packageName, String key, long postTime) {
+        long token;
+        synchronized (RearCastNotification.class) {
+            SourceNotice source = activeMessage == null ? null : activeMessage.source;
+            if (source == null || !source.packageName.equals(packageName)
+                    || !source.key.equals(key) || source.postTime != postTime) return;
+            token = activeMessage.token;
+        }
+        clearNotification(token, "SOURCE_REMOVED");
+    }
+
+    /** A receipt, not launch authority. Only the listener can resolve it into a live notification. */
+    static final class SourceNotice {
+        final String packageName, key;
+        final long postTime;
+
+        SourceNotice(String packageName, String key, long postTime) {
+            this.packageName = packageName;
+            this.key = key;
+            this.postTime = postTime;
+        }
     }
 
     /** Owned requests never replace a source notification or charging message. */
@@ -190,6 +233,7 @@ final class RearCastNotification {
         final boolean oled;
         final boolean charging;
         final Listener listener;
+        final SourceNotice source;
         private boolean displayed, covered, ended;
 
         Message(String pkg, String title, String text, long expiresAt, boolean oled) {
@@ -206,6 +250,10 @@ final class RearCastNotification {
             this(pkg, title, text, expiresAt, oled, charging, null);
         }
         private Message(String pkg, String title, String text, long expiresAt, boolean oled, boolean charging, Listener listener) {
+            this(pkg, title, text, expiresAt, oled, charging, listener, null);
+        }
+        private Message(String pkg, String title, String text, long expiresAt, boolean oled,
+                        boolean charging, Listener listener, SourceNotice source) {
             packageName = pkg;
             this.title = line(title);
             this.text = line(text);
@@ -213,6 +261,7 @@ final class RearCastNotification {
             this.oled = oled;
             this.charging = charging;
             this.listener = listener;
+            this.source = source;
         }
         synchronized boolean isOwned() { return listener != null; }
         void display() {

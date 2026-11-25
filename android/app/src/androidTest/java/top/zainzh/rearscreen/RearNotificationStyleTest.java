@@ -111,13 +111,31 @@ public class RearNotificationStyleTest {
         info.cutout = portrait ? new Rect(0, 296, 0, 0) : new Rect(296, 0, 0, 0);
         cacheField("cachedInfo").set(DisplayInfoCache.getInstance(), info); cacheField("initialized").set(DisplayInfoCache.getInstance(), true);
     }
+    @Test public void onlyOpenOnIdleDismissesFullScreenNoticeCoveringAnotherTask() throws Exception {
+        createDisplay(false);
+        String previous = prefs.getString(NotificationTapAction.PREF, null);
+        prefs.edit().putString(NotificationTapAction.PREF, NotificationTapAction.REAR_IDLE.value).apply();
+        try {
+            activity = launch(false, LONG_TEXT, 47);
+            inst.runOnMainSync(() -> assertTrue(activity.findViewById(R.id.notification_container).performClick()));
+            await(activity::isFinishing);
+        } finally {
+            prefs.edit().putString(NotificationTapAction.PREF, previous).apply();
+        }
+    }
+
     RearScreenNotificationActivity launch(boolean oled, String text) throws Exception {
+        return launch(oled, text, -1);
+    }
+
+    RearScreenNotificationActivity launch(boolean oled, String text, int coveredTaskId) throws Exception {
         long id = RearAnimationManager.beginAnimation(RearAnimationManager.AnimationType.NOTIFICATION).id;
         Instrumentation.ActivityMonitor monitor = inst.addMonitor(FixtureNotificationActivity.class.getName(), null, false);
         try {
             ActivityOptions options = ActivityOptions.makeBasic(); options.setLaunchDisplayId(displayId);
             context.startActivity(new Intent(context, FixtureNotificationActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 .putExtra("fixtureRearDisplayId", displayId).putExtra("packageName", context.getPackageName())
+                .putExtra("rearTaskId", coveredTaskId)
                 .putExtra("title", "ReMRSS 通知样式检查 / Long notification title").putExtra("text", text).putExtra("darkMode", oled)
                 .putExtra(RearAnimationManager.EXTRA_SESSION_ID, id), options.toBundle());
             RearScreenNotificationActivity result = (RearScreenNotificationActivity) monitor.waitForActivityWithTimeout(5000);

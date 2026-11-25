@@ -13,12 +13,12 @@ import androidx.compose.ui.res.stringResource
     else summary
 }
 
-@Composable internal fun RearCameraGapBatteryToggle(virtual: Boolean, device: String = Build.DEVICE) {
+@Composable internal fun RearCameraGapBatteryToggle(device: String = Build.DEVICE) {
     val context = LocalContext.current
     val preferences = remember(context) { RearCameraGapPreferences.preferences(context) }
     var enabled by remember(context) { mutableStateOf(RearCameraGapPreferences.enabled(context)) }
     val profile = remember(device) { RearCameraGapGeometry.supported(device) }
-    val supported = Build.VERSION.SDK_INT >= 33 && profile != null
+    val supported = BuildConfig.VIRTUAL_CAST_ENABLED && Build.VERSION.SDK_INT >= 33 && profile != null
     DisposableEffect(preferences) {
         val changed = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == RearCameraGapPreferences.ENABLED) enabled = RearCameraGapPreferences.enabled(context)
@@ -29,15 +29,15 @@ import androidx.compose.ui.res.stringResource
     AppToggle(stringResource(R.string.camera_gap_battery_title),
         cameraAreaSummary(if (supported) R.string.camera_gap_battery_summary else R.string.camera_gap_battery_unavailable,
             if (supported) profile else null),
-        checked = enabled, enabled = supported && virtual, onChange = { RearCameraGapPreferences.setEnabled(context, it) })
+        checked = enabled, enabled = supported, onChange = { RearCameraGapPreferences.setEnabled(context, it) })
 }
 
-@Composable internal fun RearCameraStatusToggle(virtual: Boolean, device: String = Build.DEVICE) {
+@Composable internal fun RearCameraStatusToggle(device: String = Build.DEVICE) {
     val context = LocalContext.current
     val preferences = remember(context) { RearCameraGapPreferences.preferences(context) }
     var enabled by remember(context) { mutableStateOf(RearCameraGapPreferences.statusEnabled(context)) }
     val profile = remember(device) { RearCameraGapGeometry.supported(device) }
-    val supported = Build.VERSION.SDK_INT >= 33 && RearCameraStatusGeometry.supported(profile)
+    val supported = BuildConfig.VIRTUAL_CAST_ENABLED && Build.VERSION.SDK_INT >= 33 && RearCameraStatusGeometry.supported(profile)
     DisposableEffect(preferences) {
         val changed = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == RearCameraGapPreferences.STATUS_ENABLED) enabled = RearCameraGapPreferences.statusEnabled(context)
@@ -48,5 +48,5 @@ import androidx.compose.ui.res.stringResource
     AppToggle(stringResource(R.string.camera_status_title),
         cameraAreaSummary(if (supported) R.string.camera_status_summary else R.string.camera_status_unavailable,
             if (supported) profile else null),
-        checked = enabled, enabled = supported && virtual, onChange = { RearCameraGapPreferences.setStatusEnabled(context, it) })
+        checked = enabled, enabled = supported, onChange = { RearCameraGapPreferences.setStatusEnabled(context, it) })
 }

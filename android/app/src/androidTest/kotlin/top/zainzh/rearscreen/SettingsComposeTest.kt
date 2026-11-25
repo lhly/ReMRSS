@@ -125,9 +125,13 @@ class SettingsComposeTest {
     }
     @Test fun notificationTapModeKeepsLegacyChoicesAndPersistsRearChoice() {
         val prefs = NativePreferences(compose.activity)
-        val oldRear = prefs.getBoolean(RearNotificationCastRequest.PREF)
-        val oldDismiss = prefs.isNotificationDismissOnly()
-        assertEquals(s(R.string.ui_notification_click_open_rear), s("notification_click_open_rear"))
+        org.junit.Assume.assumeTrue(BuildConfig.VIRTUAL_CAST_ENABLED && android.os.Build.VERSION.SDK_INT >= 33
+            && PermissionChecks.listenerGranted(compose.activity) && prefs.getBoolean("notification_service_enabled"))
+        compose.waitUntil(10_000) { compose.activity.isTaskServiceReady() }
+        val saved = compose.activity.getSharedPreferences("mrss_settings", android.content.Context.MODE_PRIVATE)
+        val savedAction = saved.getString(NotificationTapAction.PREF, null)
+        val oldAction = prefs.notificationClickAction()
+        assertEquals(s(R.string.ui_notification_click_open_rear_idle), s("notification_click_open_rear_idle"))
         fun openRules() {
             tab("notifications_title")
             compose.onNodeWithTag("notifications_list").performScrollToNode(hasText(s("notification_rules")))
@@ -157,14 +161,14 @@ class SettingsComposeTest {
                 shell("mkdir -p $folder")
                 shell("screencap -p $folder/choices.png")
             }
-            pick(1, "notification_click_open_rear")
+            pick(2, "notification_click_open_rear_idle")
             assertTrue(prefs.getBoolean(RearNotificationCastRequest.PREF))
             assertFalse(prefs.isNotificationDismissOnly())
             compose.activityRule.scenario.recreate()
             scrollToChoice()
-            compose.onNodeWithText(s("notification_click_open_rear")).assertIsDisplayed()
+            compose.onNodeWithText(s("notification_click_open_rear_idle")).assertIsDisplayed()
             openChoices()
-            pick(2, "notification_click_dismiss")
+            pick(3, "notification_click_dismiss")
             assertTrue(prefs.isNotificationDismissOnly())
             assertFalse(prefs.getBoolean(RearNotificationCastRequest.PREF))
             openChoices()
@@ -172,8 +176,60 @@ class SettingsComposeTest {
             assertFalse(prefs.isNotificationDismissOnly())
             assertFalse(prefs.getBoolean(RearNotificationCastRequest.PREF))
         } finally {
-            prefs.putBoolean(RearNotificationCastRequest.PREF, oldRear)
-            prefs.putBoolean("notification_dismiss_only", oldDismiss)
+            prefs.setNotificationClickAction(oldAction)
+            if (savedAction == null) saved.edit().remove(NotificationTapAction.PREF).commit()
+        }
+    }
+
+    @Test fun cancellingChargingAnimationStopKeepsBothPreferences() {
+        val prefs = NativePreferences(compose.activity)
+        val oldAnimation = prefs.getBoolean("charging_animation_enabled")
+        val oldAlways = prefs.getBoolean("charging_always_on_enabled")
+        try {
+            prefs.putBoolean("charging_animation_enabled", true)
+            prefs.putBoolean("charging_always_on_enabled", true)
+            compose.activityRule.scenario.recreate()
+            compose.onNodeWithTag("charging_settings_entry").performScrollTo().performClick()
+            compose.onNodeWithText(s("charging_animation")).assertIsOn().performClick()
+            compose.onNodeWithText(s(R.string.ui_charging_pause_always_confirm)).assertIsDisplayed()
+            compose.onNodeWithText(s("cancel")).performClick()
+            assertTrue(prefs.getBoolean("charging_animation_enabled"))
+            assertTrue(prefs.getBoolean("charging_always_on_enabled"))
+        } finally {
+            prefs.putBoolean("charging_animation_enabled", oldAnimation)
+            prefs.putBoolean("charging_always_on_enabled", oldAlways)
+        }
+    }
+
+    @Test fun choosingANotificationOpenActionWithoutAccessDoesNotReplaceTheSavedChoice() {
+        org.junit.Assume.assumeTrue(BuildConfig.VIRTUAL_CAST_ENABLED && android.os.Build.VERSION.SDK_INT >= 33)
+        org.junit.Assume.assumeFalse(PermissionChecks.listenerGranted(compose.activity))
+        val prefs = NativePreferences(compose.activity)
+        val saved = compose.activity.getSharedPreferences("mrss_settings", android.content.Context.MODE_PRIVATE)
+        val savedAction = saved.getString(NotificationTapAction.PREF, null)
+        val oldAction = prefs.notificationClickAction()
+        fun openChoices() {
+            compose.onNodeWithTag("notification_rules_list")
+                .performScrollToNode(hasText(s("notification_click_action")))
+            compose.onNodeWithText(s("notification_click_action")).performClick()
+        }
+        try {
+            tab("notifications_title")
+            compose.onNodeWithTag("notifications_list").performScrollToNode(hasText(s("notification_rules")))
+            compose.onNodeWithText(s("notification_rules")).performClick()
+            openChoices()
+            compose.onNodeWithText(s("notification_click_dismiss")).performScrollTo().performClick()
+            for (choice in listOf("notification_click_open_rear", "notification_click_open_rear_idle", "notification_click_open")) {
+                openChoices()
+                compose.onNodeWithText(s(choice)).performScrollTo().performClick()
+                compose.onNodeWithText(s("notification_access_help")).assertIsDisplayed()
+                compose.onNodeWithText(s("cancel")).performClick()
+                assertTrue(prefs.isNotificationDismissOnly())
+                assertFalse(prefs.getBoolean(RearNotificationCastRequest.PREF))
+            }
+        } finally {
+            prefs.setNotificationClickAction(oldAction)
+            if (savedAction == null) saved.edit().remove(NotificationTapAction.PREF).commit()
         }
     }
     @Test fun notificationDurationDraftSurvivesRecreationAndInvalidInputStaysOpen() {

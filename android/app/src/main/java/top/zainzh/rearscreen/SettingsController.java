@@ -280,7 +280,8 @@ final class SettingsController {
         updateDialog.setManualFeedbackVisible(page == 3);
         hideKeyboard();
         if (target == 100 && picker == null) {
-            picker = new AppPickerModel(activity, homePicker ? homePickerState : pickerState, this::closePicker, homePicker);
+            picker = new AppPickerModel(activity, homePicker ? homePickerState : pickerState, this::closePicker,
+                    homePicker, modal, () -> navigate(NavigationMotionKt.PERMISSION_SETTINGS_ROUTE));
             composeUi.showPicker(picker);
             if (resumed) picker.onResume();
         }
@@ -349,11 +350,12 @@ final class SettingsController {
                 currentDpi, rotation, remoteBusy || checkingDisplay, values);
         int selected = activity.getSharedPreferences("mrss_settings", Context.MODE_PRIVATE)
                 .getStringSet("notification_selected_apps", Collections.emptySet()).size();
+        NotificationTapAction clickAction = preferences.notificationClickAction();
         composeUi.updateSettings(selected, listenerGranted(), Build.VERSION.SDK_INT < 33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
                 preferences.getDuration(), updateSummaryText(), checkingUpdates, UpdateNetwork.proxyEnabled(activity),
-                preferences.isNotificationNeverAutoClose(), preferences.isNotificationDismissOnly(),
-                preferences.getBoolean(RearNotificationCastRequest.PREF), preferences.showInRecents(),
-                activity.getString(RearNotificationExitMode.read(activity).label));
+                preferences.isNotificationNeverAutoClose(), clickAction.usesRear(), preferences.showInRecents(),
+                activity.getString(RearNotificationExitMode.read(activity).label), activity.getString(clickAction.label),
+                notificationClickStatus(clickAction));
     }
 
     private void updateRecentsVisibility(boolean shown) {
@@ -366,6 +368,40 @@ final class SettingsController {
     }
 
     private void toggle(String key, String method, boolean enabled) {
+        if (key.equals("charging_always_on_enabled") && enabled
+                && !preferences.getBoolean("charging_animation_enabled")) {
+            if (offerConnectionIfNeeded()) return;
+            modal.show(s("charging_always_on"), activity.getString(R.string.ui_charging_enable_animation_confirm),
+                    new String[]{s("confirm"), s("cancel")},
+                    new Runnable[]{() -> {
+                        if (offerConnectionIfNeeded()) return;
+                        if (preferences.getBoolean("charging_animation_enabled")) {
+                            applyToggle(key, method, true, null);
+                        } else {
+                            boolean previous = preferences.getBoolean(key);
+                            // The newly started service reads the intended charging preference.
+                            applyToggle("charging_animation_enabled", "toggleChargingService", true, null,
+                                    () -> preferences.putBoolean(key, true),
+                                    () -> preferences.putBoolean(key, previous));
+                        }
+                    }, null});
+            return;
+        }
+        if (key.equals("charging_animation_enabled") && !enabled && preferences.getBoolean("charging_always_on_enabled")) {
+            modal.show(s("charging_animation"), activity.getString(R.string.ui_charging_pause_always_confirm),
+                    new String[]{s("confirm"), s("cancel")},
+                    new Runnable[]{() -> applyToggle(key, method, false, null), null});
+            return;
+        }
+        applyToggle(key, method, enabled, null);
+    }
+
+    private void applyToggle(String key, String method, boolean enabled, Runnable afterSuccess) {
+        applyToggle(key, method, enabled, afterSuccess, null, null);
+    }
+
+    private void applyToggle(String key, String method, boolean enabled, Runnable afterSuccess,
+            Runnable applyLinkedPreference, Runnable restoreLinkedPreference) {
         if (enabled && key.equals("notification_service_enabled") && !listenerGranted()) {
             updateHome();
             modal.show(s("permission_required"), s("notification_access_help"),
@@ -380,6 +416,7 @@ final class SettingsController {
         String other = enabled && key.equals("keep_screen_on_enabled") ? "always_wakeup_enabled"
                 : enabled && key.equals("always_wakeup_enabled") ? "keep_screen_on_enabled" : null;
         boolean otherPrevious = other != null && preferences.getBoolean(other);
+        if (applyLinkedPreference != null) applyLinkedPreference.run();
         preferences.putBoolean(key, enabled);
         if (otherPrevious) {
             preferences.putBoolean(other, false);
@@ -391,12 +428,15 @@ final class SettingsController {
             if (destroyed) return;
             if (error != null || Boolean.FALSE.equals(value)) {
                 preferences.putBoolean(key, previous);
+                if (restoreLinkedPreference != null) restoreLinkedPreference.run();
                 if (otherPrevious) {
                     preferences.putBoolean(other, true);
                     activity.runAction(other.equals("always_wakeup_enabled") ? "setAlwaysWakeUpEnabled" : "setKeepScreenOnEnabled",
                             argument("enabled", true), null);
                 }
                 updateHome(); toast(error == null ? s("operation_failed") : error);
+            } else if (afterSuccess != null) {
+                afterSuccess.run();
             }
         });
     }
@@ -654,18 +694,79 @@ final class SettingsController {
     }
 
     private void showNotificationClickAction() {
-        String title = s("notification_click_action");
-        modal.show(title, s("notification_click_action_help"),
-                new String[]{s("notification_click_open"), s("notification_click_open_rear"),
-                        s("notification_click_dismiss"), s("cancel")},
-                new Runnable[]{() -> setNotificationClickAction(false, false),
-                        () -> setNotificationClickAction(false, true),
-                        () -> setNotificationClickAction(true, false), null});
+        NotificationTapAction[] modes = {
+                NotificationTapAction.MAIN, NotificationTapAction.REAR,
+                NotificationTapAction.REAR_IDLE, NotificationTapAction.DISMISS
+        };
+        String[] labels = new String[modes.length + 1];
+        Runnable[] choices = new Runnable[labels.length];
+        NotificationTapAction saved = preferences.notificationClickAction();
+        int selected = -1;
+        for (int i = 0; i < modes.length; i++) {
+            NotificationTapAction mode = modes[i];
+            labels[i] = activity.getString(mode.label);
+            choices[i] = () -> setNotificationClickAction(mode);
+            if (mode == saved) selected = i;
+        }
+        labels[modes.length] = s("cancel");
+        modal.showChoice(s("notification_click_action"), s("notification_click_action_help"), labels, choices, selected);
     }
 
-    private void setNotificationClickAction(boolean dismissOnly, boolean openOnRear) {
-        preferences.putBoolean(RearNotificationCastRequest.PREF, openOnRear);
-        preferences.putBoolean("notification_dismiss_only", dismissOnly);
+    private void setNotificationClickAction(NotificationTapAction mode) {
+        if (mode == NotificationTapAction.DISMISS) {
+            saveNotificationClickAction(mode);
+            return;
+        }
+        if (mode.usesRear() && !supportsRearNotificationClick()) {
+            modal.show(s("notification_click_action"),
+                    activity.getString(R.string.ui_notification_click_rear_unsupported),
+                    new String[]{s("confirm")}, new Runnable[]{null});
+            return;
+        }
+        if (!checkNotificationClickAccess()) return;
+        if (preferences.getBoolean("notification_service_enabled")) {
+            saveNotificationClickAction(mode);
+            return;
+        }
+        modal.show(s("notification_click_action"), activity.getString(R.string.ui_notification_click_enable_service_confirm),
+                new String[]{s("confirm"), s("cancel")}, new Runnable[]{() -> {
+                    if (!checkNotificationClickAccess()) return;
+                    applyToggle("notification_service_enabled", "toggleNotificationService", true,
+                            () -> saveNotificationClickAction(mode));
+                }, null});
+    }
+
+    private boolean checkNotificationClickAccess() {
+        if (!listenerGranted()) {
+            modal.show(s("permission_required"), s("notification_access_help"),
+                    new String[]{s("go_to_settings"), s("cancel")},
+                    new Runnable[]{() -> action("openNotificationListenerSettings"), null});
+            return false;
+        }
+        if (offerConnectionIfNeeded()) return false;
+        if (!activity.isTaskServiceReady()) {
+            toast(activity.getString(R.string.ui_notification_click_paused_connection));
+            return false;
+        }
+        return true;
+    }
+
+    private boolean supportsRearNotificationClick() {
+        return BuildConfig.VIRTUAL_CAST_ENABLED && Build.VERSION.SDK_INT >= 33;
+    }
+
+    private String notificationClickStatus(NotificationTapAction mode) {
+        if (!listenerGranted()) return activity.getString(R.string.ui_notification_click_paused_access);
+        if (!preferences.getBoolean("notification_service_enabled"))
+            return activity.getString(R.string.ui_notification_click_paused_service);
+        if (!activity.isTaskServiceReady()) return activity.getString(R.string.ui_notification_click_paused_connection);
+        if (mode.usesRear() && !supportsRearNotificationClick())
+            return activity.getString(R.string.ui_notification_click_rear_unsupported);
+        return "";
+    }
+
+    private void saveNotificationClickAction(NotificationTapAction action) {
+        preferences.setNotificationClickAction(action);
         activity.sendBroadcast(new Intent(BuildConfig.APPLICATION_ID + ".RELOAD_NOTIFICATION_SETTINGS").setPackage(activity.getPackageName()));
         updateHome();
     }

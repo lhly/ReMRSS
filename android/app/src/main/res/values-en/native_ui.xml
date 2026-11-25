@@ -10,14 +10,27 @@
     <string name="ui_author_anti" formatted="false">Original author: AntiOblivionis</string>
     <string name="ui_auto_destroy_time" formatted="false">Auto Destroy Time</string>
     <string name="ui_notification_duration_title" formatted="false">Notification display time</string>
-    <string name="ui_notification_never_close" formatted="false">Don’t close automatically</string>
-    <string name="ui_notification_never_close_help" formatted="false">Uses more battery. Ends when the notification is removed or rear notifications are turned off.</string>
+    <string name="ui_notification_never_close" formatted="false">Keep full-screen notifications open</string>
+    <string name="ui_notification_never_close_help" formatted="false">Uses more battery. Full-screen notices close when removed or rear notifications are turned off. Capsules still use the display time, up to 2 minutes.</string>
     <string name="ui_notification_click_action" formatted="false">Tap notification</string>
-    <string name="ui_notification_click_action_help" formatted="false">While the main screen is locked (off or showing Always-on display), try the notification details first, then its app. During casting, taps only dismiss banners.</string>
+    <string name="ui_notification_click_action_help" formatted="false">During virtual casting, new notifications appear as capsules without switching apps. When you tap a notification, your choice applies. Open on rear only when idle dismisses the reminder if the rear is in use.</string>
     <string name="ui_notification_click_open" formatted="false">Open app on main screen</string>
     <string name="ui_notification_click_open_rear">Open on the rear screen</string>
+    <string name="ui_notification_click_open_rear_idle">Open on rear only when idle</string>
+    <string name="ui_notification_click_main_unavailable">Could not open this notification on the main screen.</string>
+    <string name="ui_notification_click_expired">This notification is no longer available.</string>
+    <string name="ui_notification_click_target_in_use">The source app is already running. The current cast was not changed.</string>
+    <string name="ui_notification_click_rear_unsupported">This device does not support opening notifications on the rear screen.</string>
+    <string name="ui_notification_click_enable_service_confirm">Turn on rear notifications to use this tap action?</string>
+    <string name="ui_notification_click_paused_access">Paused: notification access is required.</string>
+    <string name="ui_notification_click_paused_service">Paused: rear notifications are off.</string>
+    <string name="ui_notification_click_paused_connection">Paused: connect the current permission service.</string>
+    <string name="ui_notification_locked_home_paused_action">Paused: select an action that opens notifications on the rear screen.</string>
     <string name="ui_notification_locked_home">Open apps from the lock screen</string>
     <string name="ui_notification_locked_home_summary">Choose which apps may open on the rear screen without unlocking the phone.</string>
+    <string name="ui_notification_locked_home_shizuku_required">Connect and authorize Shizuku before allowing this app to open while locked.</string>
+    <string name="ui_notification_disable_source_revokes_home">Turning off notifications for these apps also removes their permission to open while locked.</string>
+    <string name="ui_notification_disable_source_confirm">Turn off and revoke</string>
     <string name="ui_notification_locked_home_warning">A tap opens the app, not the notification details. Anyone holding the locked phone may see its contents, such as a chat list.</string>
     <string name="ui_notification_locked_home_empty">Choose a compatible source in Notification apps first.</string>
     <string name="ui_locked_home_exit_title">When to exit lock screen apps</string>
@@ -87,7 +100,7 @@
     <string name="ui_operation_failed" formatted="false">Operation failed. Check the connection and try again</string>
     <string name="ui_permission_required" formatted="false">Permission Required</string>
     <string name="ui_privacy_section" formatted="false">Privacy &amp; appearance</string>
-    <string name="ui_proximity_help" formatted="false">Return the cast app when the rear screen is covered</string>
+    <string name="ui_proximity_help" formatted="false">Cover the main screen’s proximity sensor to end a cast. Does not affect apps opened from a lock-screen notification.</string>
     <string name="ui_proximity_sensor" formatted="false">Proximity Sensor</string>
     <string name="ui_quick_tiles" formatted="false">Control Center shortcuts</string>
     <string name="ui_refresh" formatted="false">Refresh</string>
@@ -187,6 +200,9 @@
     <string name="ui_rotation_unavailable">Current orientation is unavailable</string>
     <string name="ui_charging_standby">Waiting for animation</string>
     <string name="ui_charging_requires_animation">Turn on the charging animation to keep it visible.</string>
+    <string name="ui_charging_enable_animation_confirm">Turn on the charging animation and keep it visible while charging?</string>
+    <string name="ui_charging_pause_always_confirm">Turning off the charging animation pauses Keep visible. Your setting is kept.</string>
+    <string name="ui_charging_always_paused">Saved, but paused because the charging animation is off.</string>
     <string name="ui_notification_duration_scope">Display time for forwarded notifications. SDK and Mod notifications use their own expiry.</string>
     <string name="ui_cancel_download">Cancel download</string>
     <string name="ui_number_range_error">Enter a number from %1$d to %2$d.</string>

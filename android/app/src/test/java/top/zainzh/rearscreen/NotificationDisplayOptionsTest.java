@@ -29,10 +29,50 @@ public class NotificationDisplayOptionsTest {
         assertTrue(NotificationDisplayOptions.hasAutomaticFinish(true, false));
     }
 
-    @Test public void tapDefaultsToOpeningAndCanDismissOnlyTheRearReminder() {
-        assertTrue(NotificationDisplayOptions.shouldLaunchSourceApp(false, false));
-        assertFalse(NotificationDisplayOptions.shouldLaunchSourceApp(false, true));
-        assertTrue(NotificationDisplayOptions.shouldLaunchSourceApp(true, true));
+    @Test public void tapActionsDistinguishBusyRearFromTheNotificationPresentation() {
+        assertEquals(NotificationTapAction.Effect.OPEN_MAIN, NotificationTapAction.MAIN.effect(false));
+        assertEquals(NotificationTapAction.Effect.OPEN_MAIN, NotificationTapAction.MAIN.effect(true));
+        assertEquals(NotificationTapAction.Effect.OPEN_REAR, NotificationTapAction.REAR.effect(false));
+        assertEquals(NotificationTapAction.Effect.REPLACE_REAR, NotificationTapAction.REAR.effect(true));
+        assertEquals(NotificationTapAction.Effect.OPEN_REAR, NotificationTapAction.REAR_IDLE.effect(false));
+        assertEquals(NotificationTapAction.Effect.DISMISS, NotificationTapAction.REAR_IDLE.effect(true));
+        assertEquals(NotificationTapAction.Effect.DISMISS, NotificationTapAction.DISMISS.effect(false));
+        assertEquals(NotificationTapAction.Effect.DISMISS, NotificationTapAction.DISMISS.effect(true));
+    }
+
+    @Test public void openingAnAppAlreadyVisibleOnRearOnlyDismissesItsCapsule() {
+        int on = android.view.Display.STATE_ON;
+        String source = "example.chat";
+        var same = new RearDisplayCastOccupancy.Task(23, "example.previous", source, null, null,
+                0, true, true, false);
+        var visible = new RearDisplayCastOccupancy.Snapshot(256, on, java.util.List.of(same),
+                "activity_task", null);
+        var rear = NotificationTapAction.Effect.REPLACE_REAR;
+        var main = NotificationTapAction.Effect.OPEN_MAIN;
+        assertEquals(NotificationTapAction.Effect.DISMISS, rear.forRearForeground(source, visible));
+        assertEquals(main, main.forRearForeground(source, visible));
+        assertEquals(rear, rear.forRearForeground("example.other", visible));
+        assertEquals(rear, rear.forRearForeground(source, null));
+        assertEquals(rear, rear.forRearForeground(source, new RearDisplayCastOccupancy.Snapshot(
+                0, on, java.util.List.of(same), "activity_task", null)));
+        assertEquals(rear, rear.forRearForeground(source, new RearDisplayCastOccupancy.Snapshot(
+                256, on, java.util.List.of(same), "am_stack_list", null)));
+        var other = new RearDisplayCastOccupancy.Task(24, "example.other", "example.other", null, null,
+                0, true, true, false);
+        assertEquals(rear, rear.forRearForeground(source, new RearDisplayCastOccupancy.Snapshot(
+                256, on, java.util.List.of(same, other), "activity_task", null)));
+        var hidden = new RearDisplayCastOccupancy.Task(24, "example.other", "example.other", null, null,
+                0, false, false, false);
+        assertEquals(NotificationTapAction.Effect.DISMISS, rear.forRearForeground(source,
+                new RearDisplayCastOccupancy.Snapshot(256, on, java.util.List.of(hidden, same), "activity_task", null)));
+    }
+
+    @Test public void legacyRearChoiceKeepsItsIdleBehaviorAndExplicitValuesWin() {
+        assertEquals(NotificationTapAction.MAIN, NotificationTapAction.resolve(null, false, false));
+        assertEquals(NotificationTapAction.REAR_IDLE, NotificationTapAction.resolve(null, false, true));
+        assertEquals(NotificationTapAction.DISMISS, NotificationTapAction.resolve(null, true, true));
+        assertEquals(NotificationTapAction.REAR, NotificationTapAction.resolve("rear", true, false));
+        assertEquals(NotificationTapAction.REAR_IDLE, NotificationTapAction.resolve("unknown", false, true));
     }
 
     @Test public void permanentModeRequiresARealRemovalIdentity() {

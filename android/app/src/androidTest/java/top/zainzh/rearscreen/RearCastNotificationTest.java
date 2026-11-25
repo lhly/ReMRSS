@@ -32,7 +32,7 @@ import java.util.function.BooleanSupplier;
 import static org.junit.Assert.*;
 
 /** Real Android overlay lifecycle plus the production notification service's cast diversion. */
-@androidx.annotation.RequiresApi(33)
+@androidx.test.filters.SdkSuppress(minSdkVersion = 33)
 public class RearCastNotificationTest {
     final Instrumentation inst = InstrumentationRegistry.getInstrumentation();
     final Context context = inst.getTargetContext();

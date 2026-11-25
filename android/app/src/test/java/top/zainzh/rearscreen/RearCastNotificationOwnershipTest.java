@@ -34,6 +34,58 @@ public class RearCastNotificationOwnershipTest {
         RearCastNotification.setClockForTesting(android.os.SystemClock::elapsedRealtime);
     }
 
+    @Test public void approvedLockedHomeCanShowCapsuleWithoutTakingAppFocus() {
+        assertTrue(RearCastNotification.canPresentCapsule(true, true, true));
+        assertFalse(RearCastNotification.canPresentCapsule(true, true, false));
+        assertFalse(RearCastNotification.canPresentCapsule(true, false, true));
+        assertFalse(RearCastNotification.canPresentCapsule(false, false, false));
+        assertTrue(RearCastNotification.canPresentCapsule(false, false, true));
+    }
+
+    @Test public void sourceReceiptIsScopedToAnExactHostAndNotificationGeneration() {
+        assertTrue(RearCastNotification.offer("source", "first", "body", now, 8, false, "same-key", 10));
+        long old = RearCastNotification.captureNotificationToken();
+        RearCastNotification.Message item = RearCastNotification.current(target, old);
+        assertNotNull(item.source);
+        assertEquals("source", item.source.packageName);
+        assertEquals("same-key", item.source.key);
+        assertEquals(10L, item.source.postTime);
+        assertNull(RearCastNotification.current(new FakeTarget(), old));
+        assertTrue(RearCastNotification.offer("source", "updated", "body", now, 8, false, "same-key", 11));
+        assertNull(RearCastNotification.current(target, old));
+        long current = RearCastNotification.captureNotificationToken();
+        assertEquals(11L, RearCastNotification.current(target, current).source.postTime);
+        RearCastNotification.sourceRemoved("source", "same-key", 10L);
+        assertNotNull(RearCastNotification.current(target, current));
+        RearCastNotification.sourceRemoved("source", "same-key", 11L);
+        assertNull(RearCastNotification.current(target, current));
+    }
+
+    @Test public void onlyTheCurrentLiveSourceCanWakeItsOwnRearHost() {
+        assertTrue(RearCastNotification.offer("source", "first", "", now, 1, false, "key", 10));
+        RearCastNotification.Message first = target.shown.get(0);
+        assertTrue(RearCastNotification.isCurrentSourceForWake(target, first));
+        assertFalse(RearCastNotification.isCurrentSourceForWake(new FakeTarget(), first));
+
+        assertTrue(RearCastNotification.offer("source", "updated", "", now, 1, false, "key", 11));
+        RearCastNotification.Message second = target.shown.get(1);
+        assertFalse(RearCastNotification.isCurrentSourceForWake(target, first));
+        assertTrue(RearCastNotification.isCurrentSourceForWake(target, second));
+        RearCastNotification.sourceRemoved("source", "key", 11);
+        assertFalse(RearCastNotification.isCurrentSourceForWake(target, second));
+
+        assertTrue(RearCastNotification.offer("source", "finite", "", now, 1, false, "key", 12));
+        RearCastNotification.Message finite = target.shown.get(2);
+        now += 1_000;
+        assertFalse(RearCastNotification.isCurrentSourceForWake(target, finite));
+
+        RearCastNotification.offerCharging("host", "charge", "", now, false);
+        assertFalse(RearCastNotification.isCurrentSourceForWake(target, target.shown.get(3)));
+        RearCastNotification.clearCharging(RearCastNotification.captureNotificationToken());
+        assertTrue(RearCastNotification.offerOwned("mod", "owned", "", now + 1_000, false, listener(new ArrayList<>())) < 0);
+        assertFalse(RearCastNotification.isCurrentSourceForWake(target, target.shown.get(4)));
+    }
+
     @Test public void sourceCoverRetiresCapsuleAndRouterAloneMayPublishItsFreshResume() {
         List<String> events = new ArrayList<>();
         long oldHandle = RearCastNotification.offerOwned("publisher", "owned", "body", now + 5_000, false,

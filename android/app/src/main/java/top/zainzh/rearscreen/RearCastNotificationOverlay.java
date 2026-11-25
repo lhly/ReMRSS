@@ -32,6 +32,7 @@ final class RearCastNotificationOverlay extends FrameLayout implements AutoClose
     private long expiresAt;
     private boolean available, closed, exiting;
     private final TouchRegion touchRegion;
+    private final java.util.function.LongConsumer tap;
     private String pendingRegion, readyRegion;
     private int originX, originY;
     private int hostGeneration;
@@ -51,10 +52,15 @@ final class RearCastNotificationOverlay extends FrameLayout implements AutoClose
         this(context, null);
     }
     RearCastNotificationOverlay(Context context, TouchRegion touchRegion) {
+        this(context, touchRegion, null);
+    }
+
+    RearCastNotificationOverlay(Context context, TouchRegion touchRegion, java.util.function.LongConsumer tap) {
         super(context);
         this.touchRegion = touchRegion;
+        this.tap = tap;
         setVisibility(GONE);
-        setOnClickListener(view -> { if (message != null) dismiss(message.token); });
+        setOnClickListener(view -> { if (message != null) tap(message.token); });
         setFocusable(false);
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
         // Describe the capsule once; its icon and text are not separate controls.
@@ -116,10 +122,32 @@ final class RearCastNotificationOverlay extends FrameLayout implements AutoClose
         summary.setText(next.text);
         summary.setVisibility(next.text.isEmpty() ? GONE : VISIBLE);
         setContentDescription((next.charging ? "" : app + ": ") + title.getText() + (next.text.isEmpty() ? "" : ". " + next.text)
-                + ". " + getContext().getString(R.string.cast_notification_dismiss_hint));
+                + ". " + getContext().getString(clickLabel(next)));
         applyTheme();
         main.removeCallbacks(expire);
         update();
+    }
+
+    private int clickLabel(RearCastNotification.Message item) {
+        if (tap == null || item.source == null) return R.string.cast_notification_dismiss_hint;
+        NotificationTapAction.Effect effect = NotificationTapAction.read(
+                getContext().getSharedPreferences("mrss_settings", Context.MODE_PRIVATE)).effect(true);
+        if (effect == NotificationTapAction.Effect.OPEN_MAIN) return R.string.ui_notification_click_open;
+        if (effect == NotificationTapAction.Effect.REPLACE_REAR) return R.string.ui_notification_click_open_rear;
+        return R.string.cast_notification_dismiss_hint;
+    }
+
+    boolean canTap(long token) {
+        Display display = getContext().getDisplay();
+        return !closed && available && !exiting && getVisibility() == VISIBLE && message != null
+                && message.token == token && SystemClock.elapsedRealtime() < expiresAt
+                && display != null && display.getState() == Display.STATE_ON;
+    }
+
+    void tap(long token) {
+        if (!canTap(token)) return;
+        if (tap == null) dismiss(token);
+        else tap.accept(token);
     }
 
     void hostState(RearCastViewport safe, int originX, int originY, boolean ready, int generation) {

@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
 final class RearVirtualCast {
     static final int RECOVERY_WAKE_REAR = 1;
     static final int RECOVERY_PRESENT_HOST = 2;
+    static final int RECOVERY_PRESENT_LOCKED_HOST = 3;
     // Framework flags hidden from the public SDK. Preserve these values for the shell-owned display.
     private static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
     private static final int VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED = 1 << 12;
@@ -97,11 +98,54 @@ final class RearVirtualCast {
         b.controlledStartActionGate = targetActionGate;
         b.expectedBaseComponent = canonicalComponent(expectedCandidateBaseComponent);
         if (a.freezeGuard == null) {
+            b.preparedWithoutReader = true;
             b.close("previous_freeze_guard_unavailable", false);
             throw new IllegalStateException("previous_freeze_guard_unavailable");
         }
-        b.freezeGuard = a.freezeGuard;
-        b.ownsFreezeGuard = false;
+        return prepareReplacementOutput(a, b, operationId, ownerGeneration, true);
+    }
+
+    String prepareNotificationReplacement(String previousId, long previousGeneration, Surface surface,
+            String reader, int host, int density, String packageName, IBinder owner, IRearGestureListener gestures,
+            String viewport, boolean compatibility, int rotation, boolean full, IRearNotificationTarget action,
+            boolean locked, boolean homeOnly, ISceneTaskActionGate gate) throws Exception {
+        if (!BuildConfig.VIRTUAL_CAST_ENABLED || action == null || !action.asBinder().isBinderAlive()
+                || gate == null || (homeOnly && !locked))
+            throw new SecurityException("Invalid notification replacement");
+        String sourcePackage = VirtualCastRequest.packageName(packageName);
+        if (BuildConfig.APPLICATION_ID.equals(sourcePackage))
+            throw new SecurityException("Invalid notification source");
+        Session a = current;
+        if (a == null || !a.id.equals(previousId) || a.generation != previousGeneration || a.closed
+                || !a.outputAvailable || a.inputId.isEmpty() || host != a.host || !a.reader.equals(reader)
+                || owner == null || !owner.equals(a.owner) || !owner.isBinderAlive()
+                || surface == null || !surface.isValid() || !actionCurrent(gate)
+                || a.physicalRearId != RearDisplay.requireId() || !a.physicalIdentity.equals(RearDisplay.identity())
+                || !service.isTaskOnDisplay(host, a.physicalRearId) || !taskBaseStillMatches(a, a.baseComponent))
+            throw new IllegalStateException("stale_notification_replacement_owner");
+        VirtualCastRequest.density(Integer.toString(density));
+        RearCastViewport.validateContentRotation(rotation);
+        RearCastViewport safe = RearCastGeometry.read();
+        JSONObject plan = new JSONObject(renderPlanForPackage(sourcePackage, density, compatibility, full));
+        if (!safe.samePhysicalArea(a.safeViewport)
+                || !RearCastGeometry.decode(plan.toString()).renderKey()
+                        .equals(RearCastGeometry.decode(viewport).renderKey()))
+            throw new IllegalStateException("notification_replacement_geometry_changed");
+        Session b = new Session(surface, reader, -1, host, density, null, owner, gestures, safe,
+                plan.getInt("renderDensity"), compatibility, rotation, full, null, 0L, null, false,
+                new NotificationTarget(sourcePackage, action, locked, homeOnly));
+        b.controlledStartActionGate = gate;
+        b.notificationReplacementCandidate = true;
+        return prepareReplacementOutput(a, b, null, 0L, !locked || homeOnly);
+    }
+
+    private String prepareReplacementOutput(Session a, Session b, String operationId, long ownerGeneration,
+            boolean protectPackage) throws Exception {
+        b.preparedWithoutReader = true;
+        if (protectPackage && a.freezeGuard != null) {
+            b.freezeGuard = a.freezeGuard;
+            b.ownsFreezeGuard = false;
+        }
         Replacement transaction = new Replacement(a, b, operationId, ownerGeneration);
         boolean reserved;
         synchronized (this) {
@@ -114,13 +158,16 @@ final class RearVirtualCast {
             throw new IllegalStateException("replacement_busy_or_stale");
         }
         try {
-            a.freezeGuard.includePackage(b.packageName);
+            if (!b.ownsFreezeGuard) b.freezeGuard.includePackage(b.packageName);
             synchronized (this) {
                 if (replacement != transaction || current != a || a.closed || transaction.cancelled)
                     throw new IllegalStateException("replacement_cancelled_during_guard_prepare");
             }
             b.begin(false);
-            if (b.baseComponent == null || !canonicalComponent(b.baseComponent).equals(b.expectedBaseComponent))
+            if (b.notificationTarget != null) b.expectedBaseComponent = b.baseComponent;
+            if (b.baseComponent == null || (b.notificationTarget != null
+                    ? !b.belongsToNotificationSource(b.baseComponent)
+                    : !canonicalComponent(b.baseComponent).equals(b.expectedBaseComponent)))
                 throw new IllegalStateException("replacement_candidate_component_changed");
             android.util.Log.i("RearVirtualCast", "replacement_prepared token=" + transaction.token
                     + " previous=" + a.id + " task=" + b.task + " display=" + b.display);
@@ -128,7 +175,7 @@ final class RearVirtualCast {
         } catch (Exception failure) {
             b.close("replacement_prepare_failed: " + root(failure), false);
             synchronized (this) { if (replacement == transaction) replacement = null; }
-            if (current == a && !a.closed && a.freezeGuard != null) {
+            if (!b.ownsFreezeGuard && current == a && !a.closed && a.freezeGuard != null) {
                 try { a.freezeGuard.setPackages(new String[]{a.packageName}); }
                 catch (Exception rollback) { CompatibilityDiagnostics.record("freeze_guard_package_rollback_failed", rollback.toString()); }
             }
@@ -217,13 +264,20 @@ final class RearVirtualCast {
                 return "candidate_input_commit_unverified";
             }
             tx.next.inputId = tx.previous.inputId;
+            tx.next.readerId = tx.previous.readerId;
+            tx.next.readerGeneration = tx.previous.readerGeneration;
+            tx.next.preparedWithoutReader = false;
+            tx.previous.inputTransferredAway = true;
             tx.previous.inputId = "";
-            tx.next.freezeGuard = tx.previous.freezeGuard;
-            tx.next.ownsFreezeGuard = tx.previous.ownsFreezeGuard;
-            tx.previous.freezeGuard = null;
-            tx.previous.ownsFreezeGuard = false;
+            if (!tx.next.ownsFreezeGuard) {
+                tx.next.freezeGuard = tx.previous.freezeGuard;
+                tx.next.ownsFreezeGuard = tx.previous.ownsFreezeGuard;
+                tx.previous.freezeGuard = null;
+                tx.previous.ownsFreezeGuard = false;
+            }
             current = tx.next;
             replacement = null;
+            tx.next.notificationReplacementCommitted = tx.next.notificationReplacementCandidate;
             tx.next.activate();
         }
         tx.previous.close("replaced", false);
@@ -268,21 +322,26 @@ final class RearVirtualCast {
             Session a = tx.previous, b = tx.next;
             if (replacement != tx || current != a || a.closed || b.closed || tx.cancelled
                     || !a.owner.isBinderAlive() || !b.owner.isBinderAlive()
-                    || a.coordinatorOwnerGeneration <= 0 || b.coordinatorOwnerGeneration != tx.ownerGeneration
-                    || !tx.operationId.equals(b.coordinatorOperationId)
+                    || (b.notificationTarget == null && (a.coordinatorOwnerGeneration <= 0
+                        || b.coordinatorOwnerGeneration != tx.ownerGeneration
+                        || !tx.operationId.equals(b.coordinatorOperationId)))
+                    || (b.notificationTarget != null && (!actionCurrent(b.controlledStartActionGate)
+                        || !b.notificationTarget.action.mayVerifyLaunch(b.display)))
                     || !RearDisplay.identity().equals(a.physicalIdentity)
                     || !a.physicalIdentity.equals(b.physicalIdentity)
                     || a.physicalRearId != b.physicalRearId || a.physicalRearId != RearDisplay.requireId()
                     || !service.isTaskOnDisplay(a.host, a.physicalRearId)
-                    || !service.isTaskOnDisplay(a.task, a.display)
                     || !service.isTaskOnDisplay(b.host, b.physicalRearId)
-                    || !service.isTaskOnDisplay(b.task, b.display)
-                    || !canonicalComponent(a.baseComponent).equals(canonicalComponent(
-                        service.getTaskBaseComponent(a.task, a.display)))
-                    || !canonicalComponent(b.expectedBaseComponent).equals(canonicalComponent(
-                        service.getTaskBaseComponent(b.task, b.display)))) return false;
+                    || !taskBaseStillMatches(a, a.baseComponent)
+                    || !taskBaseStillMatches(b, b.expectedBaseComponent)) return false;
             return true;
         } catch (Exception unavailable) { return false; }
+    }
+
+    private boolean taskBaseStillMatches(Session session, String expected) throws Exception {
+        String base = canonicalComponent(expected);
+        return !base.isEmpty() && service.isTaskOnDisplay(session.task, session.display)
+                && base.equals(canonicalComponent(service.getTaskBaseComponent(session.task, session.display)));
     }
 
     private static boolean sameGate(ISceneTaskActionGate left, ISceneTaskActionGate right) {
@@ -292,6 +351,10 @@ final class RearVirtualCast {
     private static boolean actionCurrent(ISceneTaskActionGate gate) {
         try { return gate != null && gate.isCurrent(); }
         catch (RemoteException unavailable) { return false; }
+    }
+
+    static boolean ownsReaderAtClose(boolean preparedWithoutReader, boolean inputTransferredAway) {
+        return !preparedWithoutReader && !inputTransferredAway;
     }
 
     private static String canonicalComponent(String value) {
@@ -466,6 +529,17 @@ final class RearVirtualCast {
                 || !packageName.equals(candidate.topPackage) || !Boolean.TRUE.equals(candidate.visible)
                 || !Boolean.TRUE.equals(candidate.requested) || !Boolean.FALSE.equals(candidate.sleeping)) return -1;
         return candidate.taskId;
+    }
+
+    static boolean isExactLockedRecoveryHost(RearDisplayCastOccupancy.Snapshot snapshot, int hostTask) {
+        String component = BuildConfig.APPLICATION_ID + "/" + VirtualRearHostActivity.class.getName();
+        for (RearDisplayCastOccupancy.Task entry : snapshot.tasks) {
+            if (entry.taskId == hostTask)
+                return entry.userId == 0
+                        && component.equals(RearDisplayCastOccupancyReader.canonicalComponent(entry.baseComponent))
+                        && component.equals(RearDisplayCastOccupancyReader.canonicalComponent(entry.topComponent));
+        }
+        return false;
     }
 
     private static Map<Integer, Integer> runningTaskDisplays() throws Exception {
@@ -650,7 +724,6 @@ final class RearVirtualCast {
                        ISceneTaskActionGate actionGate) throws Exception {
         Session s = current;
         if (s == null || id == null || !s.id.equals(id)) return "stale_session";
-        if (action != RECOVERY_WAKE_REAR && action != RECOVERY_PRESENT_HOST) return "invalid_action";
         return s.recoverHost(hostTask, rearDisplayId, action, actionGate);
     }
     void dismissMenu(String id) throws Exception {
@@ -754,6 +827,7 @@ final class RearVirtualCast {
         volatile IPhysicalCastReaderLifecycle physicalReaderLifecycle;
         volatile ISceneTaskActionGate controlledStartActionGate;
         volatile boolean beginning, closeRequested;
+        private volatile boolean preparedWithoutReader, inputTransferredAway;
         String sizePolicy = "disabled";
         RearVirtualIme keyboard;
         private boolean focusRequestLogged;
@@ -762,6 +836,7 @@ final class RearVirtualCast {
         boolean ownsFreezeGuard = true;
         boolean deferLauncherRestore;
         boolean launcherEntry;
+        boolean notificationReplacementCandidate, notificationReplacementCommitted;
         int display = -1;
         volatile int contentRotation;
         RearTrustedVirtualDisplay outputDisplay;
@@ -855,6 +930,9 @@ final class RearVirtualCast {
             } else if (component != null || notificationTarget != null) {
                 ensureControlledStartCurrent("before_target_launch");
                 if (notificationTarget != null) {
+                    // A PendingIntent may reuse an existing task despite its display option.
+                    // Do not let a replacement move the task we are promising to preserve.
+                    if (notificationReplacementCandidate) snapshotBeforeNotificationLaunch(true);
                     if (!physicalIdentity.equals(RearDisplay.identity())
                             || !(BuildConfig.APPLICATION_ID + ":" + host).equals(service.getForegroundAppOnDisplay(physicalRearId))
                             || !notificationTarget.action.launch(display))
@@ -871,6 +949,9 @@ final class RearVirtualCast {
                         found = service.isTaskOnDisplay(task, display);
                         if (found && disposableWallpaperCast && tasksBeforeDisposableLaunch.containsKey(task))
                             throw new IOException("parked_wallpaper_not_a_new_task");
+                        if (found && notificationReplacementCandidate
+                                && tasksBeforeDisposableLaunch.getOrDefault(task, 0) != 0)
+                            throw new IOException("rear_notification_replacement_reused_task");
                         if (found) break;
                     }
                     Thread.sleep(100);
@@ -957,7 +1038,8 @@ final class RearVirtualCast {
         }
 
         private boolean usesDisposableOutput() {
-            return disposableWallpaperCast || lockedNotification();
+            return disposableWallpaperCast || lockedNotification()
+                    || (notificationReplacementCandidate && !notificationReplacementCommitted);
         }
 
         private void createOutputDisplay(String displayName) throws Exception {
@@ -994,17 +1076,20 @@ final class RearVirtualCast {
             enableLocalIme();
         }
 
-        private void enableLocalIme() {
+        private boolean enableLocalIme() {
             try {
                 RearVirtualIme localIme = RearVirtualIme.enable(display, physicalRearId);
                 // Temporary lock-screen launches use Android's normal window focus. They do
                 // not take part in the regular cast's focus handoff or task return to main.
-                if (!usesDisposableOutput()) keyboard = localIme;
+                if (!usesDisposableOutput() || (notificationReplacementCandidate && !lockedNotification()))
+                    keyboard = localIme;
                 CompatibilityDiagnostics.record("virtual_ime_policy", "display=" + display + " state=local");
+                return true;
             } catch (Exception e) {
                 CompatibilityDiagnostics.record("virtual_ime_policy",
                         "display=" + display + " state=unavailable reason=" + root(e));
                 // The cast remains usable by touch on ROMs without local IME support.
+                return false;
             }
         }
 
@@ -1031,12 +1116,19 @@ final class RearVirtualCast {
         }
 
         private boolean snapshotBeforeNotificationLaunch() throws Exception {
+            return snapshotBeforeNotificationLaunch(false);
+        }
+
+        private boolean snapshotBeforeNotificationLaunch(boolean rejectNonPrimarySourceTask) throws Exception {
             Map<Integer, Integer> placement = new HashMap<>();
             boolean sourceHasTask = false;
             for (SceneTaskIdentity.Record row : RearSystemBridge.runningTaskSnapshot()) {
                 placement.put(row.taskId, row.displayId);
-                if (belongsToNotificationSource(row.baseComponent) || belongsToNotificationSource(row.topComponent))
+                if (belongsToNotificationSource(row.baseComponent) || belongsToNotificationSource(row.topComponent)) {
+                    if (rejectNonPrimarySourceTask && row.displayId != 0)
+                        throw new IOException("rear_notification_replacement_source_already_running");
                     sourceHasTask = true;
+                }
             }
             tasksBeforeDisposableLaunch = placement;
             return sourceHasTask;
@@ -1069,9 +1161,16 @@ final class RearVirtualCast {
             }
             requireCurrentLockedNotification();
             if (notificationTarget.homeOnly) {
-                // The first natural focus must see LOCAL, not HIDE. This touches only the
-                // disposable display and never requests focus or changes keyguard.
-                enableLocalIme();
+                // Keep the approved app responsive while its independent task runs under keyguard.
+                // The session releases this package lease on exit or failed startup.
+                if (freezeGuard == null) freezeGuard = RearAppFreezeGuard.start(packageName);
+                requireCurrentLockedNotification();
+                // Establish a local input target before the first app window can request IME
+                // visibility. The empty helper window lives only on this approved, disposable VD.
+                if (enableLocalIme()) {
+                    requireCurrentLockedNotification();
+                    seedLockedNotificationIme(displayName);
+                }
                 requireCurrentLockedNotification();
             }
             if (!notificationTarget.action.launchSource(display))
@@ -1079,6 +1178,20 @@ final class RearVirtualCast {
             if (!awaitLockedNotificationTarget())
                 throw new IOException("rear_notification_source_unavailable");
             notificationRoute = notificationTarget.homeOnly ? "approved_source_home" : "source_launcher";
+        }
+
+        private void seedLockedNotificationIme(String displayName) throws InterruptedException {
+            try {
+                boolean started = RearImeStartupFocus.seedLockedHome(display, displayName);
+                CompatibilityDiagnostics.record("virtual_ime_locked_start",
+                        "display=" + display + " state=" + (started ? "seed_window_started" : "seed_window_unverified"));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            } catch (Exception unavailable) {
+                CompatibilityDiagnostics.record("virtual_ime_locked_start",
+                        "display=" + display + " state=seed_window_unavailable");
+            }
         }
 
         private boolean awaitLockedNotificationTarget() throws Exception {
@@ -1206,7 +1319,6 @@ final class RearVirtualCast {
             };
         }
         private void renewFreezeProtection() throws Exception {
-            // Locked notification casts do not acquire a freeze guard.
             if (freezeGuard != null) freezeGuard.renew();
         }
 
@@ -1557,18 +1669,24 @@ final class RearVirtualCast {
         }
         String recoverHost(int requestedHost, int rearDisplayId, int action,
                            ISceneTaskActionGate actionGate) throws Exception {
-            if (action != RECOVERY_WAKE_REAR && action != RECOVERY_PRESENT_HOST) return "invalid_action";
+            boolean lockedPresentation = action == RECOVERY_PRESENT_LOCKED_HOST;
+            boolean present = action == RECOVERY_PRESENT_HOST || lockedPresentation;
+            if (action != RECOVERY_WAKE_REAR && !present) return "invalid_action";
             final long generation;
             synchronized (this) {
                 if (closed || current != this || requestedHost != host || actionGate == null
                         || rearDisplayId != RearDisplay.requireId() || !owner.isBinderAlive()) return "stale_owner";
+                if (lockedPresentation && (!lockedNotification() || !notificationTarget.homeOnly
+                        || !"approved_source_home".equals(notificationRoute) || outputAvailable
+                        || rearDisplayId != physicalRearId || !physicalIdentity.equals(RearDisplay.identity())))
+                    return "locked_host_not_recoverable";
                 generation = healthGeneration.capture();
             }
             if (!service.isTaskOnDisplay(host, rearDisplayId)) return "host_not_on_rear";
             VirtualCastRecoveryForeground.Decision presentation = null;
             RearDisplayCastOccupancy.Snapshot snapshot = RearDisplayCastOccupancy.Snapshot.parse(
                     service.getDisplayCastOccupancy(rearDisplayId), rearDisplayId);
-            if (action == RECOVERY_PRESENT_HOST) {
+            if (present) {
                 presentation = VirtualCastRecoveryForeground.resolve(snapshot, rearDisplayId, host,
                         BuildConfig.APPLICATION_ID);
                 if (presentation.disposition == VirtualCastRecoveryForeground.Disposition.HOST_ALREADY_FRONT)
@@ -1577,6 +1695,9 @@ final class RearVirtualCast {
                     return recordPresentationResult(presentation, "preserved_other_task", snapshot.displayState);
                 if (presentation.disposition != VirtualCastRecoveryForeground.Disposition.FOCUS_HOST)
                     return recordPresentationResult(presentation, "foreground_unverified", snapshot.displayState);
+                if (lockedPresentation && (presentation.diagnostic.visibleLauncherRows != 1
+                        || !isExactLockedRecoveryHost(snapshot, host)))
+                    return recordPresentationResult(presentation, "locked_host_not_recoverable", snapshot.displayState);
             } else {
                 // A sleeping rear has no meaningful visible top, so require the exact owned host
                 // plus known rear launcher(s) and reject every unknown/third-party task.
@@ -1589,7 +1710,7 @@ final class RearVirtualCast {
             }
 
             int powerState = rearDisplayState(rearDisplayId);
-            if (action == RECOVERY_PRESENT_HOST) {
+            if (present) {
                 if (powerState != android.view.Display.STATE_ON)
                     return recordPresentationResult(presentation, "rear_not_on", powerState);
             } else {
@@ -1603,19 +1724,24 @@ final class RearVirtualCast {
             synchronized (this) {
                 if (closed || current != this || generation != healthGeneration.capture()
                         || !owner.isBinderAlive() || requestedHost != host || rearDisplayId != RearDisplay.requireId())
-                    return action == RECOVERY_PRESENT_HOST
+                    return present
                             ? recordPresentationResult(presentation, "stale_session", powerState) : "stale_session";
                 if (!actionGate.isCurrent())
-                    return action == RECOVERY_PRESENT_HOST
+                    return present
                             ? recordPresentationResult(presentation, "cancelled", powerState) : "cancelled";
                 int now = rearDisplayState(rearDisplayId);
                 if (action == RECOVERY_WAKE_REAR) {
+                    if (rearDisplayId != physicalRearId || !physicalIdentity.equals(RearDisplay.identity()))
+                        return "stale_panel";
                     if (!isSleepingDisplayState(now)) return now == android.view.Display.STATE_ON ? "already_on" : "rear_state_unknown";
                     return service.executeShellCommand("input -d " + rearDisplayId + " keyevent KEYCODE_WAKEUP")
                             ? "wake_requested" : "wake_rejected";
                 }
                 if (now != android.view.Display.STATE_ON)
                     return recordPresentationResult(presentation, "rear_not_on", now);
+                if (lockedPresentation && (!physicalIdentity.equals(RearDisplay.identity())
+                        || !service.isTaskOnDisplay(host, rearDisplayId) || !currentGate(actionGate)))
+                    return recordPresentationResult(presentation, "cancelled", now);
                 String result = VirtualCastRecoveryForeground.perform(presentation, host, rearDisplayId,
                         taskId -> service.executeShellCommand("am task focus " + taskId));
                 return recordPresentationResult(presentation, result, now);
@@ -1677,12 +1803,14 @@ final class RearVirtualCast {
                 touchActivityExecutor.shutdownNow();
             }
             String exactReader = inputId.isEmpty() ? readerId : inputId;
-            boolean inputStopped = input.stopAndAwait(exactReader);
-            if (inputStopped && physicalReaderLifecycle != null && !exactReader.isEmpty()) {
+            // Candidate cancellation and old-session cleanup must not stop the other session's reader.
+            boolean ownsReader = ownsReaderAtClose(preparedWithoutReader, inputTransferredAway);
+            boolean inputStopped = !ownsReader || input.stopAndAwait(exactReader);
+            if (ownsReader && inputStopped && physicalReaderLifecycle != null && !exactReader.isEmpty()) {
                 if (recordReaderLifecycle("RELEASED", exactReader, readerGeneration)) readerLifecycle = "RELEASED";
                 else inputStopped = false;
             }
-            if (inputStopped && physicalReaderLifecycle != null && exactReader.isEmpty()
+            if (ownsReader && inputStopped && physicalReaderLifecycle != null && exactReader.isEmpty()
                     && !"NO_READER".equals(readerLifecycle)) {
                 if ("NOT_REQUESTED".equals(readerLifecycle)) {
                     if (!recordReaderLifecycle("NO_READER", "", 0L)) inputStopped = false;

@@ -74,6 +74,31 @@ public class LockedRearNotificationTargetTest {
         assertFalse(wake.keepsOutput(Display.STATE_UNKNOWN, true, true, false));
     }
 
+    @Test public void onlyTheVerifiedHomeHostOnItsPhysicalRearCanRecoverOutput() {
+        assertTrue(RearNotificationCastRequest.ownsRecoverableRear(true, 1, 1));
+        assertFalse(RearNotificationCastRequest.ownsRecoverableRear(false, 1, 1));
+        assertFalse(RearNotificationCastRequest.ownsRecoverableRear(true, 1, Display.INVALID_DISPLAY));
+        assertFalse(RearNotificationCastRequest.ownsRecoverableRear(true, 1, Display.DEFAULT_DISPLAY));
+        assertFalse(RearNotificationCastRequest.ownsRecoverableRear(true, 1, VIRTUAL));
+        assertFalse(RearNotificationCastRequest.ownsRecoverableRear(true, Display.DEFAULT_DISPLAY, Display.DEFAULT_DISPLAY));
+    }
+
+    @Test public void lockedRecoveryAcceptsOnlyTheExactHostActivityInThePrimaryUser() {
+        String pkg = BuildConfig.APPLICATION_ID;
+        String host = pkg + "/" + VirtualRearHostActivity.class.getName();
+        assertTrue(exactRecoveryHost(host, host, 0));
+        assertFalse(exactRecoveryHost(host, pkg + "/.MainActivity", 0));
+        assertFalse(exactRecoveryHost(pkg + "/.MainActivity", host, 0));
+        assertFalse(exactRecoveryHost(host, host, 10));
+        assertFalse(exactRecoveryHost(host, null, 0));
+    }
+
+    @Test public void closingACandidateOrRetiredCastDoesNotStopTheLiveReader() {
+        assertFalse(RearVirtualCast.ownsReaderAtClose(true, false)); // Preview never adopted a reader.
+        assertFalse(RearVirtualCast.ownsReaderAtClose(false, true)); // Old owner after handoff.
+        assertTrue(RearVirtualCast.ownsReaderAtClose(false, false)); // Committed or ordinary owner.
+    }
+
     @Test public void persistedExitValuesAreStableAndTheDefaultIsManual() {
         assertEquals(RearNotificationExitMode.MANUAL, RearNotificationExitMode.fromValue(null));
         assertEquals(RearNotificationExitMode.MANUAL, RearNotificationExitMode.fromValue("manual"));
@@ -85,6 +110,15 @@ public class LockedRearNotificationTargetTest {
     private static int accepted(int display, int state, RearDisplayCastOccupancy.Task task) {
         return RearVirtualCast.visibleLockedNotificationTask(new RearDisplayCastOccupancy.Snapshot(
                 display, state, List.of(task), "activity_task", null), VIRTUAL, SOURCE);
+    }
+
+    private static boolean exactRecoveryHost(String base, String top, int user) {
+        String pkg = BuildConfig.APPLICATION_ID;
+        RearDisplayCastOccupancy.Task row = new RearDisplayCastOccupancy.Task(
+                41, pkg, pkg, base, top, user, false, false, false);
+        var snapshot = new RearDisplayCastOccupancy.Snapshot(1, Display.STATE_ON, List.of(row),
+                "activity_task", null);
+        return RearVirtualCast.isExactLockedRecoveryHost(snapshot, 41);
     }
 
     private static RearDisplayCastOccupancy.Task task(String base, String top, int user,

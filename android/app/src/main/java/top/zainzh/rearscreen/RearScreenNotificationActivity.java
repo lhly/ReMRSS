@@ -241,101 +241,7 @@ public class RearScreenNotificationActivity extends Activity {
         
         setNotificationClickLabel(container);
         // 依据当前通知规则关闭或在主屏打开来源应用。
-        container.setOnClickListener(v -> {
-            if (tryOpenOnRear()) return;
-            handleOrdinaryNotificationUserAction();
-            if (finishIfDismissOnly()) return;
-            long clickTime = System.currentTimeMillis();
-            Log.d(TAG, String.format("[%tT.%tL] 👆 收到点击，准备跳转 package=%s", clickTime, clickTime, packageName));
-            try {
-                Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
-                Log.d(TAG, String.format("[%tT.%tL] 🔍 getLaunchIntentForPackage -> %s", clickTime, clickTime, (launchIntent == null ? "null" : String.valueOf(launchIntent.getComponent()))));
-                if (launchIntent == null) {
-                    Log.w(TAG, String.format("[%tT.%tL] ⚠️ 无法获取启动Intent: %s", clickTime, clickTime, packageName));
-                    finish();
-                    return;
-                }
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-
-                boolean started = false;
-                // 尝试直接在主屏启动（ActivityOptions -> display=0）
-                try {
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        android.app.ActivityOptions opts = android.app.ActivityOptions.makeBasic();
-                        // setLaunchDisplayId 在部分ROM可用；若不可用将抛异常，进入fallback
-                        java.lang.reflect.Method m = android.app.ActivityOptions.class.getMethod("setLaunchDisplayId", int.class);
-                        m.invoke(opts, 0);
-                        Log.d(TAG, String.format("[%tT.%tL] 🚀 尝试ActivityOptions在display=0(主屏)启动", clickTime, clickTime));
-                        // 点亮主屏
-                        try {
-                            ITaskService tsWake = NotificationService.getTaskService();
-                            if (tsWake != null) {
-                                tsWake.executeShellCommand("// 主屏唤醒功能已移除");
-                                Log.d(TAG, String.format("[%tT.%tL] ✓ 已唤醒主屏", clickTime, clickTime));
-                            }
-                        } catch (Throwable ignored) {}
-                        startActivity(launchIntent, opts.toBundle());
-                        started = true;
-                        Log.d(TAG, String.format("[%tT.%tL] ✓ ActivityOptions主屏启动成功", clickTime, clickTime));
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, String.format("[%tT.%tL] 🔁 ActivityOptions不可用，转fallback: %s", clickTime, clickTime, t.getMessage()));
-                }
-
-                if (!started) {
-                    // 回退：使用shell在主屏启动
-                    try {
-                        String component = null;
-                        if (launchIntent.getComponent() != null) {
-                            component = launchIntent.getComponent().flattenToShortString();
-                        }
-                        if (component == null) {
-                            // 解析默认LAUNCHER Activity
-                            android.content.pm.PackageManager pm = getPackageManager();
-                            Intent resolve = new Intent(Intent.ACTION_MAIN);
-                            resolve.addCategory(Intent.CATEGORY_LAUNCHER);
-                            resolve.setPackage(packageName);
-                            android.content.pm.ResolveInfo ri = pm.resolveActivity(resolve, 0);
-                            if (ri != null && ri.activityInfo != null) {
-                                component = ri.activityInfo.packageName + "/" + ri.activityInfo.name;
-                            }
-                        }
-                        Log.d(TAG, String.format("[%tT.%tL] 🧭 解析到组件: %s", clickTime, clickTime, String.valueOf(component)));
-                        if (component != null) {
-                            ITaskService ts = NotificationService.getTaskService();
-                            if (ts != null) {
-                                // 先唤醒主屏
-                                try {
-                                    ts.executeShellCommand("// 主屏唤醒功能已移除");
-                                    Log.d(TAG, String.format("[%tT.%tL] ✓ 已唤醒主屏", clickTime, clickTime));
-                                } catch (Throwable ignored) {}
-                                String cmd = "am start --display 0 -n " + component;
-                                boolean ok = ts.executeShellCommand(cmd);
-                                if (!ok) {
-                                    // 有些ROM不支持 --display 0，退化为默认显示
-                                    cmd = "am start -n " + component;
-                                    ok = ts.executeShellCommand(cmd);
-                                    Log.d(TAG, String.format("[%tT.%tL] 🔁 改为默认显示启动，结果=%s", clickTime, clickTime, ok));
-                                }
-                                Log.d(TAG, String.format("[%tT.%tL] ✓ Fallback shell主屏启动%s 组件=%s", clickTime, clickTime, ok ? "成功" : "失败", component));
-                                started = ok;
-                            } else {
-                                Log.w(TAG, String.format("[%tT.%tL] ⚠️ TaskService为空，无法shell启动", clickTime, clickTime));
-                            }
-                        }
-                    } catch (Throwable t) {
-                        Log.w(TAG, String.format("[%tT.%tL] Fallback shell start 异常: %s", clickTime, clickTime, t.getMessage()));
-                    }
-                }
-
-                Log.d(TAG, String.format("[%tT.%tL] 🧹 结束通知Activity，started=%s", clickTime, clickTime, started));
-                // 无论如何结束当前通知Activity
-                finish();
-            } catch (Exception e) {
-                Log.e(TAG, String.format("[%tT.%tL] ❌ 启动失败: %s", clickTime, clickTime, e.getMessage()), e);
-                finish();
-            }
-        });
+        container.setOnClickListener(v -> onNotificationTap());
         
         // V3.4: 根据设置的时间自动关闭
         scheduleAutomaticFinish();
@@ -490,98 +396,7 @@ public class RearScreenNotificationActivity extends Activity {
                 
                 // 设置点击事件和自动关闭
                 setNotificationClickLabel(container);
-                container.setOnClickListener(v -> {
-                    if (tryOpenOnRear()) return;
-                    handleOrdinaryNotificationUserAction();
-                    if (finishIfDismissOnly()) return;
-                    long clickTime = System.currentTimeMillis();
-                    Log.d(TAG, String.format("[%tT.%tL] 👆 收到点击，准备跳转 package=%s", clickTime, clickTime, packageName));
-                    try {
-                        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
-                        Log.d(TAG, String.format("[%tT.%tL] 🔍 getLaunchIntentForPackage -> %s", clickTime, clickTime, (launchIntent == null ? "null" : String.valueOf(launchIntent.getComponent()))));
-                        if (launchIntent == null) {
-                            Log.w(TAG, String.format("[%tT.%tL] ⚠️ 无法获取启动Intent: %s", clickTime, clickTime, packageName));
-                            finish();
-                            return;
-                        }
-                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-
-                        boolean started = false;
-                        // 尝试直接在主屏启动（ActivityOptions -> display=0）
-                        try {
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                android.app.ActivityOptions opts = android.app.ActivityOptions.makeBasic();
-                                java.lang.reflect.Method m = android.app.ActivityOptions.class.getMethod("setLaunchDisplayId", int.class);
-                                m.invoke(opts, 0);
-                                Log.d(TAG, String.format("[%tT.%tL] 🚀 尝试ActivityOptions在display=0(主屏)启动", clickTime, clickTime));
-                                // 点亮主屏
-                                try {
-                                    ITaskService tsWake = NotificationService.getTaskService();
-                                    if (tsWake != null) {
-                                        tsWake.executeShellCommand("// 主屏唤醒功能已移除");
-                                        Log.d(TAG, String.format("[%tT.%tL] ✓ 已唤醒主屏", clickTime, clickTime));
-                                    }
-                                } catch (Throwable ignored) {}
-                                startActivity(launchIntent, opts.toBundle());
-                                started = true;
-                                Log.d(TAG, String.format("[%tT.%tL] ✓ ActivityOptions主屏启动成功", clickTime, clickTime));
-                            }
-                        } catch (Throwable t) {
-                            Log.w(TAG, String.format("[%tT.%tL] 🔁 ActivityOptions不可用，转fallback: %s", clickTime, clickTime, t.getMessage()));
-                        }
-
-                        if (!started) {
-                            // 回退：使用shell在主屏启动
-                            try {
-                                String component = null;
-                                if (launchIntent.getComponent() != null) {
-                                    component = launchIntent.getComponent().flattenToShortString();
-                                }
-                                if (component == null) {
-                                    // 解析默认LAUNCHER Activity
-                                    android.content.pm.PackageManager pm = getPackageManager();
-                                    Intent resolve = new Intent(Intent.ACTION_MAIN);
-                                    resolve.addCategory(Intent.CATEGORY_LAUNCHER);
-                                    resolve.setPackage(packageName);
-                                    android.content.pm.ResolveInfo ri = pm.resolveActivity(resolve, 0);
-                                    if (ri != null && ri.activityInfo != null) {
-                                        component = ri.activityInfo.packageName + "/" + ri.activityInfo.name;
-                                    }
-                                }
-                                Log.d(TAG, String.format("[%tT.%tL] 🧭 解析到组件: %s", clickTime, clickTime, String.valueOf(component)));
-                                if (component != null) {
-                                    ITaskService ts = NotificationService.getTaskService();
-                                    if (ts != null) {
-                                        // 先唤醒主屏
-                                        try {
-                                            ts.executeShellCommand("// 主屏唤醒功能已移除");
-                                            Log.d(TAG, String.format("[%tT.%tL] ✓ 已唤醒主屏", clickTime, clickTime));
-                                        } catch (Throwable ignored) {}
-                                        String cmd = "am start --display 0 -n " + component;
-                                        boolean ok = ts.executeShellCommand(cmd);
-                                        if (!ok) {
-                                            cmd = "am start -n " + component;
-                                            ok = ts.executeShellCommand(cmd);
-                                            Log.d(TAG, String.format("[%tT.%tL] 🔁 改为默认显示启动，结果=%s", clickTime, clickTime, ok));
-                                        }
-                                        Log.d(TAG, String.format("[%tT.%tL] ✓ Fallback shell主屏启动%s 组件=%s", clickTime, clickTime, ok ? "成功" : "失败", component));
-                                        started = ok;
-                                    } else {
-                                        Log.w(TAG, String.format("[%tT.%tL] ⚠️ TaskService为空，无法shell启动", clickTime, clickTime));
-                                    }
-                                }
-                            } catch (Throwable t) {
-                                Log.w(TAG, String.format("[%tT.%tL] Fallback shell start 异常: %s", clickTime, clickTime, t.getMessage()));
-                            }
-                        }
-
-                        Log.d(TAG, String.format("[%tT.%tL] 🧹 结束通知Activity，started=%s", clickTime, clickTime, started));
-                        finish();
-                    } catch (Exception e) {
-                        Log.e(TAG, String.format("[%tT.%tL] ❌ 启动失败: %s", clickTime, clickTime, e.getMessage()), e);
-                        finish();
-                    }
-                });
+                container.setOnClickListener(v -> onNotificationTap());
                 
                 // V3.4: 根据设置的时间自动关闭
                 if (!renderSessionGate.markRendered(acceptedAnimationId)) {
@@ -811,21 +626,54 @@ public class RearScreenNotificationActivity extends Activity {
 
     private long pendingRearOpenSession = Long.MIN_VALUE;
 
-    private boolean tryOpenOnRear() {
-        if (isOwnedNotification()) return false;
-        var settings = getSharedPreferences("mrss_settings", MODE_PRIVATE);
-        if (!BuildConfig.VIRTUAL_CAST_ENABLED || settings.getBoolean("notification_dismiss_only", false)
-                || !settings.getBoolean(RearNotificationCastRequest.PREF, false)) return false;
-        if (!isRearPresentationReadyOnMain() || pendingRearOpenSession == acceptedAnimationId) return true;
+    private void onNotificationTap() {
+        switch (notificationTapEffect()) {
+            case DISMISS:
+                handleOrdinaryNotificationUserAction();
+                finishAcceptedSession(acceptedAnimationId);
+                return;
+            case OPEN_REAR:
+                openOnRear();
+                return;
+            case REPLACE_REAR:
+                // The full-screen reminder can cover a Scene or physical projection. Only
+                // the virtual host can replace its own live output without stopping it first.
+                showRearOpenMessage(R.string.rear_notification_open_busy);
+                return;
+            case OPEN_MAIN:
+                if (NotificationMainLaunch.open(this, packageName)) {
+                    handleOrdinaryNotificationUserAction();
+                    finish();
+                } else {
+                    showRearOpenMessage(R.string.ui_notification_click_main_unavailable);
+                }
+        }
+    }
+
+    private NotificationTapAction.Effect notificationTapEffect() {
+        if (isOwnedNotification()) return NotificationTapAction.Effect.OPEN_MAIN;
+        return NotificationTapAction.read(getSharedPreferences("mrss_settings", MODE_PRIVATE))
+                .effect(rearBusyUnderNotification());
+    }
+
+    private boolean rearBusyUnderNotification() {
+        return rearTaskId > 0 || RearScreenKeeperService.isPhysicalCastRunning();
+    }
+
+    private void openOnRear() {
+        if (!BuildConfig.VIRTUAL_CAST_ENABLED || android.os.Build.VERSION.SDK_INT < 33) {
+            showRearOpenMessage(R.string.ui_notification_click_rear_unsupported);
+            return;
+        }
+        if (!isRearPresentationReadyOnMain() || pendingRearOpenSession == acceptedAnimationId) return;
         boolean locked = RearNotificationCastRequest.lockedWithPrimaryInactive(this);
         if (!locked && !RearNotificationCastRequest.unlocked(this)) {
             showRearOpenMessage(R.string.rear_notification_open_unavailable);
-            return true;
+            return;
         }
-        // Never replace a Scene or another physical owner that is temporarily under this notice.
-        if (rearTaskId > 0 || RearScreenKeeperService.physicalCastTask() != null) {
+        if (rearBusyUnderNotification()) {
             showRearOpenMessage(R.string.rear_notification_open_busy);
-            return true;
+            return;
         }
         long sessionId = acceptedAnimationId;
         pendingRearOpenSession = sessionId;
@@ -841,7 +689,6 @@ public class RearScreenNotificationActivity extends Activity {
         lifecycleHandler.postDelayed(rejected, locked ? 14_000L : 9_000L);
         NotificationService.prepareRearNotificationCast(sessionId, currentDisplayId(), getTaskId(),
                 android.os.SystemClock.uptimeMillis(), locked, rejected);
-        return true;
     }
 
     private void showRearOpenMessage(int label) {
@@ -854,19 +701,22 @@ public class RearScreenNotificationActivity extends Activity {
     }
 
     private void setNotificationClickLabel(View container) {
-        boolean dismissOnly = getSharedPreferences("mrss_settings", MODE_PRIVATE).getBoolean("notification_dismiss_only", false);
-        int label = NotificationDisplayOptions.shouldLaunchSourceApp(isOwnedNotification(), dismissOnly)
-                ? R.string.ui_notification_click_open : R.string.ui_notification_click_dismiss;
+        NotificationTapAction.Effect effect = notificationTapEffect();
+        int label;
+        switch (effect) {
+            case OPEN_REAR:
+            case REPLACE_REAR:
+                label = R.string.ui_notification_click_open_rear;
+                break;
+            case DISMISS:
+                label = R.string.ui_notification_click_dismiss;
+                break;
+            default:
+                label = R.string.ui_notification_click_open;
+        }
         androidx.core.view.ViewCompat.replaceAccessibilityAction(container,
                 androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_CLICK,
                 getString(label), (view, arguments) -> view.performClick());
-    }
-
-    private boolean finishIfDismissOnly() {
-        boolean dismissOnly = getSharedPreferences("mrss_settings", MODE_PRIVATE).getBoolean("notification_dismiss_only", false);
-        if (NotificationDisplayOptions.shouldLaunchSourceApp(isOwnedNotification(), dismissOnly)) return false;
-        finishAcceptedSession(acceptedAnimationId);
-        return true;
     }
 
     private void finishAcceptedSession(long expectedSession) {

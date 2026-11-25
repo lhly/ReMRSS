@@ -113,7 +113,7 @@ public final class RearCameraGapProbeInstrumentation extends Instrumentation {
                         ((RearCameraGapBatteryController) field.get(hostActivity)).close();
                         RearCameraGapBatteryController candidate = new RearCameraGapBatteryController(hostActivity, layer,
                                 RearCameraGapGeometry.candidate(Build.DEVICE));
-                        field.set(hostActivity, candidate); candidate.visible(true);
+                        field.set(hostActivity, candidate);
                         java.lang.reflect.Method update = VirtualRearHostActivity.class.getDeclaredMethod("updateCameraGapBattery");
                         update.setAccessible(true); update.invoke(hostActivity);
                     } catch (ReflectiveOperationException e) { throw new RuntimeException(e); }

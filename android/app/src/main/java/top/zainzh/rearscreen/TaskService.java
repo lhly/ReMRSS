@@ -32,8 +32,8 @@ public class TaskService extends ITaskService.Stub {
     private static final java.util.regex.Pattern NOTIFICATION_LAUNCH = PrivilegedShellArguments.notificationLaunchPrefix(
             BuildConfig.APPLICATION_ID + "/" + RearScreenNotificationActivity.class.getName());
     // Replace the resident backend so an in-place update uses the new locked-home IME routing.
-    static final int USER_SERVICE_CONTRACT_VERSION = 112;
-    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 116 : USER_SERVICE_CONTRACT_VERSION;
+    static final int USER_SERVICE_CONTRACT_VERSION = 115;
+    static final int RUNTIME_USER_SERVICE_VERSION = BuildConfig.DEBUG ? 119 : USER_SERVICE_CONTRACT_VERSION;
     private final Object mainTaskFocusLock = new Object();
     @Override public String getRearDisplayState() { return RearDisplay.state(); }
     @Override public String getCompatibilityDiagnostics() {
@@ -174,6 +174,21 @@ public class TaskService extends ITaskService.Stub {
             return virtualCast.startNotification(surface, path, host, density, packageName, owner, gestures,
                     viewport, compatibility, rotation, full, target, true, true);
         } catch (Exception e) { throw new IllegalStateException("Locked notification homepage startup", e); }
+    }
+
+    @Override public String prepareRearNotificationReplacement(String previousId, long previousGeneration,
+            android.view.Surface surface, String readerPath, int host, int density, String packageName,
+            android.os.IBinder owner, IRearGestureListener gestures, String viewport, boolean compatibility,
+            int rotation, boolean full, IRearNotificationTarget target, boolean locked, boolean homeOnly,
+            ISceneTaskActionGate ownerGate) {
+        if (!isHostApplicationCaller() || (homeOnly && (!AiRearWallpaperSupport.supported()
+                || android.os.Process.myUid() != 2000)))
+            throw new SecurityException("Invalid notification replacement caller");
+        try {
+            return virtualCast.prepareNotificationReplacement(previousId, previousGeneration, surface, readerPath,
+                    host, density, packageName, owner, gestures, viewport, compatibility, rotation, full,
+                    target, locked, homeOnly, ownerGate);
+        } catch (Exception e) { throw new IllegalStateException("Notification replacement prepare: " + e, e); }
     }
 
     @Override public boolean stageLockedRearNotificationHost(int rearDisplay, int noticeTask,

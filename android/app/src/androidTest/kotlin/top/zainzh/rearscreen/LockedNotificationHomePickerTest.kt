@@ -48,9 +48,10 @@ class LockedNotificationHomePickerTest {
         fun render(lockedHome: Boolean) {
             compose.runOnUiThread {
                 model?.destroy()
-                val selectedMode = AppPickerModel(activity, null, Runnable {}, lockedHome)
+                val modal = MiuixDialogUi(activity)
+                val selectedMode = AppPickerModel(activity, null, Runnable {}, lockedHome, modal, Runnable {})
                 model = selectedMode
-                activity.setContentView(ComposeView(activity).apply {
+                val picker = ComposeView(activity).apply {
                     setContent {
                         AppTheme {
                             // The real settings route applies system-bar insets outside the picker.
@@ -60,6 +61,10 @@ class LockedNotificationHomePickerTest {
                             }
                         }
                     }
+                }
+                activity.setContentView(android.widget.FrameLayout(activity).apply {
+                    addView(picker, android.widget.FrameLayout.LayoutParams(-1, -1))
+                    addView(modal.view, android.widget.FrameLayout.LayoutParams(-1, -1))
                 })
             }
             compose.waitUntil(5_000) { model?.loading == false }
@@ -72,7 +77,17 @@ class LockedNotificationHomePickerTest {
             compose.onNodeWithText(label).assertExists()
             compose.onNodeWithText(activity.getString(R.string.ui_select_all)).assertDoesNotExist()
             scrollToFixture()
-            fixtureCheckbox().assertIsDisplayed().assertIsOff().performClick().assertIsOn()
+            fixtureCheckbox().assertIsDisplayed().assertIsOff().performClick()
+            if (AiRearWallpaperSupport.shellReady(activity)) {
+                fixtureCheckbox().assertIsOn()
+            } else {
+                compose.onNodeWithText(activity.getString(R.string.ui_notification_locked_home_shizuku_required)).assertExists()
+                compose.onNodeWithText(activity.getString(R.string.ui_cancel)).performClick()
+                fixtureCheckbox().assertIsOff()
+                assertEquals(emptySet<String>(), prefs.getStringSet(homeKey, emptySet()))
+                // Seed an existing grant to exercise removal independently of the device backend.
+                prefs.edit().putStringSet(homeKey, setOf(fixture)).commit()
+            }
             assertEquals(setOf(fixture), prefs.getStringSet(homeKey, emptySet()))
             assertEquals(sources, prefs.getStringSet(sourceKey, emptySet()))
             render(lockedHome = true)
@@ -82,6 +97,12 @@ class LockedNotificationHomePickerTest {
             render(lockedHome = false)
             scrollToFixture()
             fixtureCheckbox().assertIsOn().performClick()
+            compose.onNodeWithText(activity.getString(R.string.ui_notification_disable_source_revokes_home)).assertExists()
+            compose.onNodeWithText(activity.getString(R.string.ui_cancel)).performClick()
+            assertEquals(sources, prefs.getStringSet(sourceKey, emptySet()))
+            assertEquals(setOf(fixture), prefs.getStringSet(homeKey, emptySet()))
+            fixtureCheckbox().assertIsOn().performClick()
+            compose.onNodeWithText(activity.getString(R.string.ui_notification_disable_source_confirm)).performClick()
             assertEquals(setOf("dev.remrss.sample.not_installed"), prefs.getStringSet(sourceKey, emptySet()))
             assertEquals(emptySet<String>(), prefs.getStringSet(homeKey, emptySet()))
         } finally {

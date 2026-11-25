@@ -15,7 +15,7 @@ public final class FixtureCastNotificationActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setDecorFitsSystemWindows(false);
-        root = new RearCastFrameLayout(this);
+        root = new RearCastFrameLayout(this, () -> { });
         root.setBackgroundColor(getColor(R.color.remrss_background));
         output = new android.view.SurfaceView(this);
         output.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {

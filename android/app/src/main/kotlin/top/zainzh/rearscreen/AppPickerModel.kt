@@ -40,11 +40,13 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 
 /** Data and lifecycle for the Miuix app picker; preferences remain compatible with services. */
-class AppPickerModel(
+class AppPickerModel @JvmOverloads constructor(
     private val activity: MainActivity,
     saved: Bundle?,
     private val back: Runnable,
     internal val lockedHome: Boolean,
+    private val modal: MiuixDialogUi? = null,
+    private val openPermissions: Runnable? = null,
 ) {
     internal data class App(val info: ApplicationInfo, val name: String, val system: Boolean)
     private val preferences = activity.getSharedPreferences("mrss_settings", Context.MODE_PRIVATE)
@@ -110,12 +112,45 @@ class AppPickerModel(
     internal val canInteract: Boolean get() = !destroyed
     internal fun renderState() = AppPickerRenderState(apps, selected, includeSystem, searchInput, loading, failure, list)
     internal fun choose(packages: List<String>, enabled: Boolean) {
-        if (lockedHome && (packages.size != 1 || apps.none { it.info.packageName == packages.single() })) return
-        selected = if (enabled) selected + packages else selected - packages.toSet()
+        if (destroyed) return
+        val requested = packages.toSet()
+        if (lockedHome) {
+            if (requested.size != 1 || apps.none { it.info.packageName == requested.single() }) return
+            if (enabled && !AiRearWallpaperSupport.shellReady(activity)) {
+                modal?.show(activity.getString(R.string.ui_notification_locked_home),
+                    activity.getString(R.string.ui_notification_locked_home_shizuku_required),
+                    arrayOf(activity.getString(R.string.ui_go_to_settings), activity.getString(R.string.ui_cancel)),
+                    arrayOf(openPermissions, null))
+                return
+            }
+            if (enabled && !preferences.getStringSet("notification_selected_apps", emptySet()).orEmpty()
+                    .contains(requested.single())) return
+        }
+        val affected = if (!lockedHome && !enabled) retainedLockedHomes().intersect(requested) else emptySet()
+        if (affected.isNotEmpty()) {
+            modal?.show(activity.getString(R.string.ui_notification_apps),
+                activity.getString(R.string.ui_notification_disable_source_revokes_home),
+                arrayOf(activity.getString(R.string.ui_notification_disable_source_confirm),
+                    activity.getString(R.string.ui_cancel)),
+                arrayOf(Runnable {
+                    if (destroyed) return@Runnable
+                    if (!affected.containsAll(retainedLockedHomes().intersect(requested))) choose(packages, false)
+                    else applySelection(requested, false)
+                }, null))
+            return
+        }
+        applySelection(requested, enabled)
+    }
+
+    private fun retainedLockedHomes() = preferences.getStringSet(RearNotificationCastRequest.HOME_APPS_PREF, emptySet())
+        .orEmpty()
+
+    private fun applySelection(packages: Set<String>, enabled: Boolean) {
+        val current = preferences.getStringSet(selectedKey, emptySet()).orEmpty()
+        selected = if (enabled) current + packages else current - packages
         val edit = preferences.edit().putStringSet(selectedKey, selected.toSet())
         if (!lockedHome && !enabled) {
-            val home = preferences.getStringSet(RearNotificationCastRequest.HOME_APPS_PREF, emptySet()).orEmpty()
-            edit.putStringSet(RearNotificationCastRequest.HOME_APPS_PREF, home - packages.toSet())
+            edit.putStringSet(RearNotificationCastRequest.HOME_APPS_PREF, retainedLockedHomes() - packages)
         }
         edit.apply()
     }
