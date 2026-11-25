@@ -10,15 +10,37 @@ final class RearAnimationDisplay {
     static final String EXTRA_LOCKED_REAR_PLACEMENT = "lockedRearPlacement";
 
     static void prepare(ITaskService service, RearAnimationManager.Session session, String ownPackage) throws Exception {
-        String foreground = service.getForegroundAppOnDisplay(RearDisplay.requireId());
+        int rearDisplayId = RearDisplay.requireId();
+        String foreground = service.getForegroundAppOnDisplay(rearDisplayId);
         if (foreground != null && (!foreground.startsWith(ownPackage + ":") || RearInfoSession.owns(foreground, ownPackage))
                 && !foreground.startsWith("com.xiaomi.subscreencenter:")
                 && !foreground.startsWith("com.xiaomi.mirror:")) {
             try { session.rearTaskId = Integer.parseInt(foreground.substring(foreground.lastIndexOf(':') + 1)); }
             catch (NumberFormatException ignored) { }
         }
+        if (session.rearTaskId <= 0) {
+            // A temporary overlay or the stock launcher can hide the physical cast without
+            // moving it. The live Keeper still owns the task while its monitoring is paused.
+            String physicalOwner = RearScreenKeeperService.physicalCastTask();
+            int taskId = exactPhysicalReturnTask(service, physicalOwner, rearDisplayId);
+            if (taskId > 0 && physicalOwner.equals(RearScreenKeeperService.physicalCastTask())) {
+                session.rearTaskId = taskId;
+                android.util.Log.i("RearAnimationDisplay", "physical_return_bound task=" + taskId);
+            }
+        }
         // 先唤醒，让系统退出Doze，再将动画置前。force-stop会触发官方延迟重睡眠。
-        service.executeShellCommand("input -d " + RearDisplay.requireId() + " keyevent KEYCODE_WAKEUP");
+        service.executeShellCommand("input -d " + rearDisplayId + " keyevent KEYCODE_WAKEUP");
+    }
+
+    static int exactPhysicalReturnTask(ITaskService service, String owner, int rearDisplayId)
+            throws android.os.RemoteException {
+        int split = owner == null ? -1 : owner.lastIndexOf(':');
+        if (rearDisplayId <= 0 || split <= 0 || split == owner.length() - 1) return -1;
+        int taskId;
+        try { taskId = Integer.parseInt(owner.substring(split + 1)); }
+        catch (NumberFormatException invalid) { return -1; }
+        return taskId > 0 && service.isTaskOnDisplay(taskId, rearDisplayId)
+                && owner.substring(0, split).equals(service.getPackageNameFromTaskId(taskId)) ? taskId : -1;
     }
 
     static boolean awaitForeground(ITaskService service, String component, String ownPackage,
